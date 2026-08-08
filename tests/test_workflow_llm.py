@@ -140,7 +140,7 @@ def _agent3_payload(decision: str = "accept", **overrides) -> dict:
             "dimension_scores": {
                 "request_relevance": 9,
                 "request_specificity": 8,
-                "coordination": 9,
+                "outfit_coordination": 9,
                 "wearability": 8,
                 "freshness": 7,
             },

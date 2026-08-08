@@ -1,6 +1,20 @@
 # StyleForge 问题与解决记录
 
-> 每次排查和修复按日期记录，每条包含现象、根因、修复与验证。验收证据和状态总览见[项目状态](PROJECT_STATUS.md)。最新代码回归：Pytest 122 passed，Ruff 通过。
+> 每次排查和修复按日期记录，每条包含现象、根因、修复与验证。验收证据和状态总览见[项目状态](PROJECT_STATUS.md)。最新代码回归：Pytest 134 passed，Ruff 通过。
+
+## 2026-08-06
+
+### 7. 落地五维统一评估框架（评估方案.txt v1.1）
+
+- **现象**：按《评估方案.txt》实现五维统一评估框架——让三个 Agent 共享同一评价口径，而非各自按自己的标准理解"什么是好的推荐"。
+- **实现**：
+  1. 新建 [core/rubric.py](styleforge/core/rubric.py)：五维定义（需求还原/请求特异/搭配协调/实穿/新鲜感）+ 默认权重 25/25/20/15/15 + `normalize_weights`（迭代式下限保护 0.05，sum=1）+ 统一 `rubric_text`。
+  2. [llm/schema.py](styleforge/llm/schema.py)：`RequestSignature` 新增 `explicit_style`（单独保留明确风格词）；`DimensionScores` 第三维 `coordination` → `outfit_coordination`（单品协调→搭配协调）。
+  3. 三个 Agent 的 Prompt 注入统一 Rubric（Agent 1 为五维准备信息、Agent 2 作为组合决策目标、Agent 3 正式评分）；few-shot 补 `explicit_style` 字段后真实链路正确输出 `['美拉德']`。
+  4. 用户权重配置：`user_preferences` 表启用（新增 [user_preferences_repository.py](styleforge/repositories/user_preferences_repository.py)），`evaluation_profile.weights` 读写；workflow 读取权重并贯穿三个节点与 `_critic_score`。
+  5. API `GET/PUT /preferences/{user_id}/evaluation`；UI 侧边栏"我的偏好"五维滑杆；`_render_critic` 更新维度键/标签。
+- **验证**：134 passed（新增 rubric/user_preferences 测试）；真实链路"悲惨世界"首选 score 84.0 = 用户权重加权结果（9×0.2+8×0.15+9×0.3+8×0.25+7×0.1=8.4×10），证明权重贯穿；"美拉德"请求 `explicit_style=['美拉德']`。
+- **修复**：`--no-llm` 在 `.env` 有 key 时仍重建 LLM 客户端（CLI 冒烟暴露）——`main()` 用 `dataclasses.replace(settings, llm_enabled=False)` 强制禁用。
 
 ## 2026-08-06
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from styleforge.core.rubric import normalize_weights, rubric_text
+
 PROMPT_VERSION = "2026.08.05"
 
 
@@ -24,6 +26,8 @@ _AGENT1_SYSTEM = (
     "2. request_signature.generic_tendencies_to_avoid 至少 1 条，用来防止推荐坍缩成日常基础款。\n"
     "3. candidate_requirements 六个品类配额之和不超过 60。\n"
     "4. score_weight 为 0 到 1 之间的数，core 最高。\n"
+    "5. request_signature.explicit_style 单独保留用户明确指定的风格词"
+    "（如“美拉德”“多巴胺”“薄荷曼波”），不要把它们模糊进 unique_mood。\n"
 )
 
 _AGENT2_SYSTEM = (
@@ -54,6 +58,7 @@ _AGENT3_SYSTEM = (
 _FEW_SHOT_AGENT1: dict[str, Any] = {
     "request_signature": {
         "theme": "看《悲惨世界》音乐剧",
+        "explicit_style": [],
         "unique_mood": ["悲壮", "克制", "复古文学感"],
         "practical_context": ["剧场", "久坐", "半正式"],
         "generic_tendencies_to_avoid": [
@@ -95,7 +100,7 @@ _FEW_SHOT_AGENT3: dict[str, Any] = {
         "dimension_scores": {
             "request_relevance": 9,
             "request_specificity": 8,
-            "coordination": 9,
+            "outfit_coordination": 9,
             "wearability": 8,
             "freshness": 7,
         },
@@ -124,8 +129,18 @@ def build_agent1_prompt(
     user_query: str,
     wardrobe_summary: dict[str, Any],
     recent_memories: list[dict[str, Any]],
+    weights: dict[str, float] | None = None,
 ) -> tuple[str, str]:
-    system = _AGENT1_SYSTEM
+    resolved = normalize_weights(weights)
+    rubric_note = (
+        "你为五维统一评价标准准备检索信息和候选：\n"
+        "- 需求还原度 → core 检索为主方向\n"
+        "- 请求特异性 → distinctive 检索 + unique_mood\n"
+        "- 搭配协调性 → supporting 检索为组合提供兼容单品\n"
+        "- 实穿性 → practical_context\n"
+        "- 新鲜感 → 参考近期请求记忆避免重复\n"
+    )
+    system = _AGENT1_SYSTEM + "\n" + rubric_text(resolved) + "\n" + rubric_note
     user = (
         "【用户请求】\n"
         f"{user_query}\n\n"
@@ -145,8 +160,16 @@ def build_agent2_prompt(
     request_signature: dict[str, Any],
     pool_manifest: list[dict[str, Any]],
     recent_structure_signatures: list[dict[str, Any]],
+    weights: dict[str, float] | None = None,
 ) -> tuple[str, str]:
-    system = _AGENT2_SYSTEM
+    resolved = normalize_weights(weights)
+    system = (
+        _AGENT2_SYSTEM
+        + "\n"
+        + rubric_text(resolved)
+        + "\n五维是组合取舍的决策目标（优先满足权重最高的维度），"
+        "不要求你输出五维评分，只输出搭配方案。"
+    )
     user = (
         "【用户请求】\n"
         f"{user_query}\n\n"
@@ -167,8 +190,10 @@ def build_agent3_prompt(
     user_query: str,
     request_signature: dict[str, Any],
     outfits: list[dict[str, Any]],
+    weights: dict[str, float] | None = None,
 ) -> tuple[str, str]:
-    system = _AGENT3_SYSTEM
+    resolved = normalize_weights(weights)
+    system = _AGENT3_SYSTEM + "\n" + rubric_text(resolved)
     user = (
         "【用户请求】\n"
         f"{user_query}\n\n"

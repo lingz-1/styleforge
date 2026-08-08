@@ -13,7 +13,7 @@ import argparse
 import json
 import threading
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ from styleforge.agents.critic import deterministic_critic
 from styleforge.common.console import configure_utf8_console
 from styleforge.core.categories import infer_slot
 from styleforge.core.config import Settings
+from styleforge.core.rubric import normalize_weights
 from styleforge.core.schemas import (
     CatalogItem,
     EmbeddingStatus,
@@ -143,19 +144,26 @@ def _build_by_slot(items: list[CatalogItem], task: TaskSpec) -> dict[str, list[s
     return dict(by_slot)
 
 
-def _critic_score(critic_output: dict[str, Any] | None, outfit_id: str) -> float:
+def _critic_score(
+    critic_output: dict[str, Any] | None,
+    outfit_id: str,
+    weights: dict[str, float] | None = None,
+) -> float:
     if not critic_output:
         return 0.0
     assessment = critic_output.get("outfit_assessment", {})
     if assessment.get("outfit_id") != outfit_id:
         return 0.0
     dimensions = assessment.get("dimension_scores", {})
+    resolved = normalize_weights(weights)
     weighted = (
-        0.25 * float(dimensions.get("request_relevance", 5))
-        + 0.25 * float(dimensions.get("request_specificity", 5))
-        + 0.20 * float(dimensions.get("coordination", 5))
-        + 0.15 * float(dimensions.get("wearability", 5))
-        + 0.15 * float(dimensions.get("freshness", 5))
+        resolved["request_relevance"] * float(dimensions.get("request_relevance", 5))
+        + resolved["request_specificity"]
+        * float(dimensions.get("request_specificity", 5))
+        + resolved["outfit_coordination"]
+        * float(dimensions.get("outfit_coordination", 5))
+        + resolved["wearability"] * float(dimensions.get("wearability", 5))
+        + resolved["freshness"] * float(dimensions.get("freshness", 5))
     )
     return round(weighted * 10, 2)
 
@@ -470,6 +478,7 @@ class StyleForgeWorkflow:
                 wardrobe_summary=summary,
                 recent_memories=state.get("recent_memories", []),
                 llm=self._llm_client,
+                weights=state.get("evaluation_weights"),
             )
         except BaseException as error:
             output, info, _ = self.semantic_retriever.run(
@@ -478,6 +487,7 @@ class StyleForgeWorkflow:
                 wardrobe_summary=summary,
                 recent_memories=state.get("recent_memories", []),
                 llm=None,
+                weights=state.get("evaluation_weights"),
             )
             info["reason"] = f"{type(error).__name__}: {error}"
         return {
@@ -603,6 +613,7 @@ class StyleForgeWorkflow:
                 task=task,
                 pool_items=pool_items,
                 pool_scores=pool_scores,
+                weights=state.get("evaluation_weights"),
             )
         except BaseException as error:
             proposals, info, _ = self.composer.run(
@@ -615,6 +626,7 @@ class StyleForgeWorkflow:
                 task=task,
                 pool_items=pool_items,
                 pool_scores=pool_scores,
+                weights=state.get("evaluation_weights"),
             )
             info["reason"] = f"{type(error).__name__}: {error}"
         proposal_dicts = [proposal.to_dict() for proposal in proposals]
@@ -665,6 +677,7 @@ class StyleForgeWorkflow:
                 llm=self._llm_client,
                 task=state["task"],
                 wardrobe_ids=set(state.get("wardrobe_item_ids", [])),
+                weights=state.get("evaluation_weights"),
             )
         except BaseException as error:
             critic_output = deterministic_critic(
@@ -756,11 +769,12 @@ class StyleForgeWorkflow:
         task: TaskSpec,
         critic_output: dict[str, Any] | None,
         preferred_id: str,
+        weights: dict[str, float] | None = None,
     ) -> float:
         """Score a proposal: LLM five-dimension score for the critic's pick,
         deterministic ``score_outfit`` for the alternatives."""
         if preferred_id and proposal.get("outfit_id") == preferred_id and critic_output:
-            return _critic_score(critic_output, preferred_id)
+            return _critic_score(critic_output, preferred_id, weights)
         item_list = [
             items_by_id[item_id]
             for item_id in proposal.get("item_ids", [])
@@ -804,6 +818,7 @@ class StyleForgeWorkflow:
                 task,
                 critic_output,
                 preferred_id,
+                state.get("evaluation_weights"),
             )
             candidates.append(proposal_to_candidate(proposal, items_by_id, score))
         status = "completed" if candidates else "infeasible"
@@ -907,6 +922,17 @@ class StyleForgeWorkflow:
         except BaseException:
             return []
 
+    def _load_evaluation_weights(self, user_id: str) -> dict[str, float]:
+        try:
+            from styleforge.repositories.user_preferences_repository import get_evaluation_weights
+
+            with database_session(self.database_path) as connection:
+                return get_evaluation_weights(connection, user_id)
+        except BaseException:
+            from styleforge.core.rubric import DEFAULT_EVALUATION_WEIGHTS
+
+            return dict(DEFAULT_EVALUATION_WEIGHTS)
+
     def recommend(
         self,
         *,
@@ -925,6 +951,7 @@ class StyleForgeWorkflow:
             "llm_attempts": 0,
             "fallback_count": 0,
             "recent_memories": self._load_recent_memories(user_id),
+            "evaluation_weights": self._load_evaluation_weights(user_id),
             "retriever_degraded": False,
         }
         try:
@@ -1072,8 +1099,11 @@ def main() -> None:
     configure_utf8_console()
     args = _build_parser().parse_args()
     settings = Settings.from_env()
+    if args.no_llm:
+        # Force the deterministic chain even when a key is present in .env.
+        settings = replace(settings, llm_enabled=False)
     llm_client = None
-    if not args.no_llm and settings.llm_enabled:
+    if settings.llm_enabled:
         llm_client = llm_client_from_settings(settings)
     workflow = StyleForgeWorkflow(
         database_path=args.database,

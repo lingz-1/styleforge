@@ -111,6 +111,7 @@ class CriticAgent:
         llm: Any,
         task: TaskSpec,
         wardrobe_ids: set[str],
+        weights: dict[str, float] | None = None,
     ) -> tuple[CriticOutput, dict[str, Any], LlmCallDiagnostics | None]:
         if llm is None:
             output = deterministic_critic(outfits, task, wardrobe_ids)
@@ -125,6 +126,7 @@ class CriticAgent:
                 user_query=user_query,
                 request_signature=request_signature,
                 outfits=outfits,
+                weights=weights,
             )
             payload, diagnostics = llm.chat_json(
                 system=system,

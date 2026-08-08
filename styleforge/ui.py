@@ -45,6 +45,41 @@ with st.sidebar:
             st.success(_request("GET", "/health"))
         except Exception as error:
             st.error(str(error))
+    with st.sidebar.expander("我的偏好 · 五维权重", expanded=False):
+        try:
+            current = _request(
+                "GET", f"/preferences/{user_id}/evaluation"
+            ).get("weights", {})
+        except Exception:
+            current = {}
+        dimension_labels = (
+            ("request_relevance", "需求还原", 0.25),
+            ("request_specificity", "请求特异", 0.25),
+            ("outfit_coordination", "搭配协调", 0.20),
+            ("wearability", "实穿", 0.15),
+            ("freshness", "新鲜", 0.15),
+        )
+        values: dict[str, float] = {}
+        for key, label, default in dimension_labels:
+            value = current.get(key, default)
+            try:
+                percent = int(round(float(value) * 100))
+            except (TypeError, ValueError):
+                percent = int(default * 100)
+            values[key] = (
+                st.slider(label, 0, 100, percent, key=f"evaluation-{key}") / 100
+            )
+        if st.button("保存偏好", key="save-evaluation"):
+            try:
+                _request(
+                    "PUT",
+                    f"/preferences/{user_id}/evaluation",
+                    json={"weights": values},
+                )
+                st.success("已保存，下次推荐按新权重生效")
+            except Exception as error:
+                st.error(str(error))
+        st.caption("权重影响检索侧重、组合取舍与最终评分（保存后自动归一化）。")
 
 recommend_tab, wardrobe_tab, import_tab, catalog_tab = st.tabs(
     ("穿搭建议", "我的衣柜", "订单导入", "添加目录衣物")
@@ -145,7 +180,7 @@ def _render_critic(payload: dict[str, Any]) -> None:
             (
                 ("需求还原", "request_relevance"),
                 ("请求特异", "request_specificity"),
-                ("单品协调", "coordination"),
+                ("搭配协调", "outfit_coordination"),
                 ("实穿性", "wearability"),
                 ("新鲜感", "freshness"),
             ),

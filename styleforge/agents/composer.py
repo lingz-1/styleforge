@@ -84,6 +84,7 @@ class ComposerAgent:
         task: TaskSpec | None = None,
         pool_items: list[CatalogItem] | None = None,
         pool_scores: dict[str, float] | None = None,
+        weights: dict[str, float] | None = None,
     ) -> tuple[list[OutfitProposal], dict[str, Any], LlmCallDiagnostics | None]:
         if llm is None:
             return self._fallback(
@@ -98,6 +99,7 @@ class ComposerAgent:
                 request_signature=request_signature,
                 pool_manifest=pool_manifest,
                 recent_structure_signatures=recent_structure_signatures,
+                weights=weights,
             )
             payload, diagnostics = llm.chat_json(
                 system=system,

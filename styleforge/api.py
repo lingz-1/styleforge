@@ -26,6 +26,10 @@ from styleforge.repositories.wardrobe_import_repository import (
     list_import_rows,
     personal_image_root,
 )
+from styleforge.repositories.user_preferences_repository import (
+    get_evaluation_weights,
+    save_evaluation_weights,
+)
 from styleforge.services.order_import import parse_order_workbook
 from styleforge.services.personal_embeddings import embed_personal_items
 from styleforge.services.personal_images import bind_personal_image
@@ -65,6 +69,10 @@ class WardrobeImportCommitRequest(BaseModel):
 class PersonalImageUpload(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     content_base64: str = Field(min_length=1, max_length=30_000_000)
+
+
+class EvaluationWeightsRequest(BaseModel):
+    weights: dict[str, float]
 
 
 settings = Settings.from_env()
@@ -156,6 +164,23 @@ def health() -> dict[str, Any]:
         "index_manifest_available": index_manifest.is_file(),
         "image_root_configured": bool(image_sources),
     }
+
+
+@app.get("/preferences/{user_id}/evaluation")
+def get_user_evaluation_weights(user_id: str) -> dict[str, Any]:
+    with database_session(settings.database_path) as connection:
+        weights = get_evaluation_weights(connection, user_id)
+    return {"user_id": user_id, "weights": weights}
+
+
+@app.put("/preferences/{user_id}/evaluation")
+def put_user_evaluation_weights(
+    user_id: str,
+    request: EvaluationWeightsRequest,
+) -> dict[str, Any]:
+    with database_session(settings.database_path) as connection:
+        normalized = save_evaluation_weights(connection, user_id, request.weights)
+    return {"user_id": user_id, "weights": normalized}
 
 
 @app.post("/recommendations")

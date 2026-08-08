@@ -1,0 +1,506 @@
+StyleForge v3.2.1-final
+五维统一评估框架修改案 v1.1
+
+修改性质：基于现有 StyleForge v3.2.1-final 的评价方式调整
+不修改：三 Agent 主架构、LangGraph 编排、检索/组合/评审流程
+修改核心：建立统一五维 Rubric，并让三个 Agent 在不同阶段共享同一评价口径。
+
+一、修改目标
+
+当前 StyleForge 的核心链路仍然保持：
+
+Semantic Retrieval Agent
+        ↓
+Outfit Composer Agent
+        ↓
+Outfit Critic Agent
+
+本修改案不改变这一架构。
+
+主要解决的问题是：
+
+三个 Agent 不能分别按照自己的标准理解“什么是好的推荐”。
+
+因此建立统一的五维评价框架：
+
+① 需求还原度 Request Relevance
+② 请求特异性 Request Specificity
+③ 搭配协调性 Outfit Coordination
+④ 实穿性 Wearability
+⑤ 新鲜感 Freshness
+
+这五个维度既用于最终 Critic 评价，也作为 Agent 1 和 Agent 2 的决策依据。
+
+二、统一五维 Rubric
+维度	英文	核心问题
+需求还原度	Request Relevance	推荐是否真正满足用户完整需求？
+请求特异性	Request Specificity	推荐是否真正针对当前请求，而非泛化日常搭配？
+搭配协调性	Outfit Coordination	各单品组合后是否形成协调完整的穿搭？
+实穿性	Wearability	方案在真实场景中是否合理可穿？
+新鲜感	Freshness	是否避免近期推荐的机械重复？
+
+默认权重仍然保持：
+
+{
+  "request_relevance": 0.25,
+  "request_specificity": 0.25,
+  "outfit_coordination": 0.20,
+  "wearability": 0.15,
+  "freshness": 0.15
+}
+
+同时保留你之前的设计：允许用户设置五维权重。
+
+但用户权重不是新的评价维度，而只是改变五个既有维度的重要程度。
+
+三、维度一：需求还原度
+3.1 定义
+
+**需求还原度（Request Relevance）**评价：
+
+推荐结果在多大程度上准确响应了用户完整请求中的有效信息。
+
+这里不只是用户明确说出的硬性要求，还包括从完整语境中能够合理理解出的信息。
+
+评价范围包括：
+
+Request Relevance
+│
+├── 穿搭风格 Explicit Style
+│   ├── 美拉德
+│   ├── 多巴胺
+│   ├── 薄荷曼波
+│   ├── 亚比
+│   ├── American Vintage
+│   └── 其他用户明确指定风格
+│
+├── 活动 Activity
+├── 主题 Theme
+├── 文化/作品语境 Cultural Context
+├── 环境 Environment
+├── 氛围 Mood
+├── 使用需求 Practical Needs
+└── 显式偏好 Explicit Preferences
+示例 1
+
+用户：
+
+“给我一套美拉德风穿搭。”
+
+那么美拉德风本身就是 Relevance 的主要评价依据。
+
+不应该再额外建立：
+
+Style Match = 20%
+
+否则会与需求还原度重复计权。
+
+示例 2
+
+用户：
+
+“明天去看《悲惨世界》音乐剧穿什么？”
+
+这里 Relevance 不应该只理解：
+
+Activity = 看音乐剧
+
+而应该综合理解：
+
+活动：剧场观看音乐剧
+作品语境：《悲惨世界》
+氛围：克制、沉郁、文学/历史感
+使用需求：剧场、久坐
+
+因此需求还原度负责判断：
+
+系统到底有没有理解用户在问什么。
+
+四、维度二：请求特异性
+4.1 定义
+
+**请求特异性（Request Specificity）**评价：
+
+当前推荐中是否存在足够明确的视觉或组合证据，证明它是针对“当前这个请求”生成的，而不是可以直接复制给大量其他请求。
+
+这是 StyleForge 防止**“日常化坍缩”**的核心维度。
+
+示例
+
+用户：
+
+“去周杰伦演唱会穿什么？”
+
+方案 A：
+
+白T
++
+普通牛仔裤
++
+运动鞋
+
+可能：
+
+Relevance = 7
+Specificity = 3
+
+因为它确实适合演唱会，但也适合：
+
+上课；
+逛街；
+普通聚会；
+看电影。
+
+方案 B：
+
+复古感上衣
++
+宽松牛仔
++
+做旧鞋履
++
+具有视觉重点的街头配饰
+
+可能：
+
+Relevance = 8
+Specificity = 8
+
+所以二者不能合并。
+
+Agent 3 的核心判断
+
+可以直接加入一个反事实问题：
+
+如果把用户当前请求替换成普通日常出行，这套搭配是否几乎不需要改变？
+
+如果答案是“是”，Specificity 应降低。
+
+五、维度三：搭配协调性
+5.1 正式定义
+
+**搭配协调性（Outfit Coordination）**评价：
+
+完整穿搭方案中各单品之间在色彩、材质、风格、廓形、层次以及视觉主次关系上是否协调，并最终形成自然、完整且成立的搭配效果。
+
+评价对象不是单件衣服，而是：
+
+Outfit 作为一个组合是否成立。
+
+5.2 主要观察因素
+Outfit Coordination
+│
+├── Color Coordination
+│   色彩关系
+│
+├── Material Coordination
+│   材质关系
+│
+├── Silhouette Coordination
+│   廓形与比例
+│
+├── Style Compatibility
+│   风格元素之间是否成立
+│
+├── Layering
+│   层次关系
+│
+└── Visual Hierarchy
+    是否有合理的视觉主次
+
+这里尤其不要求：
+
+所有单品必须属于同一种 Style。
+
+例如：
+
+Vintage × Streetwear
+Formal × Casual
+Girly × Sporty
+
+只要组合成立，仍然可以获得较高的搭配协调性。
+
+这能避免 StyleForge 重新退化成“风格标签一致性检查器”。
+
+六、维度四：实穿性
+6.1 定义
+
+**实穿性（Wearability）**评价：
+
+推荐方案是否能够在用户对应的现实环境、活动条件和使用需求下合理穿着。
+
+主要考虑：
+
+Wearability
+│
+├── 环境适应性
+├── 温度/天气适应性
+├── 活动便利性
+├── 舒适程度
+├── 场景合理性
+└── 过度造型化风险
+
+例如用户说：
+
+“去看《悲惨世界》音乐剧。”
+
+一套极强戏剧感、近似舞台服装的组合可能：
+
+Relevance       9
+Specificity     10
+Coordination    9
+Wearability     3
+
+这正是 Wearability 独立存在的价值。
+
+它负责防止 StyleForge 为了“主题表达”走得太远。
+
+七、维度五：新鲜感
+7.1 定义
+
+**新鲜感（Freshness）**评价：
+
+当前推荐相对于用户近期已经看到的推荐，在单品使用、搭配结构、色彩结构和风格组合上是否提供了合理的新变化。
+
+它是历史维度，而不是当前请求维度。
+
+主要参考：
+
+Freshness
+│
+├── Item Repetition
+├── Category Structure Repetition
+├── Color Structure Repetition
+├── Style Mix Repetition
+└── Outfit Signature Repetition
+
+例如系统上一次已经推荐：
+
+黑外套 + 白内搭 + 牛仔裤 + 黑鞋
+
+这次虽然换成另外一件黑外套：
+
+黑外套 B + 白内搭 B + 牛仔裤 B + 黑鞋 B
+
+Item Overlap 可能不高，但结构几乎完全相同。
+
+因此 Freshness 不能只比较 item_id，还要比较 Outfit Signature。
+
+八、五维之间的职责边界
+
+最终可以把整个评价体系理解为：
+
+                    推荐质量
+                       │
+        ┌──────────────┼──────────────┐
+        │              │              │
+    当前请求          搭配本身          历史
+        │              │              │
+   ┌────┴────┐     ┌───┴───┐          │
+   ↓         ↓     ↓       ↓          ↓
+Relevance Specificity Coordination Wearability Freshness
+
+对应五个非常明确的问题：
+
+Relevance
+→ 回答对了吗？
+
+Specificity
+→ 真的是针对这次问题回答的吗？
+
+Coordination
+→ 这套衣服本身搭得好吗？
+
+Wearability
+→ 现实中适合这样穿吗？
+
+Freshness
+→ 最近是不是总在推荐类似东西？
+
+这也是后续实现 Rubric 时最重要的边界。
+
+九、三 Agent 统一使用五维
+
+五维不是 Critic 专属评分表，而是整个决策图共享的质量目标。
+
+Agent 1：Semantic Retrieval Agent
+
+Agent 1 不需要给最终 Outfit 打五维分，因为此时还没有 Outfit。
+
+它负责为五维准备信息和候选：
+
+五维	Agent 1 中的体现
+Relevance	core retrieval
+Specificity	distinctive retrieval + unique_mood
+Coordination	supporting retrieval，为组合提供兼容单品
+Wearability	practical_context
+Freshness	历史曝光软惩罚
+
+因此 Agent 1 的目标是：
+
+让后续 Composer 有足够好的候选空间实现五维目标。
+
+十、Agent 2 使用五维进行组合
+
+Outfit Composer Agent 在 Prompt 中接收统一 Rubric。
+
+其任务不是：
+
+从 Top-50 中挑最相似的几件。
+
+而应该是：
+
+根据五维目标，在候选池中形成整体最合理的 Outfit。
+
+建议其内部保持：
+
+Step 1
+理解 request_signature
+
+↓
+
+Step 2
+形成 composition_strategy
+
+↓
+
+Step 3
+根据五维 Rubric 进行组合取舍
+
+↓
+
+Step 4
+输出 3-5 个候选 Outfit
+
+尤其要注意：
+
+五维是决策目标，不要求 Agent 2 自己输出五个评分。
+
+否则 Composer 会变成“自己生成、自己评分”，增加无意义的自评偏差。
+
+十一、Agent 3 使用五维进行正式评审
+
+Critic 才是五维的正式评分节点。
+
+输出：
+
+{
+  "dimension_scores": {
+    "request_relevance": 8.7,
+    "request_specificity": 8.2,
+    "outfit_coordination": 9.0,
+    "wearability": 8.4,
+    "freshness": 7.6
+  }
+}
+
+然后根据用户配置权重：
+
+Final Score =
+Relevance × w1
++ Specificity × w2
++ Coordination × w3
++ Wearability × w4
++ Freshness × w5
+
+Critic 再结合具体失败维度决定：
+
+accept
+
+recompose
+→ 候选够好，但是 Composer 组合不好
+
+retrieve_more
+→ 当前候选空间不足
+
+wardrobe_gap
+→ 整个衣橱本身缺少合适单品
+
+这样五维不仅用于“打分”，还能参与LangGraph 路由决策。
+
+十二、用户权重配置
+
+保留用户主动设置五维权重的设计。
+
+系统提供默认值：
+
+{
+  "request_relevance": 0.25,
+  "request_specificity": 0.25,
+  "outfit_coordination": 0.20,
+  "wearability": 0.15,
+  "freshness": 0.15
+}
+
+用户可以调整，例如更重视“好看、协调”：
+
+{
+  "request_relevance": 0.20,
+  "request_specificity": 0.15,
+  "outfit_coordination": 0.35,
+  "wearability": 0.20,
+  "freshness": 0.10
+}
+
+或者更追求主题表达与差异化：
+
+{
+  "request_relevance": 0.25,
+  "request_specificity": 0.35,
+  "outfit_coordination": 0.15,
+  "wearability": 0.10,
+  "freshness": 0.15
+}
+
+同一份 evaluation_profile 贯穿三个 Agent，但作用方式不同：
+
+User Evaluation Profile
+           │
+     ┌─────┼─────┐
+     ↓     ↓     ↓
+ Agent 1 Agent 2 Agent 3
+ 检索侧重 组合侧重 最终评分
+十三、修改后的核心数据结构
+
+建议统一增加：
+
+{
+  "evaluation_profile": {
+    "weights": {
+      "request_relevance": 0.25,
+      "request_specificity": 0.25,
+      "outfit_coordination": 0.20,
+      "wearability": 0.15,
+      "freshness": 0.15
+    }
+  }
+}
+
+request_signature：
+
+{
+  "theme": "...",
+  "explicit_style": ["美拉德"],
+  "unique_mood": ["温暖", "醇厚", "秋日感"],
+  "practical_context": ["户外", "步行", "秋季"],
+  "explicit_preferences": [],
+  "generic_tendencies_to_avoid": []
+}
+
+这里我建议正式增加 explicit_style 字段。
+
+因为虽然穿搭风格不应该成为第六评价维度，但在 Agent 1 的语义表示中，它值得被单独保留下来。
+
+这样：
+
+“我要美拉德风”
+
+不会在 unique_mood 里被模糊成“温暖、棕色、秋季感”，从而再次产生信息损耗。
+
+十四、本次修改后的最终五维
+维度	最终名称	是否保留
+①	需求还原度 Request Relevance	✅
+②	请求特异性 Request Specificity	✅
+③	搭配协调性 Outfit Coordination	✅ 修改名称
+④	实穿性 Wearability	✅
+⑤	新鲜感 Freshness	✅

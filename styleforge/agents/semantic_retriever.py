@@ -39,6 +39,7 @@ class SemanticRetrieverAgent:
         wardrobe_summary: dict[str, Any],
         recent_memories: list[dict[str, Any]],
         llm: Any,
+        weights: dict[str, float] | None = None,
     ) -> tuple[Agent1Output, dict[str, Any], LlmCallDiagnostics | None]:
         if llm is None:
             output = deterministic_signature(task, user_query)
@@ -53,6 +54,7 @@ class SemanticRetrieverAgent:
                 user_query=user_query,
                 wardrobe_summary=wardrobe_summary,
                 recent_memories=recent_memories,
+                weights=weights,
             )
             payload, diagnostics = llm.chat_json(
                 system=system,
@@ -105,6 +107,7 @@ def deterministic_signature(task: TaskSpec, user_query: str) -> Agent1Output:
     practical = [task.occasion] if task.occasion and task.occasion != "daily" else []
     signature = RequestSignature(
         theme=theme[:120],
+        explicit_style=[],
         unique_mood=[],
         practical_context=practical,
         generic_tendencies_to_avoid=["仅由基础款组成，缺少能承载主题的视觉重点"],

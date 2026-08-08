@@ -44,5 +44,6 @@ class WorkflowState(TypedDict, total=False):
     decision: str
     best_effort: dict[str, Any]
     recent_memories: list[dict[str, Any]]
+    evaluation_weights: dict[str, float]
     composer_feedback: str
     retrieval_feedback: str

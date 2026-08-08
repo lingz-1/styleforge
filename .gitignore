@@ -22,3 +22,8 @@ node_modules/
 
 # 运行日志
 *.log
+
+# 数据集与下载脚本
+Garments2Look.pdf
+style-guide/
+download-hf.py

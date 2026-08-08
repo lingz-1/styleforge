@@ -19,6 +19,7 @@ DECISIONS = ("accept", "recompose", "retrieve_more", "wardrobe_gap")
 
 class RequestSignature(BaseModel):
     theme: str
+    explicit_style: list[str] = Field(default_factory=list, max_length=6)
     unique_mood: list[str] = Field(default_factory=list, max_length=6)
     practical_context: list[str] = Field(default_factory=list, max_length=6)
     generic_tendencies_to_avoid: list[str] = Field(default_factory=list, min_length=1, max_length=5)
@@ -139,7 +140,7 @@ class Agent2Output(BaseModel):
 class DimensionScores(BaseModel):
     request_relevance: int = Field(ge=1, le=10)
     request_specificity: int = Field(ge=1, le=10)
-    coordination: int = Field(ge=1, le=10)
+    outfit_coordination: int = Field(ge=1, le=10)
     wearability: int = Field(ge=1, le=10)
     freshness: int = Field(ge=1, le=10)
 
@@ -147,7 +148,7 @@ class DimensionScores(BaseModel):
         return {
             "request_relevance": self.request_relevance,
             "request_specificity": self.request_specificity,
-            "coordination": self.coordination,
+            "outfit_coordination": self.outfit_coordination,
             "wearability": self.wearability,
             "freshness": self.freshness,
         }
