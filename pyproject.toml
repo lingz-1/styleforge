@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "styleforge"
+version = "0.1.0"
+description = "A local-first multi-agent personal wardrobe styling system."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+images = ["pillow>=10.0"]
+api = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+agents = ["langgraph>=1.2,<2", "pydantic>=2.10,<3"]
+llm-openai = ["openai>=1.0"]
+ui = ["requests>=2.31", "streamlit>=1.40,<2"]
+orders = ["openpyxl>=3.1,<4"]
+vision = [
+  "faiss-cpu>=1.8",
+  "numpy>=1.26",
+  "pillow>=10.0",
+  "safetensors>=0.4",
+  "torch>=2.2",
+  "transformers>=4.45",
+]
+dev = ["httpx>=0.27", "pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+styleforge-audit = "styleforge.pipelines.audit_dataset:main"
+styleforge-import = "styleforge.pipelines.import_garments2look:main"
+styleforge-import-mytheresa = "styleforge.pipelines.import_mytheresa:main"
+styleforge-audit-mytheresa = "styleforge.pipelines.audit_mytheresa:main"
+styleforge-chat = "styleforge.chat:main"
+styleforge-embed = "styleforge.pipelines.build_embeddings:main"
+styleforge-index = "styleforge.pipelines.build_faiss_index:main"
+styleforge-evaluate-retrieval = "styleforge.evaluation.visual_retrieval:main"
+styleforge-workflow = "styleforge.workflow.graph:main"
+styleforge-api = "styleforge.api:main"
+styleforge-seed-wardrobe = "styleforge.pipelines.seed_balanced_wardrobe:main"
+styleforge-import-wardrobe = "styleforge.pipelines.import_wardrobe_orders:main"
+
+[tool.setuptools.packages.find]
+include = ["styleforge*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
