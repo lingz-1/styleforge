@@ -4,6 +4,19 @@
 
 ## 2026-08-06
 
+### 8. 架构 v3.3 规划 + 后端移动 + 双端前端（Vue Web + 小程序）
+
+- **背景**：用户要求参考《项目文档/参考目录.txt》与《扩展版方案.txt（v3.3-extension）》重排项目架构，并以"web 端和小程序端能正常运行"为目标。
+- **实现**：
+  1. 架构收口为 v3.3-plan.1（[architecture/ARCHITECTURE_PLAN.md](architecture/ARCHITECTURE_PLAN.md)）：Core + Extension 分层、Task Router / Context Router / Retriever / Validator / Memory / RAG 均为系统能力（不新增 Agent）；技术栈定稿（Vue 3 + Element Plus / 小程序 / PostgreSQL 后期 / Chroma RAG / Nginx，不用 Docker）。
+  2. 后端移动：`styleforge/` → `apps/api/styleforge/`，保持 `from styleforge.*` import 不变（pyproject package path 指向 apps/api，pytest pythonpath）；修复 `config.py` 的 `WORKSPACE_ROOT`（向上查找 pyproject.toml，避免移到 apps/api 后路径错乱）。
+  3. 新增接口：`POST /wardrobes/{user_id}/items/photo`（拍照/上传创建个人衣物 + 图像嵌入）、`PUT /wardrobes/{user_id}/items/{item_id}`（改信息重嵌入）；`services/personal_images.py` 提取图片保存 helper，新增 `services/wardrobe_item_service.py`。
+  4. Vue Web（`apps/web/`）：Vite + Element Plus，衣柜（上传/编辑/补图/移出）、推荐（语义决策/评审）、订单导入、五维偏好；Vite 代理 `/api` → FastAPI。
+  5. 小程序（`apps/miniprogram/`）：衣柜（点击补图/长按操作）、上传新衣物、订单导入、推荐、偏好；user_id 用 `wx.setStorageSync` 持久化保持登录；AppID 已填。
+- **验证**：134 passed、ruff clean；Vite 运行于 5173、代理连通；后端新接口实测（创建 201 + embedding completed + 修改 200）。
+- **修复**：小程序 WXML 不支持模板字符串（`${}`）与函数调用（`.join/.toFixed`）——import 提交按钮与 recommend 展示改为预格式化字段（`score_display`/`unique_mood_text` 等）。
+- **待办**：小程序真机预览因校园网 AP 隔离未能连通（开发用模拟器或 USB 真机调试；公网部署后无需调网络）；P1b Repository Protocol、P1c 三层 Schema 未做。
+
 ### 7. 落地五维统一评估框架（评估方案.txt v1.1）
 
 - **现象**：按《评估方案.txt》实现五维统一评估框架——让三个 Agent 共享同一评价口径，而非各自按自己的标准理解"什么是好的推荐"。

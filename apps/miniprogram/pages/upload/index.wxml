@@ -1,0 +1,38 @@
+<view class="container">
+  <view class="card">
+    <view class="upload-box" bindtap="onChooseImage">
+      <image wx:if="{{imagePath}}" src="{{imagePath}}" mode="aspectFill" class="preview" />
+      <view wx:else class="upload-hint">
+        <text class="plus">＋</text>
+        <text>拍照 / 选择图片</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="card">
+    <view class="row">
+      <text class="label">名称</text>
+      <input value="{{name}}" bindinput="onName" placeholder="如：蓝色衬衫" class="input" />
+    </view>
+    <view class="row">
+      <text class="label">品类</text>
+      <picker range="{{types}}" value="{{typeIndex}}" bindchange="onTypeChange">
+        <view class="picker">{{types[typeIndex]}} ›</view>
+      </picker>
+    </view>
+    <view class="row">
+      <text class="label">颜色</text>
+      <input value="{{color}}" bindinput="onColor" placeholder="如：blue" class="input" />
+    </view>
+    <view class="row">
+      <text class="label">人群</text>
+      <picker range="{{genders}}" value="{{genderIndex}}" bindchange="onGenderChange">
+        <view class="picker">{{genders[genderIndex]}} ›</view>
+      </picker>
+    </view>
+  </view>
+
+  <view class="btn-primary" bindtap="onSubmit">
+    {{submitting ? '提交中...' : '加入衣柜'}}
+  </view>
+</view>

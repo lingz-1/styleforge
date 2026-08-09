@@ -1,0 +1,378 @@
+styleforge/
+│
+├── apps/
+│   │
+│   ├── api/                         # FastAPI 主后端
+│   │   ├── src/
+│   │   │   ├── main.py
+│   │   │   │
+│   │   │   ├── api/                # HTTP / WebSocket 接口层
+│   │   │   │   ├── routes/
+│   │   │   │   │   ├── wardrobe.py
+│   │   │   │   │   ├── recommendation.py
+│   │   │   │   │   ├── outfits.py
+│   │   │   │   │   ├── feedback.py
+│   │   │   │   │   ├── preferences.py
+│   │   │   │   │   ├── compatibility.py
+│   │   │   │   │   └── health.py
+│   │   │   │   │
+│   │   │   │   ├── websocket/
+│   │   │   │   │   ├── events.py
+│   │   │   │   │   ├── manager.py
+│   │   │   │   │   └── recommendation_ws.py
+│   │   │   │   │
+│   │   │   │   └── dependencies.py
+│   │   │   │
+│   │   │   ├── agents/             # 只有真正的 3 个 LLM Agent
+│   │   │   │   ├── semantic_retrieval/
+│   │   │   │   │   ├── agent.py
+│   │   │   │   │   ├── prompt.py
+│   │   │   │   │   ├── schema.py
+│   │   │   │   │   └── examples.py
+│   │   │   │   │
+│   │   │   │   ├── outfit_composer/
+│   │   │   │   │   ├── agent.py
+│   │   │   │   │   ├── prompt.py
+│   │   │   │   │   ├── schema.py
+│   │   │   │   │   └── examples.py
+│   │   │   │   │
+│   │   │   │   └── outfit_critic/
+│   │   │   │       ├── agent.py
+│   │   │   │       ├── prompt.py
+│   │   │   │       ├── rubric.py
+│   │   │   │       ├── schema.py
+│   │   │   │       └── examples.py
+│   │   │   │
+│   │   │   ├── graph/              # LangGraph 编排，不放业务实现
+│   │   │   │   ├── state.py
+│   │   │   │   ├── nodes.py
+│   │   │   │   ├── routing.py
+│   │   │   │   ├── recommendation_graph.py
+│   │   │   │   └── local_edit_graph.py
+│   │   │   │
+│   │   │   ├── domain/             # 核心领域对象
+│   │   │   │   ├── wardrobe.py
+│   │   │   │   ├── clothing.py
+│   │   │   │   ├── outfit.py
+│   │   │   │   ├── request.py
+│   │   │   │   ├── context.py
+│   │   │   │   ├── preference.py
+│   │   │   │   └── evaluation.py
+│   │   │   │
+│   │   │   ├── schemas/            # API / Agent 跨模块 Pydantic Schema
+│   │   │   │   ├── clothing.py
+│   │   │   │   ├── outfit.py
+│   │   │   │   ├── recommendation.py
+│   │   │   │   ├── context_pack.py
+│   │   │   │   ├── preference_profile.py
+│   │   │   │   └── events.py
+│   │   │   │
+│   │   │   ├── retrieval/          # 衣橱语义检索
+│   │   │   │   ├── wardrobe_retriever.py
+│   │   │   │   ├── query_builder.py
+│   │   │   │   ├── slot_retrieval.py
+│   │   │   │   ├── candidate_merger.py
+│   │   │   │   ├── freshness_reranker.py
+│   │   │   │   └── embeddings.py
+│   │   │   │
+│   │   │   ├── knowledge/          # RAG 逻辑，不存知识文件本体
+│   │   │   │   ├── style_rag.py
+│   │   │   │   ├── garment_rag.py
+│   │   │   │   ├── brand_rag.py
+│   │   │   │   ├── indexer.py
+│   │   │   │   └── chunking.py
+│   │   │   │
+│   │   │   ├── tools/              # Agent 可调用工具适配层
+│   │   │   │   ├── weather.py
+│   │   │   │   ├── style_knowledge.py
+│   │   │   │   ├── garment_knowledge.py
+│   │   │   │   ├── wardrobe_search.py
+│   │   │   │   └── tool_registry.py
+│   │   │   │
+│   │   │   ├── context/            # Context Pack 构建
+│   │   │   │   ├── builder.py
+│   │   │   │   ├── environment.py
+│   │   │   │   ├── knowledge.py
+│   │   │   │   └── user_context.py
+│   │   │   │
+│   │   │   ├── memory/             # 用户记忆与跨请求新鲜感
+│   │   │   │   ├── outfit_history.py
+│   │   │   │   ├── request_history.py
+│   │   │   │   ├── feedback_memory.py
+│   │   │   │   ├── exposure_tracker.py
+│   │   │   │   └── outfit_signature.py
+│   │   │   │
+│   │   │   ├── evaluation/         # 在线五维评价逻辑
+│   │   │   │   ├── rubric.py
+│   │   │   │   ├── weights.py
+│   │   │   │   ├── projections.py
+│   │   │   │   └── scoring.py
+│   │   │   │
+│   │   │   ├── features/           # 面向产品功能的 Use Case
+│   │   │   │   ├── recommend_outfit.py
+│   │   │   │   ├── replace_item.py
+│   │   │   │   ├── wardrobe_compatibility.py
+│   │   │   │   ├── contextual_advice.py
+│   │   │   │   └── wardrobe_gap.py
+│   │   │   │
+│   │   │   ├── services/           # 普通业务服务
+│   │   │   │   ├── wardrobe_service.py
+│   │   │   │   ├── outfit_service.py
+│   │   │   │   ├── feedback_service.py
+│   │   │   │   └── preference_service.py
+│   │   │   │
+│   │   │   ├── repositories/       # DB 数据访问
+│   │   │   │   ├── wardrobe_repository.py
+│   │   │   │   ├── outfit_repository.py
+│   │   │   │   ├── user_repository.py
+│   │   │   │   └── feedback_repository.py
+│   │   │   │
+│   │   │   ├── integrations/       # 第三方系统/API适配
+│   │   │   │   ├── llm/
+│   │   │   │   │   ├── client.py
+│   │   │   │   │   ├── openai.py
+│   │   │   │   │   ├── openrouter.py
+│   │   │   │   │   └── deepseek.py
+│   │   │   │   ├── vector_store/
+│   │   │   │   │   ├── chroma.py
+│   │   │   │   │   └── pgvector.py
+│   │   │   │   └── storage/
+│   │   │   │       ├── local.py
+│   │   │   │       └── object_storage.py
+│   │   │   │
+│   │   │   ├── db/
+│   │   │   │   ├── session.py
+│   │   │   │   ├── models/
+│   │   │   │   └── migrations/
+│   │   │   │
+│   │   │   ├── observability/
+│   │   │   │   ├── tracing.py
+│   │   │   │   ├── agent_trace.py
+│   │   │   │   ├── token_usage.py
+│   │   │   │   └── logging.py
+│   │   │   │
+│   │   │   └── core/
+│   │   │       ├── config.py
+│   │   │       ├── exceptions.py
+│   │   │       └── constants.py
+│   │   │
+│   │   ├── tests/
+│   │   │   ├── unit/
+│   │   │   ├── integration/
+│   │   │   └── e2e/
+│   │   │
+│   │   ├── pyproject.toml
+│   │   └── Dockerfile
+│   │
+│   │
+│   ├── web/                         # React Web
+│   │   ├── src/
+│   │   │   ├── app/
+│   │   │   ├── pages/
+│   │   │   │   ├── Home/
+│   │   │   │   ├── Wardrobe/
+│   │   │   │   ├── Stylist/
+│   │   │   │   ├── OutfitDetail/
+│   │   │   │   ├── Compatibility/
+│   │   │   │   ├── History/
+│   │   │   │   └── Settings/
+│   │   │   │
+│   │   │   ├── features/
+│   │   │   │   ├── wardrobe/
+│   │   │   │   ├── recommendation/
+│   │   │   │   ├── outfit-replace/
+│   │   │   │   ├── compatibility/
+│   │   │   │   ├── feedback/
+│   │   │   │   └── preference-profile/
+│   │   │   │
+│   │   │   ├── components/
+│   │   │   │   ├── OutfitCard/
+│   │   │   │   ├── ClothingCard/
+│   │   │   │   ├── AgentTrace/
+│   │   │   │   ├── RubricRadar/
+│   │   │   │   ├── WeatherContext/
+│   │   │   │   └── ToolCallTrace/
+│   │   │   │
+│   │   │   ├── hooks/
+│   │   │   ├── stores/
+│   │   │   ├── services/
+│   │   │   ├── lib/
+│   │   │   └── types/
+│   │   ├── public/
+│   │   ├── package.json
+│   │   └── Dockerfile
+│   │
+│   │
+│   └── mobile/                      # React Native + Expo
+│       ├── app/                     # Expo Router
+│       │   ├── (tabs)/
+│       │   │   ├── index.tsx        # 今日推荐
+│       │   │   ├── wardrobe.tsx
+│       │   │   ├── stylist.tsx
+│       │   │   ├── history.tsx
+│       │   │   └── profile.tsx
+│       │   ├── outfit/
+│       │   │   └── [id].tsx
+│       │   ├── compatibility/
+│       │   └── settings/
+│       │
+│       ├── src/
+│       │   ├── features/
+│       │   │   ├── camera-upload/
+│       │   │   ├── wardrobe/
+│       │   │   ├── recommendation/
+│       │   │   ├── feedback/
+│       │   │   ├── location/
+│       │   │   └── compatibility/
+│       │   ├── components/
+│       │   ├── hooks/
+│       │   ├── stores/
+│       │   ├── services/
+│       │   └── lib/
+│       │
+│       ├── assets/
+│       ├── app.json
+│       └── package.json
+│
+│
+├── services/                         # 独立运行的外围服务
+│   │
+│   ├── weather-mcp/
+│   │   ├── src/
+│   │   │   ├── server.py
+│   │   │   ├── tools.py
+│   │   │   ├── open_meteo.py
+│   │   │   ├── geocoding.py
+│   │   │   └── schemas.py
+│   │   ├── tests/
+│   │   ├── pyproject.toml
+│   │   └── Dockerfile
+│   │
+│   └── knowledge-indexer/            # 可选独立索引任务
+│       ├── src/
+│       │   ├── index_styles.py
+│       │   ├── index_garments.py
+│       │   └── index_brands.py
+│       └── pyproject.toml
+│
+│
+├── packages/                         # 多端共享代码
+│   │
+│   ├── api-client/                   # Web/Mobile 共用 API Client
+│   │   ├── src/
+│   │   └── package.json
+│   │
+│   ├── shared-types/                 # TS 类型
+│   │   ├── src/
+│   │   │   ├── outfit.ts
+│   │   │   ├── clothing.ts
+│   │   │   ├── recommendation.ts
+│   │   │   ├── preference.ts
+│   │   │   └── websocket-events.ts
+│   │   └── package.json
+│   │
+│   ├── design-tokens/                # Web/Mobile共享设计变量
+│   │   ├── src/
+│   │   └── package.json
+│   │
+│   └── config/
+│       ├── eslint/
+│       └── typescript/
+│
+│
+├── knowledge/                        # 原始知识资产
+│   │
+│   ├── styles/
+│   │   ├── American_Vintage_style.md
+│   │   ├── Androgynous_style.md
+│   │   ├── Bohemian_style.md
+│   │   ├── Cottagecore_style.md
+│   │   ├── Gorpcore_style.md
+│   │   └── ...
+│   │
+│   ├── garments/
+│   │   ├── cowboy_boots.md
+│   │   ├── mary_jane.md
+│   │   ├── bolero.md
+│   │   └── ...
+│   │
+│   ├── brands/
+│   │   └── ...
+│   │
+│   └── palettes/
+│       └── color_palettes.json
+│
+│
+├── data/
+│   ├── sample/
+│   │   ├── wardrobe.sample.json
+│   │   └── mini_dataset.sample.json
+│   │
+│   ├── fixtures/
+│   └── README.md
+│
+│
+├── evals/
+│   ├── rubric/
+│   │   ├── five_dimension_rubric.md
+│   │   └── preference_profiles.json
+│   │
+│   ├── cases/
+│   │   ├── explicit_style.json
+│   │   ├── cultural_context.json
+│   │   ├── weather_context.json
+│   │   ├── vague_requests.json
+│   │   └── similar_requests.json
+│   │
+│   ├── runners/
+│   │   ├── run_agent1_eval.py
+│   │   ├── run_pipeline_eval.py
+│   │   └── run_weight_eval.py
+│   │
+│   └── reports/
+│
+│
+├── scripts/
+│   ├── data/
+│   │   ├── annotate_wardrobe.py
+│   │   ├── normalize_dataset.py
+│   │   └── generate_embeddings.py
+│   ├── knowledge/
+│   │   └── rebuild_index.py
+│   ├── dev/
+│   │   ├── seed_db.py
+│   │   └── reset_local.py
+│   └── demo/
+│       └── run_cli.py
+│
+│
+├── infra/
+│   ├── docker/
+│   │   └── docker-compose.yml
+│   ├── nginx/
+│   └── database/
+│       └── init.sql
+│
+│
+├── docs/
+│   ├── architecture/
+│   │   ├── v3.2.1-core.md
+│   │   ├── v3.3-extension.md
+│   │   ├── agent-graph.md
+│   │   └── context-pack.md
+│   ├── api/
+│   ├── evaluation/
+│   │   └── five-dimensional-rubric.md
+│   ├── development/
+│   │   ├── setup.md
+│   │   └── contribution.md
+│   └── demo/
+│       └── interview-demo.md
+│
+│
+├── .env.example
+├── .gitignore
+├── README.md
+├── Makefile
+├── pnpm-workspace.yaml
+└── docker-compose.yml

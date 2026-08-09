@@ -2,7 +2,7 @@
 
 > 更新时间：2026-08-06  
 > 定位：用于实习求职展示的本地个人衣柜多 Agent 穿搭项目  
-> 当前阶段：Polyvore 演示主链路已形成可运行基线；Mytheresa 接入和订单衣柜导入已完成代码实现，订单衣柜最新版已通过回归与一次性数据库验收，但真实订单尚未提交、个人商品嵌入和 Mytheresa 全量接入仍待端到端验收。2026-08-05 修复了运动场合推荐不合理、UI 提交强制逐条填写、推荐结果不更新等问题，详见[问题与解决记录](ISSUE_LOG.md)。2026-08-05 完成 v3.2.1 语义驱动三 Agent 改造（DeepSeek）；2026-08-06 用真实 DeepSeek API 对 8 类代表性请求完成端到端验收（全部 accept、正常 3 次 LLM 调用、0 回退、推荐 100% 衣柜归属），备选方案已补确定性评分。2026-08-06 落地《评估方案.txt》五维统一评估框架：统一 Rubric 贯穿三 Agent、第三维改名 `outfit_coordination`、`request_signature` 新增 `explicit_style`、用户可配置五维权重（真实链路验证首选分=用户权重加权结果）。
+> 当前阶段：Polyvore 演示主链路已形成可运行基线；Mytheresa 接入和订单衣柜导入已完成代码实现，订单衣柜最新版已通过回归与一次性数据库验收，但真实订单尚未提交、个人商品嵌入和 Mytheresa 全量接入仍待端到端验收。2026-08-05 修复了运动场合推荐不合理、UI 提交强制逐条填写、推荐结果不更新等问题，详见[问题与解决记录](ISSUE_LOG.md)。2026-08-05 完成 v3.2.1 语义驱动三 Agent 改造（DeepSeek）；2026-08-06 用真实 DeepSeek API 对 8 类代表性请求完成端到端验收（全部 accept、正常 3 次 LLM 调用、0 回退、推荐 100% 衣柜归属），备选方案已补确定性评分。2026-08-06 落地《评估方案.txt》五维统一评估框架：统一 Rubric 贯穿三 Agent、第三维改名 `outfit_coordination`、`request_signature` 新增 `explicit_style`、用户可配置五维权重（真实链路验证首选分=用户权重加权结果）。2026-08-06 完成架构规划 v3.3-plan.1（参考目录 + 扩展版方案收口，见 [ARCHITECTURE_PLAN.md](architecture/ARCHITECTURE_PLAN.md)），后端移动至 `apps/api/styleforge/`（保持 import），双端前端（Vue Web + 小程序）骨架与核心功能完成（衣柜/上传/编辑/补图/订单导入/推荐/偏好），新增拍照创建与修改衣物接口；小程序真机预览因校园网隔离待通。
 
 ## 1. 当前结论
 
@@ -31,6 +31,11 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 | FastAPI/Streamlit | 基线可启动，最新 UI 待回归 | API 曾成功启动；最新订单预览和图片展示需人工验收 |
 | 语义驱动三 Agent (v3.2.1) | 已验证 | DeepSeek 三 Agent + 四决策分支 + 跨请求记忆；134 测试通过；2026-08-06 真实 API 8 请求验收全部 accept，推荐 100% 衣柜归属，备选已补确定性评分 |
 | 五维统一评估框架（评估方案 v1.1） | 已验证 | 统一 Rubric 贯穿三 Agent；`outfit_coordination` 改名 + `explicit_style` 字段；用户可配置五维权重（API/UI），真实链路验证首选分=用户权重加权 |
+| 架构 v3.3-plan.1 | 已规划 | 参考目录 + 扩展版方案收口，规划文档 `docs/architecture/ARCHITECTURE_PLAN.md`，含职责边界与分阶段路线 |
+| 后端结构 | 已移动 | `styleforge/` → `apps/api/styleforge/`（保持 `from styleforge.*` import 不变，pyproject package path），134 测试全绿 |
+| 拍照创建 / 修改衣物接口 | 已验证 | `POST /wardrobes/{user_id}/items/photo`（上传图创建个人商品+嵌入）、`PUT /items/{item_id}`（改信息重嵌入），已验证 |
+| Vue Web（v3.3 前端） | 骨架+核心功能 | 衣柜（上传/编辑/补图/移出）、推荐（语义决策/评审）、订单导入、五维偏好；Vite 运行于 5173，代理 `/api` → FastAPI |
+| 小程序（v3.3 前端） | 骨架+核心功能 | 衣柜（点击补图/长按操作）、上传新衣物、订单导入、推荐、偏好；AppID 已配；真机预览因校园网 AP 隔离待通（开发用模拟器/真机调试） |
 
 ## 3. 已验证证据
 

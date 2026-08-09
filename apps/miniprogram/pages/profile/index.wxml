@@ -1,0 +1,27 @@
+<view class="container">
+  <view class="card">
+    <view class="row">
+      <text class="label">当前用户</text>
+      <input value="{{userId}}" bindinput="onUserIdInput" placeholder="用户 ID" class="input" />
+      <view class="save-user" bindtap="onSaveUser">切换</view>
+    </view>
+  </view>
+
+  <view class="card">
+    <view class="hint">权重影响检索侧重、组合取舍与最终评分（保存后自动归一化）。</view>
+    <view wx:for="{{dims}}" wx:key="key" class="slider-row">
+      <text class="label">{{item.label}}</text>
+      <slider
+        min="0" max="100" step="5"
+        value="{{item.value}}"
+        data-index="{{index}}"
+        bindchange="onSlider"
+        class="slider"
+      />
+      <text class="value">{{item.value}}%</text>
+    </view>
+    <view class="btn-primary" bindtap="onSave">
+      {{saving ? '保存中...' : '保存偏好'}}
+    </view>
+  </view>
+</view>

@@ -1,0 +1,29 @@
+<view class="container">
+  <view class="btn-row">
+    <view class="btn-primary upload-btn" bindtap="onUpload">＋ 上传新衣物</view>
+    <view class="btn-primary import-btn" bindtap="onImport">📦 订单导入</view>
+  </view>
+  <view wx:for="{{groups}}" wx:key="label" class="group">
+    <view class="group-title">{{item.label}}（{{item.items.length}}）</view>
+    <view class="grid">
+      <view
+        wx:for="{{item.items}}" wx:for-item="cloth" wx:key="item_id"
+        class="cell"
+        data-item="{{cloth}}"
+        bindtap="onTapCard"
+        bindlongpress="onLongPress"
+      >
+        <image
+          wx:if="{{cloth.image_url}}"
+          src="{{cloth.image_url}}"
+          mode="aspectFill"
+          class="cell-img"
+        />
+        <view wx:else class="cell-img placeholder">点击添加图片</view>
+        <view class="cell-name">{{cloth.name}}</view>
+        <view class="cell-meta">{{cloth.color}}</view>
+      </view>
+    </view>
+  </view>
+  <view wx:if="{{!groups.length && !loading}}" class="empty">衣柜为空</view>
+</view>

@@ -9,11 +9,52 @@ from pathlib import Path
 from typing import Any
 
 from styleforge.repositories.database import database_session, initialize_database
-from styleforge.repositories.wardrobe_import_repository import personal_image_root
+from styleforge.repositories.wardrobe_import_repository import (
+    personal_image_root,
+)
 from styleforge.services.personal_embeddings import embed_personal_items
 
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def save_personal_image(root: Path, item_id: str, image_bytes: bytes) -> str:
+    """Validate image bytes, save a downscaled JPEG, return the stored filename."""
+    if not image_bytes:
+        raise ValueError("Image is empty")
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise ValueError("Image exceeds the 20 MB limit")
+    root.mkdir(parents=True, exist_ok=True)
+    filename = f"{hashlib.sha256(item_id.encode('utf-8')).hexdigest()[:24]}.jpg"
+    destination = (root / filename).resolve()
+    if not destination.is_relative_to(root):
+        raise ValueError("Invalid personal image destination")
+
+    handle = tempfile.NamedTemporaryFile(
+        dir=root,
+        prefix=".wardrobe-image-",
+        suffix=".jpg.tmp",
+        delete=False,
+    )
+    temporary_path = Path(handle.name)
+    handle.close()
+    try:
+        import io
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            image.load()
+            rgb = image.convert("RGB")
+            try:
+                rgb.thumbnail((2400, 2400))
+                rgb.save(temporary_path, format="JPEG", quality=92, optimize=True)
+            finally:
+                rgb.close()
+        os.replace(temporary_path, destination)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+    return filename
 
 
 def bind_personal_image(
@@ -45,36 +86,7 @@ def bind_personal_image(
         raise ValueError("Personal wardrobe item not found")
 
     root = personal_image_root(artifact_root, user_id)
-    root.mkdir(parents=True, exist_ok=True)
-    filename = f"{hashlib.sha256(item_id.encode('utf-8')).hexdigest()[:24]}.jpg"
-    destination = (root / filename).resolve()
-    if not destination.is_relative_to(root):
-        raise ValueError("Invalid personal image destination")
-
-    handle = tempfile.NamedTemporaryFile(
-        dir=root,
-        prefix=".wardrobe-image-",
-        suffix=".jpg.tmp",
-        delete=False,
-    )
-    temporary_path = Path(handle.name)
-    handle.close()
-    try:
-        import io
-        from PIL import Image
-
-        with Image.open(io.BytesIO(image_bytes)) as image:
-            image.load()
-            rgb = image.convert("RGB")
-            try:
-                rgb.thumbnail((2400, 2400))
-                rgb.save(temporary_path, format="JPEG", quality=92, optimize=True)
-            finally:
-                rgb.close()
-        os.replace(temporary_path, destination)
-    except BaseException:
-        temporary_path.unlink(missing_ok=True)
-        raise
+    filename = save_personal_image(root, item_id, image_bytes)
 
     with database_session(database_path) as connection:
         connection.execute(

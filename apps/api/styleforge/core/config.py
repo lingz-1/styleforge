@@ -9,7 +9,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+def _find_workspace_root(start: Path) -> Path:
+    """Walk up to the first directory containing pyproject.toml (the repo root)."""
+    current = start
+    for _ in range(8):
+        if (current / "pyproject.toml").is_file():
+            return current
+        current = current.parent
+    raise RuntimeError(f"Could not locate workspace root from {start}")
+
+
+WORKSPACE_ROOT = _find_workspace_root(Path(__file__).resolve().parent)
 
 # Load a project-local .env if present (DEEPSEEK_* etc.). Existing process
 # environment variables take precedence (override=False).

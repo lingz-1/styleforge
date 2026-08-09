@@ -1,0 +1,1860 @@
+# StyleForge v3.3-extension
+
+## 多智能体 AI 穿搭系统扩展能力完整设计方案
+
+> **版本定位：** StyleForge v3.2.1-final 的正式扩展版本
+> **核心架构：** Semantic Retrieval Agent → Outfit Composer Agent → Outfit Critic Agent
+> **设计原则：** 不新增业务 Agent，不修改统一五维 Rubric，通过 RAG、Tools/MCP、Memory 和任务路由增强现有 Agent 的信息获取与决策能力。
+> **最终目标：** 将 StyleForge 从“基于个人衣橱的穿搭推荐系统”升级为一个具有知识增强、环境感知、持续记忆、动态工具调用和多任务交互能力的 Personal Styling Agent System。
+
+---
+
+# 一、v3.3 的核心设计目标
+
+v3.2.1-final 已经完成 StyleForge 最重要的基础链路：
+
+```text
+User Request
+      ↓
+Semantic Understanding
+      ↓
+Wardrobe Retrieval
+      ↓
+Outfit Composition
+      ↓
+Validity Validation
+      ↓
+Comparative Critique
+      ↓
+Accept / Recompose / Retrieve More
+```
+
+v3.3 不重新设计这条主链路。
+
+本次扩展解决的是三个新的问题：
+
+### 1. Agent 从哪里获得更多决策信息？
+
+除了用户请求和衣橱数据之外，引入：
+
+```text
+Style Knowledge
+Item Knowledge
+Weather Context
+User Preference Memory
+Recent Outfit History
+Brand / Product Knowledge
+```
+
+### 2. Agent 如何知道什么时候需要这些信息？
+
+不是固定执行：
+
+```text
+Style RAG
+→ Weather API
+→ Memory
+→ Wardrobe Retrieval
+```
+
+而是：
+
+```text
+理解任务
+   ↓
+判断 Context Requirements
+   ↓
+仅调用当前任务真正需要的知识和工具
+```
+
+### 3. 系统如何支持“推荐之外”的穿搭任务？
+
+除了：
+
+```text
+“帮我搭一套衣服”
+```
+
+还应该支持：
+
+```text
+“鞋不好看，换一双。”
+
+“这件新大衣和我的衣柜搭吗？”
+
+“American Vintage 应该怎么穿？”
+
+“今天下雨穿什么？”
+
+“我的衣柜还缺什么？”
+```
+
+因此 v3.3 的本质不是继续增加 Agent，而是：
+
+> 从固定穿搭 Pipeline 升级为 Context-Aware Multi-Agent Decision Graph。
+
+---
+
+# 二、总体系统架构
+
+完整系统划分为六个层次：
+
+```text
+┌──────────────────────────────────────────────┐
+│                Frontend / App                │
+│ Wardrobe / Chat / Outfit / Feedback / Trace │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│               FastAPI Gateway                │
+│ REST / WebSocket / Auth / Session            │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│             LangGraph Orchestrator           │
+│                                              │
+│ Task Router                                  │
+│ Context Router                               │
+│ Retry Controller                             │
+│ State Manager                                │
+└───────────────┬──────────────────────────────┘
+                │
+     ┌──────────┼──────────┐
+     ▼          ▼          ▼
+ Semantic    Outfit      Outfit
+ Retrieval   Composer    Critic
+ Agent       Agent       Agent
+     │          │          │
+     └──────────┼──────────┘
+                │
+                ▼
+┌──────────────────────────────────────────────┐
+│              Capability Layer                │
+│                                              │
+│ Wardrobe Retriever                          │
+│ Style RAG                                   │
+│ Item Knowledge RAG                          │
+│ Weather MCP                                 │
+│ Memory                                      │
+│ Brand Knowledge                             │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────┐
+│                  Data Layer                  │
+│ PostgreSQL / pgvector / Object Storage       │
+└──────────────────────────────────────────────┘
+```
+
+其中只有三个模块被定义为 Agent。
+
+`Task Router`、`Retriever`、`Validator`、`Memory`、`RAG` 和 `MCP Server` 都属于系统能力，而不是新的 Agent。
+
+---
+
+# 三、任务路由 Task Router
+
+v3.3 首先需要解决：
+
+> 当前用户到底是在要求系统完成什么任务？
+
+建议定义统一的：
+
+```python
+TaskType
+```
+
+至少包括：
+
+```text
+OUTFIT_RECOMMEND
+OUTFIT_MODIFY
+STYLE_ADVICE
+ITEM_ADVICE
+WARDROBE_COMPATIBILITY
+WARDROBE_GAP
+```
+
+例如：
+
+| 用户请求                  | Task                   |
+| --------------------- | ---------------------- |
+| 明天去纽约上班穿什么？           | OUTFIT_RECOMMEND       |
+| 鞋换一双                  | OUTFIT_MODIFY          |
+| American Vintage 怎么穿？ | STYLE_ADVICE           |
+| Cowboy Boots 怎么搭？     | ITEM_ADVICE            |
+| 这件大衣适合买吗？             | WARDROBE_COMPATIBILITY |
+| 我的衣柜还缺什么？             | WARDROBE_GAP           |
+
+Task Router 不是 Agent。
+
+它只负责：
+
+```text
+User Request
+      ↓
+Task Classification
+      ↓
+选择对应 LangGraph 子图
+```
+
+标准推荐进入完整三 Agent 主链路。
+
+局部修改、知识问答和新品分析则进入更短的任务子图。
+
+---
+
+# 四、Agent 1：Semantic Retrieval Agent
+
+Agent 1 是 v3.3 中升级幅度最大的 Agent。
+
+v3.2.1：
+
+```text
+理解请求
+→ Request Signature
+→ Retrieval Plan
+```
+
+v3.3：
+
+```text
+理解请求
+      ↓
+识别任务
+      ↓
+生成初步 Request Signature
+      ↓
+判断 Context Requirements
+      ↓
+获取必要外部 Context
+      ↓
+完善 Request Signature
+      ↓
+生成 Retrieval Plan
+      ↓
+检索衣橱
+```
+
+它增加的核心能力不是“调用 API”，而是：
+
+> 判断为了完成当前任务还缺什么信息。
+
+---
+
+# 五、Context Requirements
+
+Agent 1 使用 Structured Output 输出：
+
+```json
+{
+  "context_requirements": {
+    "style_knowledge": {
+      "needed": true,
+      "query": "American Vintage styling principles"
+    },
+    "item_knowledge": {
+      "needed": false,
+      "query": null
+    },
+    "weather": {
+      "needed": true,
+      "location": "New York",
+      "date": "tomorrow"
+    },
+    "user_memory": {
+      "needed": true
+    }
+  }
+}
+```
+
+这里必须遵循一个重要原则：
+
+> `needed` 由模型根据语义判断，而不是由关键词表决定。
+
+例如：
+
+```text
+“American Vintage 怎么穿？”
+```
+
+Style Knowledge 明显必要。
+
+但是：
+
+```text
+“复古一点，但不要太正式”
+```
+
+未必需要 Style RAG。
+
+因此 Prompt 中要求 Agent 判断：
+
+```text
+如果仅凭当前请求与衣橱属性已经可以可靠完成任务，
+不要调用额外 Knowledge Source。
+
+只有缺乏完成决策所需要的领域知识时，
+才将 corresponding context 标记为 needed。
+```
+
+---
+
+# 六、Tool Decision 与实际 Tool Calling 分离
+
+LLM 不应该直接控制底层 Tool。
+
+采用：
+
+```text
+Agent
+ ↓
+声明 Context Requirement
+ ↓
+Orchestrator
+ ↓
+验证参数
+ ↓
+Tool Registry
+ ↓
+执行 Tool
+```
+
+例如 Agent 输出：
+
+```json
+{
+  "weather": {
+    "needed": true,
+    "location": "Seattle",
+    "date": "tomorrow"
+  }
+}
+```
+
+真正执行：
+
+```python
+weather_service.get_weather(...)
+```
+
+的是 Orchestrator。
+
+这样可以避免：
+
+```text
+Agent 编造不存在的 Tool
+Agent 传递非法参数
+Prompt 与 API 强耦合
+模型直接依赖第三方 API Schema
+```
+
+形成：
+
+> LLM 决策，程序执行。
+
+---
+
+# 七、Context Pack
+
+所有外部信息最后必须进入统一 Context Pack。
+
+建议 Schema：
+
+```json
+{
+  "request_context": {
+    "original_request": "",
+    "task_type": "",
+    "request_signature": {}
+  },
+
+  "environment_context": {
+    "weather": null,
+    "season": null
+  },
+
+  "knowledge_context": {
+    "style_guides": [],
+    "item_guides": [],
+    "brand_guides": []
+  },
+
+  "user_context": {
+    "recent_requests": [],
+    "recent_outfits": [],
+    "negative_preferences": [],
+    "feedback_summary": {}
+  }
+}
+```
+
+另外每条外部 Context 建议附带：
+
+```json
+{
+  "source": "style_rag",
+  "source_id": "american_vintage_03",
+  "retrieved_at": "...",
+  "content": "..."
+}
+```
+
+这样 Critic 可以知道：
+
+> 一个判断到底来自用户需求、知识库、天气还是历史反馈。
+
+最终形成统一原则：
+
+> Tools / RAG 提供事实和上下文；Agent 基于 Context 做判断。
+
+---
+
+# 八、Style Knowledge RAG
+
+Style Knowledge RAG 是 v3.3 第一类核心知识能力。
+
+知识库：
+
+```text
+knowledge/
+└── styles/
+    ├── american_vintage.md
+    ├── gorpcore.md
+    ├── french_chic.md
+    ├── business_casual.md
+    ├── cottagecore.md
+    └── ...
+```
+
+不要把文档转换为硬编码规则。
+
+例如不要：
+
+```python
+if style == "american_vintage":
+    allowed_colors = [...]
+```
+
+而是保留自然语言领域知识，通过 Retrieval 获取。
+
+## Knowledge Chunk
+
+不建议简单按固定 Token 切割。
+
+按照语义结构切分：
+
+```text
+Style Identity
+Colors
+Materials
+Silhouettes
+Key Items
+Combination Principles
+Avoid
+Occasion Adaptation
+```
+
+每个 Chunk 带 metadata：
+
+```json
+{
+  "knowledge_type": "style",
+  "style": "american_vintage",
+  "section": "materials",
+  "source": "american_vintage.md"
+}
+```
+
+## Retrieval
+
+Agent 生成：
+
+```text
+style_query
+```
+
+例如：
+
+```text
+American Vintage casual outfit suitable for rainy mild weather
+```
+
+Retriever 返回 Top-K Knowledge Chunks。
+
+这些结果同时进入：
+
+```text
+Agent 1
+Agent 2
+Agent 3
+```
+
+但用途不同：
+
+```text
+Agent 1 → 理解风格并优化检索
+
+Agent 2 → 作为搭配生成知识
+
+Agent 3 → 作为风格判断证据
+```
+
+这样可以解决典型问题：
+
+> Composer 说“这是 American Vintage”，Critic 却没有任何知识依据判断它到底是不是。
+
+---
+
+# 九、Item Knowledge RAG
+
+Style Knowledge 回答：
+
+```text
+“这种风格怎么穿？”
+```
+
+Item Knowledge 回答：
+
+```text
+“这种衣服怎么穿？”
+```
+
+知识结构：
+
+```text
+knowledge/
+└── items/
+    ├── trench_coat.md
+    ├── cowboy_boots.md
+    ├── mary_jane.md
+    ├── leather_jacket.md
+    ├── pleated_skirt.md
+    └── cargo_pants.md
+```
+
+Item Knowledge 主要包括：
+
+```text
+典型搭配关系
+适合的下装
+适合的鞋履
+比例关系
+叠穿方式
+常见风格方向
+场景限制
+容易出现的问题
+```
+
+例如：
+
+```text
+“这双 Cowboy Boots 怎么搭？”
+```
+
+流程：
+
+```text
+Item Recognition
+      ↓
+Item Knowledge RAG
+      ↓
+Wardrobe Retrieval
+      ↓
+Composer
+      ↓
+Critic
+```
+
+从而让系统回答的是：
+
+> “你的衣柜里有什么东西可以和 Cowboy Boots 搭。”
+
+而不是单纯输出互联网式穿搭知识。
+
+---
+
+# 十、Weather MCP
+
+Weather MCP 是主要实时环境工具。
+
+架构：
+
+```text
+Agent Context Decision
+        ↓
+LangGraph
+        ↓
+Weather MCP Client
+        ↓
+Weather MCP Server
+        ↓
+Weather Provider
+```
+
+Agent 不关心底层天气服务。
+
+建议 MCP 暴露统一接口：
+
+```text
+get_weather(
+    location,
+    date
+)
+```
+
+返回内部统一 Schema：
+
+```json
+{
+  "temperature_min": 18,
+  "temperature_max": 24,
+  "feels_like": 22,
+  "precipitation_probability": 70,
+  "humidity": 78,
+  "wind_speed": 4.2,
+  "condition": "light_rain"
+}
+```
+
+Weather Tool **只提供事实，不负责搭配决策**。
+
+错误设计：
+
+```text
+Weather MCP：
+“今天应该穿风衣。”
+```
+
+正确设计：
+
+```text
+Weather MCP：
+18–24℃
+小雨
+降雨概率 70%
+```
+
+然后：
+
+```text
+Agent 1 → 调整候选检索
+
+Agent 2 → 调整材质、层次、鞋履
+
+Agent 3 → 判断 Wearability
+
+Final Renderer → 生成带伞等 Contextual Advice
+```
+
+---
+
+# 十一、Location Resolution
+
+天气需要地点时按照以下优先级解析：
+
+```text
+用户明确说出地点
+        ↓
+使用请求地点
+
+否则
+
+用户 Profile 中存在默认城市
+        ↓
+使用默认城市
+
+否则
+
+Weather 对任务属于必要 Context
+        ↓
+请求用户提供城市 / 使用定位
+
+否则
+        ↓
+跳过 Weather
+```
+
+因此天气永远是：
+
+> Context Enhancement
+
+而不是主流程依赖。
+
+---
+
+# 十二、User Memory
+
+Memory 不用于“把所有聊天记录扔给模型”。
+
+它保存对以后推荐真正有价值的结构化信息。
+
+最小版本建议包含三类数据：
+
+### Recent Request Memory
+
+最近 3 次：
+
+```json
+{
+  "request_signature": {},
+  "selected_outfit_signature": {}
+}
+```
+
+主要服务：
+
+```text
+Novelty
+```
+
+避免连续请求不断推荐：
+
+```text
+白衬衫 + 黑裤 + 乐福鞋
+```
+
+### Negative Feedback Memory
+
+例如：
+
+```json
+{
+  "target": "shoes",
+  "reason": "too_formal",
+  "count": 3
+}
+```
+
+下次提供给 Composer：
+
+```text
+用户最近连续拒绝过于正式的鞋履。
+```
+
+### Explicit Preference
+
+只有用户明确表达稳定偏好时保存：
+
+```text
+“不喜欢高跟鞋”
+“平时不穿短裙”
+“比较喜欢宽松版型”
+```
+
+不要从一次 👍 自动推断长期人格或审美偏好。
+
+---
+
+# 十三、Feedback Loop
+
+推荐完成后用户可以反馈：
+
+```text
+👍 喜欢
+😐 一般
+👎 不喜欢
+```
+
+同时提供可操作反馈：
+
+```text
+换鞋
+换外套
+太正式
+太普通
+颜色不喜欢
+风格不明显
+```
+
+保存：
+
+```json
+{
+  "outfit_id": "...",
+  "overall": "dislike",
+  "target": "shoes",
+  "reason": "too_formal"
+}
+```
+
+Feedback 有两个作用：
+
+```text
+当前会话
+→ 触发局部修改
+
+跨请求
+→ 进入 Preference Memory
+```
+
+因此形成真正的：
+
+```text
+Recommendation
+      ↓
+User Feedback
+      ↓
+Memory
+      ↓
+Next Recommendation
+```
+
+闭环。
+
+---
+
+# 十四、Local Outfit Editing
+
+例如：
+
+```text
+“鞋子换一个。”
+```
+
+不应该重新执行整个推荐流程。
+
+当前 Outfit：
+
+```json
+{
+  "top": "...",
+  "bottom": "...",
+  "shoes": "...",
+  "outerwear": "..."
+}
+```
+
+解析得到：
+
+```json
+{
+  "task": "OUTFIT_MODIFY",
+  "target_slot": "shoes",
+  "constraint": "keep_other_items"
+}
+```
+
+进入：
+
+```text
+Current Outfit
+      ↓
+Target Slot = Shoes
+      ↓
+Retrieve Shoes
+      ↓
+Composer
+      ↓
+只允许 shoes 发生变化
+      ↓
+Critic
+      ↓
+Original vs Candidate Alternatives
+```
+
+Composer 必须受到显式 Slot Constraint：
+
+```text
+locked_items:
+top
+bottom
+outerwear
+
+editable_items:
+shoes
+```
+
+从系统能力上形成：
+
+> Local Outfit Editing。
+
+---
+
+# 十五、新品衣橱兼容性分析
+
+第二类核心用户任务：
+
+```text
+“这件衣服适合买吗？”
+```
+
+输入可以首先使用结构化商品属性：
+
+```json
+{
+  "category": "coat",
+  "color": "...",
+  "material": "...",
+  "style": "...",
+  "fit": "..."
+}
+```
+
+之后再扩展 Vision。
+
+完整流程：
+
+```text
+New Item
+   ↓
+Attribute Understanding
+   ↓
+Embedding
+   ↓
+Wardrobe Retrieval
+   ↓
+找到潜在搭配单品
+   ↓
+Composer
+   ↓
+尝试构建多套 Outfit
+   ↓
+Critic
+   ↓
+Compatibility Analysis
+```
+
+系统不直接评价：
+
+```text
+“这件衣服好不好看。”
+```
+
+而是回答：
+
+```text
+它和你的衣橱到底有多兼容？
+```
+
+可以计算：
+
+```text
+可搭配下装数量
+可搭配鞋履数量
+可组成完整 Outfit 数量
+与已有单品的功能重叠程度
+适用场景覆盖
+```
+
+最终：
+
+```text
+衣橱兼容性：高
+
+可以和现有：
+4 条下装
+3 双鞋
+2 件外套
+
+组成 6 套合理 Outfit。
+
+主要问题：
+与你已有的两件大衣风格和功能较为重复。
+```
+
+这使 StyleForge 从：
+
+> Outfit Recommendation
+
+扩展为：
+
+> Wardrobe Intelligence。
+
+---
+
+# 十六、Wardrobe Gap 与品牌知识
+
+品牌知识不进入标准推荐链路。
+
+只有出现：
+
+```text
+wardrobe_gap
+```
+
+时才调用。
+
+例如 Critic 多次发现：
+
+```text
+当前衣橱缺少：
+
+深棕色
+半正式
+低跟
+复古鞋履
+```
+
+生成：
+
+```json
+{
+  "wardrobe_gap": {
+    "category": "shoes",
+    "preferred_color": "dark_brown",
+    "style": ["vintage", "semi_formal"],
+    "heel": "low"
+  }
+}
+```
+
+如果用户继续询问：
+
+```text
+“可以买什么？”
+```
+
+才进入：
+
+```text
+Wardrobe Gap
+      ↓
+Product Requirement
+      ↓
+Brand / Product Knowledge
+      ↓
+Purchase Direction
+```
+
+这样购物能力不会污染日常穿搭推荐。
+
+---
+
+# 十七、Agent 2：Outfit Composer Agent
+
+Composer 的本质仍然只有一个：
+
+> 将候选衣橱单品组合成最符合当前任务的完整 Outfit。
+
+但输入从：
+
+```text
+Candidates
+```
+
+升级为：
+
+```text
+Candidates
++
+Request Signature
++
+Style Knowledge
++
+Item Knowledge
++
+Weather Context
++
+Preference Memory
++
+Recent Outfit History
+```
+
+输入建议：
+
+```json
+{
+  "request_signature": {},
+  "context_pack": {},
+  "candidate_pool": {},
+  "composition_constraints": {},
+  "recent_outfit_signatures": []
+}
+```
+
+输出：
+
+```json
+{
+  "outfits": [
+    {
+      "items": {},
+      "composition_strategy": "",
+      "evidence_refs": []
+    }
+  ]
+}
+```
+
+这里建议保留：
+
+```text
+composition_strategy
+```
+
+但不要暴露完整 Chain-of-Thought。
+
+它只记录可解释的最终决策摘要，例如：
+
+```text
+“使用短款外套平衡宽松下装比例，同时选择低饱和皮鞋保持复古氛围。”
+```
+
+---
+
+# 十八、Validity Validator
+
+Validator 仍然不是 Agent。
+
+它只检查确定性约束：
+
+```text
+item 是否真实存在
+item 是否属于当前用户
+是否出现重复 item
+必须槽位是否完整
+Local Editing 是否修改了被锁定单品
+季节等明显硬冲突
+Schema 是否合法
+```
+
+例如：
+
+```text
+Composer
+   ↓
+Validator FAIL
+   ↓
+直接要求 Composer 修正
+```
+
+不要把确定性错误交给 Critic 用 LLM 打分解决。
+
+---
+
+# 十九、Agent 3：Outfit Critic Agent
+
+Critic 继续使用 v3.2.1-final 已经确定的五维评价体系：
+
+```text
+1. 需求还原度
+2. 请求特异性
+3. 搭配协调性
+4. 实穿性
+5. 新鲜感
+```
+
+v3.3 不增加：
+
+```text
+天气分
+风格知识分
+Memory 分
+```
+
+因为它们不是新的评价目标。
+
+而是已有五维评价的证据。
+
+对应关系：
+
+| 评价维度  | 主要证据                                     |
+| ----- | ---------------------------------------- |
+| 需求还原度 | User Request + Request Signature         |
+| 请求特异性 | Request Signature + Style Knowledge      |
+| 搭配协调性 | Item Attributes + Style / Item Knowledge |
+| 实穿性   | Weather + Occasion + Practical Context   |
+| 新鲜感   | Recent Outfit Memory                     |
+
+Critic 输出：
+
+```json
+{
+  "scores": {
+    "request_alignment": 4.5,
+    "specificity": 4.2,
+    "coordination": 4.6,
+    "wearability": 3.8,
+    "novelty": 4.0
+  },
+
+  "issues": [],
+
+  "decision": "accept",
+
+  "next_action": null
+}
+```
+
+---
+
+# 二十、Critic Feedback Loop
+
+Critic 只允许产生三类核心结果：
+
+```text
+ACCEPT
+RECOMPOSE
+RETRIEVE_MORE
+```
+
+### ACCEPT
+
+候选充分，搭配合理。
+
+```text
+Critic
+ ↓
+Final Response
+```
+
+### RECOMPOSE
+
+已有候选足够，但组合不好。
+
+```text
+Critic
+ ↓
+Composer
+```
+
+例如：
+
+```text
+候选鞋没问题，
+只是当前选择和裤子组合不理想。
+```
+
+### RETRIEVE_MORE
+
+当前 Candidate Pool 本身不够。
+
+```text
+Critic
+ ↓
+Agent 1
+ ↓
+调整 Retrieval Plan
+```
+
+例如：
+
+```text
+当前候选中没有满足场合要求的鞋。
+```
+
+必须设置：
+
+```text
+retry_count
+```
+
+避免无限循环。
+
+---
+
+# 二十一、Contextual Advice
+
+Contextual Advice 不作为 Agent。
+
+它是最终结果的一部分。
+
+例如：
+
+```json
+{
+  "contextual_advice": [
+    {
+      "type": "weather",
+      "message": "下午降雨概率较高，建议带伞。"
+    }
+  ]
+}
+```
+
+可以包括：
+
+```text
+降雨提醒
+降温提醒
+大风提醒
+室内外温差
+长时间步行
+防晒提醒
+```
+
+关键要求：
+
+> Advice 必须来自 Context Pack 中已有事实。
+
+不能让 LLM 凭空生成环境提醒。
+
+---
+
+# 二十二、LangGraph State
+
+建议整个系统围绕统一 State 工作：
+
+```python
+class StyleForgeState(TypedDict):
+
+    # Request
+    user_request: str
+    task_type: str
+
+    # Understanding
+    request_signature: dict
+    context_requirements: dict
+
+    # Context
+    context_pack: dict
+
+    # Retrieval
+    retrieval_plans: list
+    candidate_pool: dict
+
+    # Generation
+    outfits: list
+
+    # Evaluation
+    assessments: list
+    decision: str
+
+    # Loop control
+    retry_count: int
+    max_retry: int
+
+    # Interaction
+    current_outfit: dict | None
+    edit_constraints: dict | None
+
+    # Final
+    final_recommendation: dict | None
+    contextual_advice: list
+```
+
+所有节点只读写自己的 State 字段。
+
+禁止：
+
+```text
+Agent 之间直接互相调用
+```
+
+而应该：
+
+```text
+Agent
+ ↓
+State
+ ↓
+LangGraph
+ ↓
+Next Node
+```
+
+这样调试、Tracing 和 Retry 都更清晰。
+
+---
+
+# 二十三、推荐主链路
+
+标准推荐：
+
+```text
+START
+  ↓
+Task Router
+  ↓
+Semantic Retrieval Agent
+  ↓
+Context Requirements
+  ↓
+Context Router
+  ↓
+┌───────────────┬────────────────┬──────────────┐
+│               │                │              │
+Style RAG     Item RAG       Weather MCP      Memory
+│               │                │              │
+└───────────────┴────────────────┴──────────────┘
+                       ↓
+                  Context Pack
+                       ↓
+            Semantic Retrieval Agent
+                       ↓
+              Wardrobe Retrieval
+                       ↓
+              Composer Agent
+                       ↓
+                  Validator
+                       ↓
+                Critic Agent
+                 ↓    ↓    ↓
+             ACCEPT  RECOMPOSE  RETRIEVE_MORE
+                 │      │           │
+                 │      └→ Composer │
+                 │                  │
+                 │            Agent 1 / Retriever
+                 │                  │
+                 └──────────────────┘
+                       ↓
+                 Final Response
+```
+
+---
+
+# 二十四、多任务子图
+
+系统并不是所有请求都执行完整主链路。
+
+## Outfit Recommend
+
+```text
+Agent1
+→ Context
+→ Retrieval
+→ Agent2
+→ Validator
+→ Agent3
+```
+
+## Outfit Modify
+
+```text
+Current Outfit
+→ Modification Parser
+→ Retrieval
+→ Agent2
+→ Agent3
+```
+
+## Style Advice
+
+```text
+Agent1
+→ Style RAG
+→ Wardrobe Retrieval（可选）
+→ Response
+```
+
+## Item Advice
+
+```text
+Agent1
+→ Item RAG
+→ Wardrobe Retrieval
+→ Composer
+```
+
+## Wardrobe Compatibility
+
+```text
+New Item
+→ Attribute Extraction
+→ Wardrobe Retrieval
+→ Composer
+→ Critic
+→ Compatibility Report
+```
+
+## Wardrobe Gap
+
+```text
+Wardrobe Analysis
+→ Gap Detection
+→ Recommendation
+→ Brand Knowledge（用户要求购买建议时）
+```
+
+这才是真正意义上的：
+
+> Dynamic Agent Workflow。
+
+---
+
+# 二十五、失败与降级机制
+
+扩展系统必须允许部分能力失败。
+
+### Style RAG unavailable
+
+```text
+跳过 Style Context
+→ 使用 Request + Wardrobe Attributes
+```
+
+### Weather unavailable
+
+```text
+天气字段标记 unavailable
+→ 不生成天气相关 Advice
+```
+
+### Memory unavailable
+
+```text
+当前请求正常执行
+→ Novelty 只依据当前候选判断
+```
+
+### Structured Output 失败
+
+```text
+Schema Validate
+→ Retry Structured Generation
+→ Fallback Parser
+```
+
+### LLM 服务不可用
+
+进入最低保障路径：
+
+```text
+基础 Wardrobe Retrieval
++
+确定性 Validator
++
+简单候选输出
+```
+
+Fallback 的目标不是模拟完整五维评价。
+
+它只保证：
+
+> 系统可以继续运行，并避免明显非法结果。
+
+---
+
+# 二十六、Tracing 与可解释性
+
+每一次请求生成一个：
+
+```text
+trace_id
+```
+
+记录：
+
+```text
+Task Type
+Request Signature
+Context Requirements
+实际调用的 Tools
+RAG Query
+Retrieved Knowledge IDs
+Wardrobe Retrieval Query
+Candidates
+Composer Result
+Validator Result
+Critic Scores
+Critic Decision
+Retry Count
+Final Result
+Latency
+```
+
+前端不展示内部 Chain-of-Thought。
+
+只展示：
+
+```text
+理解了什么
+查询了什么信息
+使用了哪些知识
+为什么选择当前方案
+Critic 发现了什么问题
+是否发生过重检索 / 重组合
+```
+
+例如：
+
+```text
+✓ 识别任务：音乐剧观演
+
+✓ 获取纽约明日天气
+
+✓ 检索 French Chic 风格知识
+
+✓ 从衣橱筛选 18 件候选
+
+✓ Composer 生成 3 套方案
+
+↻ Critic 判断第一轮鞋履不适合雨天
+
+✓ 重新组合鞋履
+
+✓ 最终方案通过
+```
+
+这会成为 StyleForge 最重要的 Demo 页面之一。
+
+---
+
+# 二十七、核心后端模块
+
+推荐后端模块拆分：
+
+```text
+app/
+├── api/
+│   ├── wardrobe.py
+│   ├── outfits.py
+│   ├── feedback.py
+│   ├── compatibility.py
+│   └── websocket.py
+│
+├── agents/
+│   ├── semantic_retrieval.py
+│   ├── outfit_composer.py
+│   └── outfit_critic.py
+│
+├── orchestration/
+│   ├── graph.py
+│   ├── state.py
+│   ├── task_router.py
+│   ├── context_router.py
+│   └── retry_controller.py
+│
+├── retrieval/
+│   ├── wardrobe_retriever.py
+│   ├── style_retriever.py
+│   ├── item_retriever.py
+│   └── query_builder.py
+│
+├── knowledge/
+│   ├── ingestion.py
+│   ├── chunking.py
+│   └── schemas.py
+│
+├── tools/
+│   ├── weather/
+│   │   ├── client.py
+│   │   └── schemas.py
+│   └── registry.py
+│
+├── memory/
+│   ├── preference_memory.py
+│   ├── outfit_history.py
+│   └── feedback_memory.py
+│
+├── validators/
+│   └── outfit_validator.py
+│
+├── models/
+│   ├── wardrobe.py
+│   ├── outfit.py
+│   ├── feedback.py
+│   └── user.py
+│
+└── services/
+    ├── recommendation_service.py
+    ├── modification_service.py
+    └── compatibility_service.py
+```
+
+核心原则：
+
+```text
+Agent ≠ Service
+Agent ≠ Retriever
+Agent ≠ Tool
+Agent ≠ Validator
+```
+
+这样项目不会重新退化成“什么模块都叫 Agent”。
+
+---
+
+# 二十八、前端扩展
+
+前端主要新增四个交互能力。
+
+### Outfit Trace
+
+展示：
+
+```text
+请求理解
+Context 获取
+候选检索
+搭配生成
+Critic 判断
+Retry
+```
+
+### Feedback
+
+```text
+👍
+😐
+👎
+
+换鞋
+换外套
+太正式
+太普通
+颜色不喜欢
+```
+
+### Local Editing
+
+用户可以直接点 Outfit 中某个单品：
+
+```text
+鞋
+ ↓
+换一个
+```
+
+### Wardrobe Compatibility
+
+上传或输入新品：
+
+```text
+这件值得买吗？
+```
+
+系统展示：
+
+```text
+兼容度
+可组合单品
+可构成 Look
+衣橱重复度
+缺口 / 优势
+```
+
+---
+
+# 二十九、v3.3 的技术闭环
+
+至此整个系统形成：
+
+```text
+                 User Request
+                       ↓
+                 Task Routing
+                       ↓
+                 Agent Reasoning
+                       ↓
+           Context Requirement Decision
+                       ↓
+       ┌───────────────┼────────────────┐
+       ▼               ▼                ▼
+      RAG             MCP             Memory
+       │               │                │
+       └───────────────┼────────────────┘
+                       ↓
+                  Context Pack
+                       ↓
+              Wardrobe Retrieval
+                       ↓
+                 Composition
+                       ↓
+                  Validation
+                       ↓
+                   Critique
+                       ↓
+         ┌─────────────┼─────────────┐
+         ▼             ▼             ▼
+       Accept       Recompose    Retrieve More
+         │
+         ▼
+     User Feedback
+         │
+         ▼
+       Memory
+         │
+         └──────────────→ Next Request
+```
+
+这才是 StyleForge v3.3 真正应该形成的完整闭环。
+
+---
+
+# 三十、最终项目定位
+
+v3.3 完成后，StyleForge 不应再被描述成：
+
+> “一个使用三个 Agent 推荐穿搭的项目。”
+
+更准确的定义是：
+
+> **StyleForge is a context-aware multi-agent personal styling system that dynamically retrieves wardrobe items, acquires external knowledge and environmental context, composes outfits, evaluates them through a unified rubric, and continuously adapts recommendations through user feedback and memory.**
+
+系统层面展示：
+
+```text
+Multi-Agent Orchestration
++
+Semantic Retrieval
++
+RAG
++
+Dynamic Tool Routing
++
+MCP
++
+External Context
++
+User Memory
++
+Multimodal Wardrobe
++
+Bounded Feedback Loop
++
+Local Outfit Editing
++
+Wardrobe Compatibility Analysis
+```
+
+用户层面则表现为：
+
+```text
+“明天去纽约看音乐剧穿什么？”
+→ 理解场景
+→ 判断需要天气
+→ 获取天气
+→ 查询衣橱
+→ 搭配
+→ Critic 评审
+→ 输出建议
+
+
+“想穿 American Vintage。”
+→ 判断需要 Style Knowledge
+→ RAG
+→ 检索衣橱
+→ 搭配
+→ Critic 验证风格是否真正成立
+
+
+“鞋不好看，换一双。”
+→ 识别 Local Editing
+→ 锁定其他单品
+→ 检索鞋履
+→ 局部重组
+→ 比较评审
+
+
+“这件新大衣值得买吗？”
+→ 理解新品属性
+→ 与整个衣橱进行 Retrieval
+→ 尝试构造 Outfit
+→ 分析兼容性和重复度
+```
+
+因此 v3.3 最重要的升级并不是“技术栈变多”。
+
+而是：
+
+> **Agent 开始真正决定自己需要什么信息，并利用知识、工具、环境和历史状态完成不同类型的穿搭决策。**
+
+整个系统仍然只有三个核心推理 Agent。
+
+但是它们背后拥有可插拔的：
+
+```text
+Knowledge
+Tools
+Memory
+Retrieval
+Validators
+External Context
+```
+
+最终形成一个职责边界清晰、可以独立扩展、具备实际工程深度，并且能够清楚解释“为什么这里需要 Agent”的完整 AI Styling System。

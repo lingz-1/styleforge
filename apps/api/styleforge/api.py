@@ -33,6 +33,10 @@ from styleforge.repositories.user_preferences_repository import (
 from styleforge.services.order_import import parse_order_workbook
 from styleforge.services.personal_embeddings import embed_personal_items
 from styleforge.services.personal_images import bind_personal_image
+from styleforge.services.wardrobe_item_service import (
+    create_photo_item,
+    update_personal_item,
+)
 from styleforge.workflow.graph import StyleForgeWorkflow
 
 
@@ -73,6 +77,26 @@ class PersonalImageUpload(BaseModel):
 
 class EvaluationWeightsRequest(BaseModel):
     weights: dict[str, float]
+
+
+class PhotoItemRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    content_base64: str = Field(min_length=1, max_length=30_000_000)
+    item_type: str = Field(min_length=1, max_length=64)
+    name: str = Field(default="", max_length=128)
+    subtype: str = Field(default="", max_length=64)
+    color: str = Field(default="", max_length=64)
+    gender: str = Field(default="women", max_length=16)
+    size: str = Field(default="", max_length=16)
+
+
+class UpdateItemRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=128)
+    item_type: str | None = Field(default=None, max_length=64)
+    subtype: str | None = Field(default=None, max_length=64)
+    color: str | None = Field(default=None, max_length=64)
+    gender: str | None = Field(default=None, max_length=16)
+    size: str | None = Field(default=None, max_length=16)
 
 
 settings = Settings.from_env()
@@ -212,7 +236,25 @@ def get_wardrobe(user_id: str) -> dict[str, Any]:
             "ORDER BY c.item_type, c.item_id",
             (user_id,),
         ).fetchall()
-    return {"user_id": user_id, "count": len(rows), "items": [_catalog_row_to_dict(row) for row in rows]}
+        items = []
+        for row in rows:
+            item = _catalog_row_to_dict(row)
+            if item["image_status"] == "available":
+                try:
+                    image_path = _resolve_image_path(
+                        connection,
+                        source=row["source"],
+                        relative_image_path=row["relative_image_path"],
+                        item_id=row["item_id"],
+                    )
+                    if not image_path.is_file():
+                        item["image_status"] = "missing"
+                        item["image_url"] = ""
+                except HTTPException:
+                    item["image_status"] = "missing"
+                    item["image_url"] = ""
+            items.append(item)
+    return {"user_id": user_id, "count": len(items), "items": items}
 
 
 @app.post("/wardrobes/{user_id}/imports", status_code=201)
@@ -339,6 +381,56 @@ def upload_personal_item_image(
         raise HTTPException(status_code=422, detail=f"Invalid image: {error}") from error
 
 
+@app.post("/wardrobes/{user_id}/items/photo", status_code=201)
+def create_wardrobe_photo_item(
+    user_id: str,
+    request: PhotoItemRequest,
+) -> dict[str, Any]:
+    payload = _decode_base64(request.content_base64, maximum_bytes=20 * 1024 * 1024)
+    try:
+        return create_photo_item(
+            database_path=settings.database_path,
+            artifact_root=settings.artifact_root,
+            user_id=user_id,
+            image_bytes=payload,
+            model_dir=settings.artifact_root / "models",
+            device="cuda",
+            name=request.name,
+            item_type=request.item_type,
+            subtype=request.subtype,
+            color=request.color,
+            gender=request.gender,
+            size=request.size,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.put("/wardrobes/{user_id}/items/{item_id}")
+def update_wardrobe_item(
+    user_id: str,
+    item_id: str,
+    request: UpdateItemRequest,
+) -> dict[str, Any]:
+    try:
+        return update_personal_item(
+            database_path=settings.database_path,
+            user_id=user_id,
+            item_id=item_id,
+            model_dir=settings.artifact_root / "models",
+            device="cuda",
+            name=request.name,
+            item_type=request.item_type,
+            subtype=request.subtype,
+            color=request.color,
+            gender=request.gender,
+            size=request.size,
+        )
+    except ValueError as error:
+        status_code = 404 if "not found" in str(error) else 422
+        raise HTTPException(status_code=status_code, detail=str(error)) from error
+
+
 @app.post("/wardrobes/{user_id}/items", status_code=201)
 def add_wardrobe_item(user_id: str, request: WardrobeItemRequest) -> dict[str, Any]:
     with database_session(settings.database_path) as connection:
@@ -422,28 +514,52 @@ def _resolve_image_path(
     *,
     source: str,
     relative_image_path: str,
+    item_id: str | None = None,
 ) -> Path:
+    """Resolve an image file, preferring the dataset root then the personal root.
+
+    Uploaded and bound photos are stored under ``personal_image_root`` while
+    the catalog row may still carry a dataset ``source`` (e.g. polyvore) whose
+    image root is not configured. Fall back to the item owner's personal image
+    root so those images remain reachable. Raises 404 when no root or file
+    exists (an absent image, not a server error).
+    """
+    roots: list[Path] = []
     image_root = get_source_image_root(connection, source)
     if image_root is None and source == "polyvore":
         image_root = settings.image_root
-    if image_root is None:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Image root is not configured for source: {source}",
-        )
-    image_root = image_root.resolve()
+    if image_root is not None:
+        roots.append(image_root)
+    if item_id is not None:
+        user_row = connection.execute(
+            "SELECT user_id FROM wardrobe_items "
+            "WHERE item_id = ? AND active = 1 LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        if user_row is not None:
+            roots.append(personal_image_root(settings.artifact_root, user_row["user_id"]))
+    if not roots:
+        raise HTTPException(status_code=404, detail="Item image not found")
+
     relative_path = PurePosixPath(relative_image_path)
-    image_path = image_root.joinpath(*relative_path.parts).resolve()
-    if not image_path.is_relative_to(image_root):
-        raise HTTPException(status_code=400, detail="Invalid image path")
-    return image_path
+    for root in roots:
+        resolved_root = root.resolve()
+        candidate = resolved_root.joinpath(*relative_path.parts).resolve()
+        if not candidate.is_relative_to(resolved_root):
+            raise HTTPException(status_code=400, detail="Invalid image path")
+        if candidate.is_file():
+            return candidate
+    # No file exists under any configured root; return the first candidate so
+    # the caller reports 404 instead of falling through to a missing image.
+    return roots[0].resolve().joinpath(*relative_path.parts).resolve()
 
 
-def _image_response(connection, row):
+def _image_response(connection, row, *, item_id: str):
     image_path = _resolve_image_path(
         connection,
         source=row["source"],
         relative_image_path=row["relative_image_path"],
+        item_id=item_id,
     )
     if row["image_status"] != "available" or not image_path.is_file():
         raise HTTPException(status_code=404, detail="Item image not found")
@@ -460,7 +576,7 @@ def get_item_image(item_id: str):
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Catalog item not found")
-        return _image_response(connection, row)
+        return _image_response(connection, row, item_id=item_id)
 
 
 @app.get("/items/{item_id}/images")
@@ -504,7 +620,7 @@ def get_item_image_by_position(item_id: str, position: int):
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Item image not found")
-        return _image_response(connection, row)
+        return _image_response(connection, row, item_id=item_id)
 
 
 def main() -> None:

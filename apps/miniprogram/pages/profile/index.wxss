@@ -1,0 +1,45 @@
+.row {
+  display: flex;
+  align-items: center;
+}
+
+.label {
+  width: 140rpx;
+  flex-shrink: 0;
+}
+
+.input {
+  flex: 1;
+}
+
+.save-user {
+  color: #409eff;
+  padding-left: 16rpx;
+}
+
+.hint {
+  color: #888;
+  font-size: 24rpx;
+  margin-bottom: 16rpx;
+}
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 16rpx;
+}
+
+.label {
+  width: 140rpx;
+  flex-shrink: 0;
+}
+
+.slider {
+  flex: 1;
+}
+
+.value {
+  width: 80rpx;
+  text-align: right;
+  color: #555;
+}

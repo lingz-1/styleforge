@@ -1,0 +1,47 @@
+.input {
+  width: 100%;
+  min-height: 140rpx;
+  font-size: 28rpx;
+  margin-bottom: 16rpx;
+}
+
+.section-title {
+  font-weight: 600;
+  font-size: 28rpx;
+  margin-bottom: 12rpx;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6rpx 0;
+}
+
+.kv {
+  color: #888;
+  flex-shrink: 0;
+  margin-right: 16rpx;
+}
+
+.val {
+  text-align: right;
+}
+
+.outfit-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12rpx;
+  margin-bottom: 12rpx;
+}
+
+.outfit-img {
+  width: calc(50% - 8rpx);
+  height: 220rpx;
+  border-radius: 8rpx;
+}
+
+.reason {
+  font-size: 24rpx;
+  color: #555;
+  padding: 4rpx 0;
+}

@@ -1,0 +1,26 @@
+{
+  "pages": [
+    "pages/wardrobe/index",
+    "pages/upload/index",
+    "pages/import/index",
+    "pages/recommend/index",
+    "pages/profile/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "StyleForge",
+    "navigationBarBackgroundColor": "#ffffff",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f5f5f5"
+  },
+  "tabBar": {
+    "color": "#999999",
+    "selectedColor": "#409eff",
+    "list": [
+      { "pagePath": "pages/wardrobe/index", "text": "衣柜" },
+      { "pagePath": "pages/recommend/index", "text": "推荐" },
+      { "pagePath": "pages/profile/index", "text": "我的" }
+    ]
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

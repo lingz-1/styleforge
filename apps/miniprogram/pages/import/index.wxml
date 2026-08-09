@@ -1,0 +1,53 @@
+<view class="container">
+  <view class="btn-primary" bindtap="onChooseFile">
+    {{previewing ? '解析中...' : '选择订单 Excel'}}
+  </view>
+  <view class="hint">从聊天/文件中选 xlsx 订单，仅「交易成功」且无售后信号的行可加入衣柜。</view>
+
+  <block wx:if="{{statistics}}">
+    <view class="card">
+      <view class="stats">
+        <view class="stat">
+          <text class="num">{{statistics.total_rows}}</text>
+          <text class="lbl">订单行</text>
+        </view>
+        <view class="stat">
+          <text class="num">{{statistics.eligible_order_rows}}</text>
+          <text class="lbl">已收货</text>
+        </view>
+        <view class="stat">
+          <text class="num">{{statistics.candidate_rows}}</text>
+          <text class="lbl">候选</text>
+        </view>
+        <view class="stat">
+          <text class="num">{{statistics.excluded_rows}}</text>
+          <text class="lbl">排除</text>
+        </view>
+      </view>
+    </view>
+
+    <view
+      wx:for="{{rows}}" wx:key="row_id"
+      class="card row-item"
+      data-row-id="{{item.row_id}}"
+      bindtap="onToggle"
+    >
+      <view class="row-head">
+        <checkbox checked="{{checked[item.row_id]}}" color="#409eff" />
+        <text class="name">{{item.product_name}}</text>
+      </view>
+      <view class="meta">
+        {{item.order_status}} · {{item.predicted_item_type || '未识别'}} ·
+        {{item.predicted_color || '无色'}}
+      </view>
+    </view>
+
+    <picker range="{{['women','men']}}" bindchange="onGender">
+      <view class="gender-picker">性别兜底：{{genderOverride || 'women'}} ›</view>
+    </picker>
+
+    <view class="btn-primary" bindtap="onSubmit">
+      {{committing ? '提交中...' : '确认并加入衣柜（' + selectedCount + ' 件）'}}
+    </view>
+  </block>
+</view>

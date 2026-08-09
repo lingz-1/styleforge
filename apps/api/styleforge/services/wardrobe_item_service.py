@@ -1,0 +1,252 @@
+"""Personal wardrobe item lifecycle: create-from-photo and metadata updates."""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from styleforge.core.categories import infer_slot
+from styleforge.core.schemas import CatalogItem, EmbeddingStatus, ImageStatus
+from styleforge.repositories.catalog_repository import upsert_items
+from styleforge.repositories.database import database_session, initialize_database
+from styleforge.repositories.dataset_source_repository import register_dataset_source
+from styleforge.repositories.wardrobe_import_repository import (
+    personal_image_root,
+    personal_source_for_user,
+)
+from styleforge.services.personal_embeddings import embed_personal_items
+from styleforge.services.personal_images import save_personal_image
+
+ALLOWED_ITEM_TYPES = {
+    "top", "pants", "shorts", "skirt", "dress", "jumpsuit", "suit", "outfit_set",
+    "outwear", "shoes", "bag", "eyewear", "earrings", "necklace", "bracelet",
+    "rings", "belts", "hats", "hairwear", "jewellery", "legwear", "underwear",
+    "sleepwear", "swimwear", "activewear_bra", "accessory",
+}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _item_to_dict(connection, item_id: str) -> dict[str, Any] | None:
+    row = connection.execute(
+        "SELECT * FROM catalog_items WHERE item_id = ?", (item_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "item_id": row["item_id"],
+        "source": row["source"],
+        "gender": row["gender"],
+        "item_type": row["item_type"],
+        "main_category": row["main_category"],
+        "name": row["name"],
+        "color": row["color"],
+        "description": row["description"],
+        "image_status": row["image_status"],
+        "embedding_status": row["embedding_status"],
+        "image_url": f"/items/{row['item_id']}/image",
+    }
+
+
+def create_photo_item(
+    *,
+    database_path: Path,
+    artifact_root: Path,
+    user_id: str,
+    image_bytes: bytes,
+    model_dir: Path,
+    device: str = "cuda",
+    name: str = "",
+    item_type: str = "",
+    subtype: str = "",
+    color: str = "",
+    gender: str = "women",
+    size: str = "",
+) -> dict[str, Any]:
+    """Create a new personal wardrobe item from a user photo."""
+    if not item_type.strip():
+        raise ValueError("item_type is required")
+    item_type = item_type.strip()
+    if item_type not in ALLOWED_ITEM_TYPES:
+        raise ValueError(f"Unsupported item_type: {item_type}")
+
+    initialize_database(database_path)
+    item_id = f"personal:{uuid.uuid4()}"
+    source = personal_source_for_user(user_id)
+    root = personal_image_root(artifact_root, user_id)
+    filename = save_personal_image(root, item_id, image_bytes)
+
+    features = tuple(
+        value
+        for value in (subtype.strip(), f"size:{size.strip()}" if size.strip() else "")
+        if value
+    )
+    item = CatalogItem(
+        item_id=item_id,
+        source=source,
+        gender=gender or "women",
+        item_type=item_type,
+        main_category=infer_slot(item_type),
+        name=name.strip() or "未命名衣物",
+        color=color.strip(),
+        description="",
+        features=features,
+        image_filename=filename,
+        relative_image_path=filename,
+        image_status=ImageStatus.AVAILABLE,
+        embedding_status=EmbeddingStatus.PENDING,
+        raw_json_hash="",
+    )
+
+    with database_session(database_path) as connection:
+        register_dataset_source(
+            connection,
+            source=source,
+            image_root=root,
+            source_revision="personal-photo-v1",
+        )
+        upsert_items(connection, [item], "personal-photo-v1")
+        connection.execute(
+            """
+            INSERT INTO wardrobe_items(user_id, item_id, active, favorite, notes, added_at)
+            VALUES (?, ?, 1, 0, '', ?)
+            ON CONFLICT(user_id, item_id) DO UPDATE SET active = 1
+            """,
+            (user_id, item_id, _now()),
+        )
+        connection.execute(
+            """
+            INSERT INTO personal_wardrobe_items(
+                item_id, user_id, quantity_owned, ownership_status, review_status,
+                created_at, updated_at
+            ) VALUES (?, ?, 1, 'owned', 'confirmed', ?, ?)
+            ON CONFLICT(item_id) DO UPDATE SET
+                ownership_status = 'owned', review_status = 'confirmed',
+                updated_at = excluded.updated_at
+            """,
+            (item_id, user_id, _now(), _now()),
+        )
+        connection.execute(
+            """
+            INSERT INTO catalog_item_images(
+                item_id, position, image_role, image_filename,
+                relative_image_path, image_status, is_primary
+            ) VALUES (?, 0, 'primary', ?, ?, 'available', 1)
+            """,
+            (item_id, filename, filename),
+        )
+
+    try:
+        embedding = embed_personal_items(
+            database_path=database_path,
+            item_ids=[item_id],
+            model_dir=model_dir,
+            device=device,
+            batch_size=1,
+        )
+    except BaseException as error:
+        embedding = {
+            "status": "failed",
+            "error_type": type(error).__name__,
+            "error": str(error),
+        }
+
+    with database_session(database_path) as connection:
+        item_dict = _item_to_dict(connection, item_id)
+    return {"item_id": item_id, "item": item_dict, "embedding": embedding}
+
+
+def update_personal_item(
+    *,
+    database_path: Path,
+    user_id: str,
+    item_id: str,
+    model_dir: Path,
+    device: str = "cuda",
+    name: str | None = None,
+    item_type: str | None = None,
+    subtype: str | None = None,
+    color: str | None = None,
+    gender: str | None = None,
+    size: str | None = None,
+) -> dict[str, Any]:
+    """Update metadata of an item in the user's wardrobe."""
+    initialize_database(database_path)
+    with database_session(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT c.* FROM catalog_items AS c
+            JOIN wardrobe_items AS w ON w.item_id = c.item_id
+            WHERE w.user_id = ? AND w.active = 1 AND c.item_id = ?
+            """,
+            (user_id, item_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Wardrobe item not found")
+
+        updates: dict[str, str] = {}
+        if name is not None:
+            updates["name"] = name.strip()
+        if item_type is not None:
+            item_type = item_type.strip()
+            if item_type not in ALLOWED_ITEM_TYPES:
+                raise ValueError(f"Unsupported item_type: {item_type}")
+            updates["item_type"] = item_type
+            updates["main_category"] = infer_slot(item_type)
+        if color is not None:
+            updates["color"] = color.strip()
+        if gender is not None:
+            updates["gender"] = gender.strip()
+        if not updates:
+            raise ValueError("No fields to update")
+
+        # Rebuild features when subtype/size is provided.
+        if subtype is not None or size is not None:
+            existing = tuple(json.loads(row["features_json"]))
+            features: list[str] = []
+            new_subtype = subtype.strip() if subtype is not None else ""
+            new_size = size.strip() if size is not None else ""
+            for value in existing:
+                if value.startswith("size:"):
+                    if new_size:
+                        features.append(f"size:{new_size}")
+                elif new_subtype:
+                    features.append(new_subtype)
+                else:
+                    features.append(value)
+            if new_subtype and new_subtype not in features:
+                features.insert(0, new_subtype)
+            if new_size and f"size:{new_size}" not in features:
+                features.append(f"size:{new_size}")
+            updates["features_json"] = json.dumps(features, ensure_ascii=False)
+
+        assignments = ", ".join(f"{column} = ?" for column in updates)
+        connection.execute(
+            f"UPDATE catalog_items SET {assignments}, embedding_status = 'pending' "  # noqa: S608
+            f"WHERE item_id = ?",
+            (*updates.values(), item_id),
+        )
+
+    try:
+        embedding = embed_personal_items(
+            database_path=database_path,
+            item_ids=[item_id],
+            model_dir=model_dir,
+            device=device,
+            batch_size=1,
+        )
+    except BaseException as error:
+        embedding = {
+            "status": "failed",
+            "error_type": type(error).__name__,
+            "error": str(error),
+        }
+
+    with database_session(database_path) as connection:
+        item_dict = _item_to_dict(connection, item_id)
+    return {"item_id": item_id, "item": item_dict, "embedding": embedding}
