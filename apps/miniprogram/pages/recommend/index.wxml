@@ -51,10 +51,11 @@
       </view>
       <view class="outfit-grid">
         <image
-          wx:for="{{rec.item_ids}}"
-          wx:for-item="itemId"
-          wx:key="*this"
-          src="{{payload.baseUrl}}/items/{{itemId}}/image"
+          wx:for="{{rec.imgs}}"
+          wx:for-item="img"
+          wx:key="itemId"
+          wx:if="{{img.local}}"
+          src="{{img.local}}"
           mode="aspectFill"
           class="outfit-img"
         />

@@ -15,9 +15,15 @@
       <input value="{{name}}" bindinput="onName" placeholder="如：蓝色衬衫" class="input" />
     </view>
     <view class="row">
-      <text class="label">品类</text>
+      <text class="label">品类*</text>
       <picker range="{{types}}" value="{{typeIndex}}" bindchange="onTypeChange">
         <view class="picker">{{types[typeIndex]}} ›</view>
+      </picker>
+    </view>
+    <view class="row" wx:if="{{subtypes.length > 1}}">
+      <text class="label">细分类</text>
+      <picker range="{{subtypes}}" value="{{subtypeIndex}}" bindchange="onSubtypeChange">
+        <view class="picker">{{subtypes[subtypeIndex]}} ›</view>
       </picker>
     </view>
     <view class="row">

@@ -1,4 +1,5 @@
 const { get, post, del } = require('../../utils/request')
+const { downloadImage } = require('../../utils/image')
 
 const TYPE_LABELS = {
   top: '上装', bottom: '下装', one_piece: '连体装', outerwear: '外套',
@@ -21,6 +22,26 @@ Page({
 
   onImport() {
     wx.navigateTo({ url: '/pages/import/index' })
+  },
+
+  // Toggle one category group (collapsed by default, catalog is large).
+  onToggleGroup(e) {
+    const index = e.currentTarget.dataset.index
+    const key = `groups[${index}].open`
+    const willOpen = !this.data.groups[index].open
+    this.setData({ [key]: willOpen })
+    if (willOpen) this.downloadGroupImages(index)
+  },
+
+  expandAll() {
+    const groups = this.data.groups.map((g) => ({ ...g, open: true }))
+    this.setData({ groups })
+    groups.forEach((g, i) => this.downloadGroupImages(i))
+  },
+
+  collapseAll() {
+    const groups = this.data.groups.map((g) => ({ ...g, open: false }))
+    this.setData({ groups })
   },
 
   // 点击无图卡片直接进入补图
@@ -106,18 +127,36 @@ Page({
           name: item.name || item.item_id,
           color: item.color,
           image_status: item.image_status,
-          image_url:
+          // Remote http URL — <image> can't render it on device, so we keep it
+          // here and download to a local temp file when the group is expanded.
+          remote_url:
             item.image_status === 'available'
               ? `${app.globalData.baseUrl}${item.image_url}`
               : '',
+          image_url: '', // local temp path once downloaded
         })
       }
-      const groups = Object.keys(map).map((type) => map[type])
+      const groups = Object.keys(map).map((type) => ({ ...map[type], open: false }))
       this.setData({ groups })
     } catch (err) {
       wx.showToast({ title: String(err), icon: 'none' })
     } finally {
       this.setData({ loading: false })
+    }
+  },
+
+  // <image> on real devices rejects http URLs, so download the group's images
+  // to local temp files on demand, then update each cell's image_url.
+  async downloadGroupImages(groupIdx) {
+    const group = this.data.groups[groupIdx]
+    if (!group) return
+    for (let idx = 0; idx < group.items.length; idx += 1) {
+      const item = group.items[idx]
+      if (!item.remote_url || item.image_url) continue
+      const local = await downloadImage(item.remote_url)
+      if (local) {
+        this.setData({ [`groups[${groupIdx}].items[${idx}].image_url`]: local })
+      }
     }
   },
 })

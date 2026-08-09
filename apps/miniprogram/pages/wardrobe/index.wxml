@@ -3,9 +3,16 @@
     <view class="btn-primary upload-btn" bindtap="onUpload">＋ 上传新衣物</view>
     <view class="btn-primary import-btn" bindtap="onImport">📦 订单导入</view>
   </view>
+  <view class="collapse-row" wx:if="{{groups.length}}">
+    <view class="collapse-btn" bindtap="expandAll">全部展开</view>
+    <view class="collapse-btn" bindtap="collapseAll">全部收起</view>
+  </view>
   <view wx:for="{{groups}}" wx:key="label" class="group">
-    <view class="group-title">{{item.label}}（{{item.items.length}}）</view>
-    <view class="grid">
+    <view class="group-title" data-index="{{index}}" bindtap="onToggleGroup">
+      <text>{{item.label}}（{{item.items.length}}）</text>
+      <text class="arrow">{{item.open ? '▾' : '▸'}}</text>
+    </view>
+    <view class="grid" wx:if="{{item.open}}">
       <view
         wx:for="{{item.items}}" wx:for-item="cloth" wx:key="item_id"
         class="cell"

@@ -111,6 +111,8 @@ class OutfitCandidate:
     slot_items: dict[str, str]
     hard_valid: bool
     score: float
+    llm_score: float | None = None
+    rule_score: float | None = None
     score_details: dict[str, float] = field(default_factory=dict)
     reasons: tuple[str, ...] = ()
 
@@ -151,6 +153,8 @@ class RecommendationResult:
                     "slot_items": candidate.slot_items,
                     "hard_valid": candidate.hard_valid,
                     "score": candidate.score,
+                    "llm_score": candidate.llm_score,
+                    "rule_score": candidate.rule_score,
                     "score_details": candidate.score_details,
                     "reasons": list(candidate.reasons),
                 }

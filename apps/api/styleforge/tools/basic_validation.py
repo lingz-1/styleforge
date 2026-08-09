@@ -68,6 +68,9 @@ def proposal_to_candidate(
     proposal: dict[str, Any],
     items_by_id: dict[str, CatalogItem],
     score: float,
+    *,
+    llm_score: float | None = None,
+    rule_score: float | None = None,
 ) -> OutfitCandidate:
     """Convert a validated proposal dict into an ``OutfitCandidate``."""
     item_ids = tuple(proposal.get("item_ids", []))
@@ -85,12 +88,19 @@ def proposal_to_candidate(
         for text in (proposal.get("reasoning", ""), proposal.get("style_tag", ""))
         if text
     )
+    score_details = {}
+    if llm_score is not None:
+        score_details["llm_score"] = llm_score
+    if rule_score is not None:
+        score_details["rule_score"] = rule_score
     return OutfitCandidate(
         outfit_id=outfit_id,
         item_ids=item_ids,
         slot_items=slot_items,
         hard_valid=True,
         score=score,
-        score_details={},
+        llm_score=llm_score,
+        rule_score=rule_score,
+        score_details=score_details,
         reasons=reasons,
     )

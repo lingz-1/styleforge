@@ -1,4 +1,5 @@
 const { post } = require('../../utils/request')
+const { downloadImage } = require('../../utils/image')
 
 const DECISION = {
   accept: '✅ 采纳',
@@ -41,14 +42,37 @@ Page({
       const recs = (res.structured_result && res.structured_result.recommendations) || []
       for (const rec of recs) {
         rec.score_display = Number(rec.score || 0).toFixed(1)
+        // Download each item image to a local temp path; <image> on real
+        // devices rejects http URLs.
+        rec.imgs = rec.item_ids.map((itemId) => ({
+          itemId,
+          url: `${app.globalData.baseUrl}/items/${itemId}/image`,
+          local: '',
+        }))
       }
       res.baseUrl = app.globalData.baseUrl
       res.decisionLabel = DECISION[res.decision] || res.decision || '—'
       this.setData({ payload: res, decisionLabel: res.decisionLabel })
+      this.downloadImages(recs)
     } catch (err) {
       wx.showToast({ title: String(err), icon: 'none' })
     } finally {
       this.setData({ loading: false })
+    }
+  },
+
+  async downloadImages(recs) {
+    for (let i = 0; i < recs.length; i += 1) {
+      for (let j = 0; j < recs[i].imgs.length; j += 1) {
+        const img = recs[i].imgs[j]
+        if (img.local) continue
+        const local = await downloadImage(img.url)
+        if (local) {
+          this.setData({
+            [`payload.structured_result.recommendations[${i}].imgs[${j}].local`]: local,
+          })
+        }
+      }
     }
   },
 })

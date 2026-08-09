@@ -15,9 +15,30 @@
 }
 
 .group-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   font-size: 30rpx;
   font-weight: 600;
   margin: 16rpx 0;
+  padding: 8rpx 0;
+}
+
+.arrow {
+  color: #999;
+  font-size: 28rpx;
+}
+
+.collapse-row {
+  display: flex;
+  gap: 16rpx;
+  margin-bottom: 8rpx;
+}
+
+.collapse-btn {
+  font-size: 26rpx;
+  color: #409eff;
+  padding: 4rpx 12rpx;
 }
 
 .grid {

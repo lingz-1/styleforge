@@ -86,7 +86,13 @@ def deterministic_critic(
         ),
         explanation_assessment=ExplanationAssessment(grounded=True, unsupported_claims=[]),
         alternatives=[
-            Alternative(outfit_id=proposal.get("outfit_id", ""), strength="备选方案")
+            Alternative(
+                outfit_id=proposal.get("outfit_id", ""),
+                strength="备选方案",
+                dimension_scores=_neutral_assessment(
+                    proposal.get("outfit_id", ""), ""
+                ).dimension_scores,
+            )
             for proposal in grounded[1:3]
         ],
         decision="accept",

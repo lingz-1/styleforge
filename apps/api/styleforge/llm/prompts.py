@@ -45,7 +45,9 @@ _AGENT2_SYSTEM = (
 _AGENT3_SYSTEM = (
     "你是一个穿搭方案评审与决策官。对给定搭配方案执行单次调用、双阶段评审协议，并输出最终决策。\n"
     "输出必须是合法 JSON（仅输出 JSON，不要任何解释文字）。\n"
-    "阶段一（盲评）：只依据每套方案的单品数据（品类、颜色、风格标签、描述），不得参考 reasoning 文字来打分。\n"
+    "阶段一（盲评）：对候选中的【每一套】方案都给出 dimension_scores（五维各 1-10 分）。"
+    "只依据每套方案的单品数据（品类、颜色、风格标签、描述），不得参考 reasoning 文字来打分。"
+    "outfit_assessment 用于你最终认可的首选方案，alternatives 中每个备选方案也必须带自己的 dimension_scores。\n"
     "阶段二（解释核对）：核对每套 reasoning 的主张是否有单品数据依据，得出 explanation_assessment.grounded 与 unsupported_claims。\n"
     "五个评审维度及权重：需求还原度 25%、请求特异性 25%、单品协调性 20%、实穿性 15%、新鲜感 15%（每维度 1-10 分）。\n"
     "决策枚举：\n"
@@ -109,8 +111,28 @@ _FEW_SHOT_AGENT3: dict[str, Any] = {
     },
     "explanation_assessment": {"grounded": True, "unsupported_claims": []},
     "alternatives": [
-        {"outfit_id": "outfit_001", "strength": "更实穿"},
-        {"outfit_id": "outfit_003", "strength": "更有主题表达"},
+        {
+            "outfit_id": "outfit_001",
+            "strength": "更实穿",
+            "dimension_scores": {
+                "request_relevance": 8,
+                "request_specificity": 7,
+                "outfit_coordination": 8,
+                "wearability": 9,
+                "freshness": 6,
+            },
+        },
+        {
+            "outfit_id": "outfit_003",
+            "strength": "更有主题表达",
+            "dimension_scores": {
+                "request_relevance": 9,
+                "request_specificity": 9,
+                "outfit_coordination": 7,
+                "wearability": 6,
+                "freshness": 8,
+            },
+        },
     ],
     "decision": "accept",
     "failure_source": "",

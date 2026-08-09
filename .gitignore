@@ -20,6 +20,9 @@ polyvore_outfit_v1.0_2512.json
 .tmp_order_analysis/
 node_modules/
 
+# 前端构建产物
+apps/web/dist/
+
 # 运行日志
 *.log
 

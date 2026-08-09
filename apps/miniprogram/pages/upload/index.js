@@ -1,24 +1,56 @@
-const { post } = require('../../utils/request')
-
-const TYPES = [
-  'top', 'pants', 'skirt', 'dress', 'jumpsuit', 'outwear',
-  'shoes', 'bag', 'accessory',
-]
-const TYPE_LABELS = [
-  '上装', '裤装', '半身裙', '连衣裙', '连体装', '外套',
-  '鞋', '包', '配饰',
-]
+const { get, post } = require('../../utils/request')
 
 Page({
   data: {
+    // Main category (required) loaded from /catalog/taxonomy.
     typeIndex: 0,
-    types: TYPE_LABELS,
+    types: [],
+    typeKeys: [],
+    // Optional subtype; index 0 always means "不选择" (empty key).
+    subtypeIndex: 0,
+    subtypes: [],
+    subtypeKeys: [],
     name: '',
     color: '',
     genderIndex: 0,
     genders: ['women', 'men'],
     imagePath: '',
     submitting: false,
+  },
+
+  onLoad() {
+    this.loadTaxonomy()
+  },
+
+  async loadTaxonomy() {
+    try {
+      const res = await get('/catalog/taxonomy')
+      const categories = (res && res.categories) || []
+      this._taxonomy = categories
+      this.setData({
+        types: categories.map((c) => c.zh),
+        typeKeys: categories.map((c) => c.key),
+      })
+      this.rebuildSubtypes()
+    } catch (err) {
+      // Fall back to a minimal list if the endpoint is unreachable.
+      this._taxonomy = []
+      this.setData({
+        types: ['上装', '裤装', '半身裙', '连衣裙', '连体装', '外套', '鞋', '包', '配饰'],
+        typeKeys: ['top', 'pants', 'skirt', 'dress', 'jumpsuit', 'outwear', 'shoes', 'bag', 'accessory'],
+      })
+      this.rebuildSubtypes()
+    }
+  },
+
+  // Subtypes for the currently selected main category; first option is 不选择.
+  rebuildSubtypes() {
+    const { typeIndex, typeKeys } = this.data
+    const categories = this._taxonomy || []
+    const cat = categories.find((c) => c.key === typeKeys[typeIndex]) || { subtypes: [] }
+    const subtypes = ['不选择'].concat(cat.subtypes.map((s) => s.zh))
+    const subtypeKeys = [''].concat(cat.subtypes.map((s) => s.key))
+    this.setData({ subtypes, subtypeKeys, subtypeIndex: 0 })
   },
 
   onChooseImage() {
@@ -32,15 +64,26 @@ Page({
     })
   },
 
-  onTypeChange(e) { this.setData({ typeIndex: Number(e.detail.value) }) },
+  onTypeChange(e) {
+    this.setData({ typeIndex: Number(e.detail.value) })
+    this.rebuildSubtypes()
+  },
+  onSubtypeChange(e) { this.setData({ subtypeIndex: Number(e.detail.value) }) },
   onGenderChange(e) { this.setData({ genderIndex: Number(e.detail.value) }) },
   onName(e) { this.setData({ name: e.detail.value }) },
   onColor(e) { this.setData({ color: e.detail.value }) },
 
   async onSubmit() {
-    const { imagePath, typeIndex, types, name, color, genderIndex, genders } = this.data
+    const {
+      imagePath, typeIndex, typeKeys, subtypeIndex, subtypeKeys,
+      name, color, genderIndex, genders,
+    } = this.data
     if (!imagePath) {
       wx.showToast({ title: '请选择图片', icon: 'none' })
+      return
+    }
+    if (!typeKeys[typeIndex]) {
+      wx.showToast({ title: '请选择品类', icon: 'none' })
       return
     }
     this.setData({ submitting: true })
@@ -50,7 +93,8 @@ Page({
       const res = await post(`/wardrobes/${app.globalData.userId}/items/photo`, {
         filename: 'photo.jpg',
         content_base64: base64,
-        item_type: types[typeIndex],
+        item_type: typeKeys[typeIndex],
+        subtype: subtypeKeys[subtypeIndex] || '',
         name,
         color,
         gender: genders[genderIndex],

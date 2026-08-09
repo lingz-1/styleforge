@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from styleforge.core.config import Settings
+from styleforge.core.taxonomy import build_taxonomy
 from styleforge.repositories.database import database_session, initialize_database
 from styleforge.repositories.dataset_source_repository import (
     get_source_image_root,
@@ -495,6 +496,13 @@ def search_catalog(
     with database_session(settings.database_path) as connection:
         rows = connection.execute(sql, parameters).fetchall()
     return {"count": len(rows), "items": [_catalog_row_to_dict(row) for row in rows]}
+
+
+@app.get("/catalog/taxonomy")
+def catalog_taxonomy() -> dict[str, Any]:
+    """Bilingual category tree for upload forms: main category required,
+    subtype optional."""
+    return {"categories": build_taxonomy()}
 
 
 @app.get("/items/{item_id}")

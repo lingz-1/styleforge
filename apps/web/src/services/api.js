@@ -5,6 +5,9 @@ const http = axios.create({ baseURL: '/api', timeout: 120000 })
 // Health
 export const getHealth = () => http.get('/health')
 
+// Catalog taxonomy (main category required, subtype optional)
+export const getTaxonomy = () => http.get('/catalog/taxonomy')
+
 // Wardrobe
 export const getWardrobe = (userId) => http.get(`/wardrobes/${userId}`)
 export const removeWardrobeItem = (userId, itemId) =>

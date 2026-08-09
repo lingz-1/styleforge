@@ -144,17 +144,38 @@ def _build_by_slot(items: list[CatalogItem], task: TaskSpec) -> dict[str, list[s
     return dict(by_slot)
 
 
+def _critic_dimension_scores(
+    critic_output: dict[str, Any] | None,
+    outfit_id: str,
+) -> dict[str, Any] | None:
+    """Return the critic's five-dimension scores for an outfit, if scored.
+
+    Both the preferred ``outfit_assessment`` and every ``alternatives`` entry
+    may carry dimension scores; this resolves whichever matches the outfit.
+    """
+    if not critic_output:
+        return None
+    assessment = critic_output.get("outfit_assessment", {})
+    if assessment.get("outfit_id") == outfit_id and assessment.get("dimension_scores"):
+        return assessment["dimension_scores"]
+    for alternative in critic_output.get("alternatives", []):
+        if (
+            alternative.get("outfit_id") == outfit_id
+            and alternative.get("dimension_scores")
+        ):
+            return alternative["dimension_scores"]
+    return None
+
+
 def _critic_score(
     critic_output: dict[str, Any] | None,
     outfit_id: str,
     weights: dict[str, float] | None = None,
 ) -> float:
-    if not critic_output:
+    """Weighted LLM five-dimension score on a 0-100 scale (0 when unscored)."""
+    dimensions = _critic_dimension_scores(critic_output, outfit_id)
+    if not dimensions:
         return 0.0
-    assessment = critic_output.get("outfit_assessment", {})
-    if assessment.get("outfit_id") != outfit_id:
-        return 0.0
-    dimensions = assessment.get("dimension_scores", {})
     resolved = normalize_weights(weights)
     weighted = (
         resolved["request_relevance"] * float(dimensions.get("request_relevance", 5))
@@ -166,6 +187,34 @@ def _critic_score(
         + resolved["freshness"] * float(dimensions.get("freshness", 5))
     )
     return round(weighted * 10, 2)
+
+
+def _llm_score(
+    critic_output: dict[str, Any] | None,
+    outfit_id: str,
+    weights: dict[str, float] | None = None,
+) -> float | None:
+    """Weighted LLM score, or None when the critic did not score this outfit."""
+    if _critic_dimension_scores(critic_output, outfit_id) is None:
+        return None
+    return _critic_score(critic_output, outfit_id, weights)
+
+
+def _rule_score(
+    proposal: dict[str, Any],
+    items_by_id: dict[str, CatalogItem],
+    task: TaskSpec,
+) -> float:
+    """Deterministic rubric score on a 0-100 scale."""
+    item_list = [
+        items_by_id[item_id]
+        for item_id in proposal.get("item_ids", [])
+        if item_id in items_by_id
+    ]
+    if not item_list:
+        return 0.0
+    score, _, _ = score_outfit(item_list, task)
+    return round(score, 2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -762,29 +811,6 @@ class StyleForgeWorkflow:
             )
         return proposals
 
-    def _proposal_score(
-        self,
-        proposal: dict[str, Any],
-        items_by_id: dict[str, CatalogItem],
-        task: TaskSpec,
-        critic_output: dict[str, Any] | None,
-        preferred_id: str,
-        weights: dict[str, float] | None = None,
-    ) -> float:
-        """Score a proposal: LLM five-dimension score for the critic's pick,
-        deterministic ``score_outfit`` for the alternatives."""
-        if preferred_id and proposal.get("outfit_id") == preferred_id and critic_output:
-            return _critic_score(critic_output, preferred_id, weights)
-        item_list = [
-            items_by_id[item_id]
-            for item_id in proposal.get("item_ids", [])
-            if item_id in items_by_id
-        ]
-        if not item_list:
-            return 0.0
-        score, _, _ = score_outfit(item_list, task)
-        return round(score, 2)
-
     def _persist_node(self, state: WorkflowState) -> dict[str, Any]:
         task = state["task"]
         if state.get("llm_enabled") and (
@@ -806,21 +832,28 @@ class StyleForgeWorkflow:
             run_id = start_run(connection, task)
         items_by_id = {row["item_id"]: _row_to_catalog_item(row) for row in rows}
         critic_output = state.get("critic_output")
-        preferred_id = (critic_output or {}).get("outfit_assessment", {}).get("outfit_id", "")
-        candidates: list = []
+        weights = state.get("evaluation_weights")
+        scored: list = []
         for proposal in proposals:
             proposal_ids = set(proposal.get("item_ids", []))
             if not proposal_ids or not proposal_ids <= wardrobe_ids:
                 continue
-            score = self._proposal_score(
+            llm_score = _llm_score(critic_output, proposal.get("outfit_id", ""), weights)
+            rule_score = _rule_score(proposal, items_by_id, task)
+            sort_score = llm_score if llm_score is not None else rule_score
+            scored.append((sort_score, proposal, llm_score, rule_score))
+        # Rank by LLM score descending; rule score breaks ties.
+        scored.sort(key=lambda entry: (entry[0], entry[3]), reverse=True)
+        candidates = [
+            proposal_to_candidate(
                 proposal,
                 items_by_id,
-                task,
-                critic_output,
-                preferred_id,
-                state.get("evaluation_weights"),
+                sort_score,
+                llm_score=llm_score,
+                rule_score=rule_score,
             )
-            candidates.append(proposal_to_candidate(proposal, items_by_id, score))
+            for sort_score, proposal, llm_score, rule_score in scored
+        ]
         status = "completed" if candidates else "infeasible"
         notes = list(state.get("validation_notes", []))
         if state.get("decision") != "accept" and state.get("best_effort", {}).get("feedback"):

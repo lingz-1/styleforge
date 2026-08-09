@@ -8,33 +8,42 @@
     <div class="toolbar">
       <el-input v-model="userId" placeholder="用户 ID" style="width: 200px" @change="onUserIdChange" />
       <el-button @click="load">刷新</el-button>
+      <el-button v-if="Object.keys(grouped).length" @click="toggleAll">
+        {{ allExpanded ? '全部收起' : '全部展开' }}
+      </el-button>
     </div>
 
     <el-alert v-if="error" :title="error" type="error" show-icon class="mb" />
 
-    <div v-for="(items, type) in grouped" :key="type" class="group">
-      <h3>{{ typeLabel(type) }}（{{ items.length }}）</h3>
-      <el-row :gutter="12">
-        <el-col v-for="item in items" :key="item.item_id" :xs="12" :sm="6" :md="4">
-          <el-card shadow="hover" class="item-card">
-            <el-image :src="imageUrl(item.image_url)" fit="cover" class="item-img">
-              <template #error>
-                <div class="img-placeholder">暂无实拍图</div>
-              </template>
-            </el-image>
-            <div class="item-name">{{ item.name || item.item_id }}</div>
-            <div class="item-meta">{{ item.item_type }} · {{ item.color }}</div>
-            <div class="actions">
-              <el-button size="small" @click="openEdit(item)">编辑</el-button>
-              <el-button size="small" @click="openPhoto(item)">补图</el-button>
-              <el-button size="small" type="danger" plain @click="remove(item.item_id)">
-                移出
-              </el-button>
-            </div>
-          </el-card>
-        </el-col>
-      </el-row>
-    </div>
+    <el-collapse v-model="expandedTypes" class="mb">
+      <el-collapse-item
+        v-for="(items, type) in grouped"
+        :key="type"
+        :name="type"
+        :title="`${typeLabel(type)}（${items.length}）`"
+      >
+        <el-row :gutter="12">
+          <el-col v-for="item in items" :key="item.item_id" :xs="12" :sm="6" :md="4">
+            <el-card shadow="hover" class="item-card">
+              <el-image :src="imageUrl(item.image_url)" fit="cover" class="item-img">
+                <template #error>
+                  <div class="img-placeholder">暂无实拍图</div>
+                </template>
+              </el-image>
+              <div class="item-name">{{ item.name || item.item_id }}</div>
+              <div class="item-meta">{{ item.item_type }} · {{ item.color }}</div>
+              <div class="actions">
+                <el-button size="small" @click="openEdit(item)">编辑</el-button>
+                <el-button size="small" @click="openPhoto(item)">补图</el-button>
+                <el-button size="small" type="danger" plain @click="remove(item.item_id)">
+                  移出
+                </el-button>
+              </div>
+            </el-card>
+          </el-col>
+        </el-row>
+      </el-collapse-item>
+    </el-collapse>
     <el-empty v-if="loaded && !Object.keys(grouped).length" description="衣柜为空" />
 
     <!-- 上传新衣物 -->
@@ -53,8 +62,18 @@
       <el-form :model="createForm" label-width="80px" class="mt">
         <el-form-item label="名称"><el-input v-model="createForm.name" placeholder="如：蓝色衬衫" /></el-form-item>
         <el-form-item label="品类" required>
-          <el-select v-model="createForm.item_type" placeholder="选择品类">
-            <el-option v-for="(label, key) in TYPE_LABELS" :key="key" :label="label" :value="key" />
+          <el-select v-model="createForm.item_type" placeholder="选择品类（必选）">
+            <el-option v-for="c in taxonomy" :key="c.key" :label="c.zh" :value="c.key" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="细分类">
+          <el-select
+            v-model="createForm.subtype"
+            placeholder="可选，如不确定可留空"
+            clearable
+            :disabled="!subtypeOptions.length"
+          >
+            <el-option v-for="s in subtypeOptions" :key="s.key" :label="s.zh" :value="s.key" />
           </el-select>
         </el-form-item>
         <el-form-item label="颜色"><el-input v-model="createForm.color" placeholder="如：blue" /></el-form-item>
@@ -77,7 +96,7 @@
         <el-form-item label="名称"><el-input v-model="editForm.name" /></el-form-item>
         <el-form-item label="品类">
           <el-select v-model="editForm.item_type">
-            <el-option v-for="(label, key) in TYPE_LABELS" :key="key" :label="label" :value="key" />
+            <el-option v-for="c in taxonomy" :key="c.key" :label="c.zh" :value="c.key" />
           </el-select>
         </el-form-item>
         <el-form-item label="颜色"><el-input v-model="editForm.color" /></el-form-item>
@@ -119,7 +138,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import {
-  getWardrobe, removeWardrobeItem, createPhotoItem,
+  getWardrobe, removeWardrobeItem, createPhotoItem, getTaxonomy,
   updateItem, uploadItemImage, imageUrl,
 } from '../services/api'
 import { getUserId, setUserId } from '../services/user'
@@ -129,6 +148,19 @@ const items = ref([])
 const loaded = ref(false)
 const error = ref('')
 const saving = ref(false)
+
+// Bilingual taxonomy: main category (required) + subtype (optional).
+const taxonomy = ref([])
+
+// Collapsible per-category groups; collapsed by default (catalog is large).
+const expandedTypes = ref([])
+const allExpanded = computed(
+  () => Object.keys(grouped.value).length > 0
+    && expandedTypes.value.length === Object.keys(grouped.value).length,
+)
+function toggleAll() {
+  expandedTypes.value = allExpanded.value ? [] : Object.keys(grouped.value)
+}
 
 const TYPE_LABELS = {
   top: '上装', pants: '裤装', skirt: '半身裙', dress: '连衣裙', jumpsuit: '连体装',
@@ -144,7 +176,11 @@ const grouped = computed(() => {
   }
   return map
 })
-const typeLabel = (type) => TYPE_LABELS[type] || type
+const typeLabel = (type) => {
+  const cat = taxonomy.value.find((c) => c.key === type)
+  if (cat) return cat.zh
+  return TYPE_LABELS[type] || type
+}
 
 function onUserIdChange(value) { setUserId(value) }
 
@@ -180,10 +216,21 @@ async function remove(itemId) {
 
 // --- 创建 ---
 const createVisible = ref(false)
-const createForm = reactive({ name: '', item_type: '', color: '', gender: 'women', file: null })
+const createForm = reactive({
+  name: '', item_type: '', subtype: '', color: '', gender: 'women', file: null,
+})
+const subtypeOptions = computed(() => {
+  const cat = taxonomy.value.find((c) => c.key === createForm.item_type)
+  return cat ? cat.subtypes : []
+})
 
 function openCreate() {
-  createForm.name = ''; createForm.item_type = ''; createForm.color = ''; createForm.gender = 'women'; createForm.file = null
+  createForm.name = ''
+  createForm.item_type = ''
+  createForm.subtype = ''
+  createForm.color = ''
+  createForm.gender = 'women'
+  createForm.file = null
   createVisible.value = true
 }
 function onCreateFile(file) { createForm.file = file }
@@ -199,6 +246,7 @@ async function submitCreate() {
       filename: createForm.file.name,
       content_base64: b64,
       item_type: createForm.item_type,
+      subtype: createForm.subtype,
       name: createForm.name,
       color: createForm.color,
       gender: createForm.gender,
@@ -263,7 +311,15 @@ async function submitPhoto() {
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+  try {
+    const res = await getTaxonomy()
+    taxonomy.value = res.data.categories || []
+  } catch (e) {
+    ElMessage.error(`加载分类失败：${e.response?.data?.detail || e.message}`)
+  }
+  load()
+})
 </script>
 
 <style scoped>

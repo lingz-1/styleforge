@@ -177,6 +177,7 @@ class ExplanationAssessment(BaseModel):
 class Alternative(BaseModel):
     outfit_id: str
     strength: str = ""
+    dimension_scores: DimensionScores | None = None
 
 
 class WardrobeGapItem(BaseModel):

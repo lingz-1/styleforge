@@ -42,5 +42,14 @@ TYPE_TO_SLOT = {
 }
 
 
+# Main categories a user may choose on an upload form (required field).
+ALLOWED_ITEM_TYPES = {
+    "top", "pants", "shorts", "skirt", "dress", "jumpsuit", "suit", "outfit_set",
+    "outwear", "shoes", "bag", "eyewear", "earrings", "necklace", "bracelet",
+    "rings", "belts", "hats", "hairwear", "jewellery", "legwear", "underwear",
+    "sleepwear", "swimwear", "activewear_bra", "accessory", "other",
+}
+
+
 def infer_slot(item_type: str) -> str:
     return TYPE_TO_SLOT.get(item_type.strip().lower(), "other")

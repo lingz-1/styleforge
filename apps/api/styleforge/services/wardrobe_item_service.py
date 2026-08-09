@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from styleforge.core.categories import infer_slot
+from styleforge.core.categories import ALLOWED_ITEM_TYPES, infer_slot
 from styleforge.core.schemas import CatalogItem, EmbeddingStatus, ImageStatus
 from styleforge.repositories.catalog_repository import upsert_items
 from styleforge.repositories.database import database_session, initialize_database
@@ -19,13 +19,6 @@ from styleforge.repositories.wardrobe_import_repository import (
 )
 from styleforge.services.personal_embeddings import embed_personal_items
 from styleforge.services.personal_images import save_personal_image
-
-ALLOWED_ITEM_TYPES = {
-    "top", "pants", "shorts", "skirt", "dress", "jumpsuit", "suit", "outfit_set",
-    "outwear", "shoes", "bag", "eyewear", "earrings", "necklace", "bracelet",
-    "rings", "belts", "hats", "hairwear", "jewellery", "legwear", "underwear",
-    "sleepwear", "swimwear", "activewear_bra", "accessory",
-}
 
 
 def _now() -> str:

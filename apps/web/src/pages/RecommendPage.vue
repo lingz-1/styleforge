@@ -60,7 +60,9 @@
           <el-card shadow="hover" class="outfit-card">
             <template #header>
               <div class="outfit-header">
-                <span>方案 {{ idx + 1 }} · {{ rec.score?.toFixed(1) }} 分</span>
+                <span>
+                  方案 {{ idx + 1 }} · LLM {{ fmtScore(rec.llm_score) }} · 规则 {{ fmtScore(rec.rule_score) }}
+                </span>
                 <el-tag v-if="rec.outfit_id === preferredId" type="success" size="small">⭐ 首选</el-tag>
               </div>
             </template>
@@ -103,14 +105,18 @@
 
 <script setup>
 import { ref, computed } from 'vue'
-import { recommend, imageUrl } from '../services/api'
+import { storeToRefs } from 'pinia'
+import { imageUrl } from '../services/api'
+import { useRecommendationStore } from '../stores/recommendation'
 import { getUserId, setUserId } from '../services/user'
 
 const userId = ref(getUserId())
 const request = ref('明天参加互联网公司的面试，希望正式但不要太老气，不穿红色。')
-const loading = ref(false)
-const error = ref('')
-const payload = ref(null)
+
+// Recommendation state lives in a global store so navigating away and back
+// does not lose the in-flight request or its result.
+const store = useRecommendationStore()
+const { loading, payload, error } = storeToRefs(store)
 
 const DECISION = { accept: '✅ 采纳', recompose: '🔄 重新组合', retrieve_more: '🔍 扩展检索', wardrobe_gap: '🧥 衣橱缺口' }
 const DIM = {
@@ -122,20 +128,12 @@ const structured = computed(() => payload.value?.structured_result || {})
 const preferredId = computed(() => payload.value?.critic?.outfit_assessment?.outfit_id)
 const decisionLabel = computed(() => DECISION[payload.value?.decision] || payload.value?.decision || '—')
 const dimLabel = (k) => DIM[k] || k
+const fmtScore = (v) => (typeof v === 'number' ? v.toFixed(1) : '—')
 
 function onUserIdChange(value) { setUserId(value) }
 
 async function run() {
-  loading.value = true
-  error.value = ''
-  try {
-    const res = await recommend(userId.value, request.value)
-    payload.value = res.data
-  } catch (e) {
-    error.value = e.response?.data?.detail || e.message
-  } finally {
-    loading.value = false
-  }
+  await store.run(userId.value, request.value)
 }
 </script>
 
