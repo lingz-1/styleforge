@@ -11,10 +11,19 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic import ValidationError
+
 from styleforge.core.schemas import CatalogItem, TaskSpec
+from styleforge.llm.extension_prompts import (
+    EXTENSION_PROMPT_VERSION,
+    build_extension_agent2_prompt,
+)
 from styleforge.llm.client import LlmCallDiagnostics, LlmInvalidJson, LlmSchemaViolation, LlmUnavailable
 from styleforge.llm.prompts import PROMPT_VERSION, build_agent2_prompt
 from styleforge.llm.schema import Agent2Output, CompositionStrategy, OutfitProposal, parse_llm_json
+from styleforge.models.agent_tasks import Agent1TaskOutput, Agent2TaskOutput
+from styleforge.models.context import ContextPack
+from styleforge.models.task_results import validate_task_result
 from styleforge.tools.candidate_generation import generate_candidates, select_diverse_candidates
 
 
@@ -71,6 +80,62 @@ class ComposerAgent:
     """Agent 2 backend: LLM composer with deterministic fallback."""
 
     backend = "llm"
+
+    def run_extension(
+        self,
+        *,
+        user_query: str,
+        context_pack: ContextPack,
+        agent1_output: Agent1TaskOutput,
+        llm: Any,
+        critic_feedback: str = "",
+    ) -> tuple[Agent2TaskOutput, dict[str, Any], LlmCallDiagnostics]:
+        """Run Agent 2 strictly for an extension task, without fallback."""
+        if llm is None:
+            raise LlmUnavailable("extension Agent 2 requires a configured LLM client")
+        repair_feedback = ""
+        call_diagnostics: list[LlmCallDiagnostics] = []
+        for attempt in range(2):
+            system, user = build_extension_agent2_prompt(
+                request=user_query,
+                context_pack=context_pack,
+                agent1_output=agent1_output,
+                critic_feedback=critic_feedback,
+                repair_feedback=repair_feedback,
+            )
+            payload, diagnostics = llm.chat_json(
+                system=system,
+                user=user,
+                json_schema=Agent2TaskOutput.model_json_schema(),
+            )
+            call_diagnostics.append(diagnostics)
+            try:
+                output = Agent2TaskOutput.model_validate(payload)
+                if output.task_type is not agent1_output.task_type:
+                    raise ValueError("task_type differs from Agent 1")
+                if output.status == "needs_clarification" and not agent1_output.needs_clarification:
+                    raise ValueError(
+                        "needs_clarification is forbidden because Agent 1 resolved all required context"
+                    )
+                result = validate_task_result(output.task_type, output.result)
+                if result["status"] != output.status:
+                    raise ValueError("result.status differs from top-level status")
+                output = output.model_copy(update={"result": result})
+                break
+            except (ValidationError, ValueError, KeyError) as error:
+                if attempt == 0:
+                    repair_feedback = f"上次草稿未满足任务完成契约：{error}"
+                    continue
+                raise LlmSchemaViolation(
+                    f"extension Agent 2 schema violation after repair: {error}"
+                ) from error
+        return output, {
+            "degraded": False,
+            "prompt_version": EXTENSION_PROMPT_VERSION,
+            "diagnostics": diagnostics.to_dict(),
+            "attempt_diagnostics": [item.to_dict() for item in call_diagnostics],
+            "call_count": len(call_diagnostics),
+        }, diagnostics
 
     def run(
         self,

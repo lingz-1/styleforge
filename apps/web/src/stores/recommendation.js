@@ -2,7 +2,7 @@
 // does not interrupt or discard an in-flight recommendation request.
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import { recommend } from '../services/api'
+import { executeTask } from '../services/api'
 
 export const useRecommendationStore = defineStore('recommendation', () => {
   const loading = ref(false)
@@ -19,7 +19,7 @@ export const useRecommendationStore = defineStore('recommendation', () => {
     const key = `${userId}|${maxResults}|${request}`
     requestKey = key
     try {
-      const res = await recommend(userId, request, maxResults)
+      const res = await executeTask({ user_id: userId, request, max_results: maxResults })
       if (requestKey === key) {
         payload.value = res.data
       }

@@ -35,6 +35,12 @@ SUBTYPE_RULES = {
         (),
         "women's sweater or knitwear",
     ),
+    "vest": SubtypeRule(
+        ("top", "outwear"),
+        ("vest", "waistcoat", "马甲", "针织背心", "西装背心"),
+        ("tank top", "camisole", "cami top", "吊带"),
+        "women's layering vest or waistcoat",
+    ),
     "tank_top": SubtypeRule(
         ("top",),
         ("tank top", "camisole", "cami top", "背心", "吊带"),

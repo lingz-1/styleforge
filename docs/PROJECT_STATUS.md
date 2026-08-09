@@ -4,6 +4,8 @@
 > 定位：用于实习求职展示的本地个人衣柜多 Agent 穿搭项目  
 > 当前阶段：Polyvore 演示主链路已形成可运行基线；Mytheresa 接入和订单衣柜导入已完成代码实现，订单衣柜最新版已通过回归与一次性数据库验收，但真实订单尚未提交、个人商品嵌入和 Mytheresa 全量接入仍待端到端验收。2026-08-05 修复了运动场合推荐不合理、UI 提交强制逐条填写、推荐结果不更新等问题，详见[问题与解决记录](ISSUE_LOG.md)。2026-08-05 完成 v3.2.1 语义驱动三 Agent 改造（DeepSeek）；2026-08-06 用真实 DeepSeek API 对 8 类代表性请求完成端到端验收（全部 accept、正常 3 次 LLM 调用、0 回退、推荐 100% 衣柜归属），备选方案已补确定性评分。2026-08-06 落地《评估方案.txt》五维统一评估框架：统一 Rubric 贯穿三 Agent、第三维改名 `outfit_coordination`、`request_signature` 新增 `explicit_style`、用户可配置五维权重（真实链路验证首选分=用户权重加权结果）。2026-08-06 完成架构规划 v3.3-plan.1（参考目录 + 扩展版方案收口，见 [ARCHITECTURE_PLAN.md](architecture/ARCHITECTURE_PLAN.md)），后端移动至 `apps/api/styleforge/`（保持 import），双端前端（Vue Web + 小程序）骨架与核心功能完成（衣柜/上传/编辑/补图/订单导入/推荐/偏好），新增拍照创建与修改衣物接口；小程序真机预览因校园网隔离待通。2026-08-09 完成默认模拟衣柜重建（catalog=衣柜零冗余）、FashionCLIP 嵌入 + FAISS 索引全量构建、衣柜可折叠（双端）、推荐跨页面持久化、推荐评分改为按 LLM 五维分排序并双分数展示（LLM+规则归一化到 100）、中英分类结构文档与上传表单大类必选/细分类可选联动、小程序真机 http 图片本地化修复，详见下方各节。
 
+> 2026-08-09 扩展进度：v3.3 P2 Task Router 和 P2.5 路由切片已验证；随后完成 Context Pack、任务运行持久化、局部修改、风格知识、单品知识、新品衣橱兼容性和衣橱缺口五类扩展业务，并接入 FastAPI、Vue Web 和微信小程序。最终验收：`compileall` 通过、Ruff clean、Pytest 175 passed；42 条中英文固定路由集准确率 100%；Web Vite 生产构建和小程序新增脚本语法检查通过；独立数据库上的真实 API 进程烟测 `health=ok`，任务执行和持久化查询成功。
+
 ## 1. 当前结论
 
 StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协作 → 约束内搭配建议 → 商品图片与执行轨迹”的完整项目形态。已验证的 Polyvore/FashionCLIP/FAISS 基线足以演示核心思路；新增的多受众 Mytheresa 目录解决了数据覆盖问题但仍是待验收增量，个人订单衣柜已完成回归与一次性数据库验收，待真实提交验收。
@@ -32,10 +34,13 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 | 语义驱动三 Agent (v3.2.1) | 已验证 | DeepSeek 三 Agent + 四决策分支 + 跨请求记忆；134 测试通过；2026-08-06 真实 API 8 请求验收全部 accept，推荐 100% 衣柜归属，备选已补确定性评分 |
 | 五维统一评估框架（评估方案 v1.1） | 已验证 | 统一 Rubric 贯穿三 Agent；`outfit_coordination` 改名 + `explicit_style` 字段；用户可配置五维权重（API/UI），真实链路验证首选分=用户权重加权 |
 | 架构 v3.3-plan.1 | 已规划 | 参考目录 + 扩展版方案收口，规划文档 `docs/architecture/ARCHITECTURE_PLAN.md`，含职责边界与分阶段路线 |
+| v3.3 Task Router + 六任务执行 | 已验证 | `/tasks/route` 只分类；`/tasks/execute` 统一执行六个隔离子图；Context Pack、trace 和 `task_runs` 可审计持久化 |
+| v3.3 P2.5 路由评估 | 路由切片已验证 | 42 条中英文固定 Cases（六类各 7 条）准确率 100%；Wardrobe Fixtures 与五维 benchmark 未完成 |
+| 五类扩展业务 | 已验证 | 局部修改硬锁非目标单品；风格/单品建议使用本地证据；新品兼容不落库；衣橱缺口检查槽位、场景与重复度 |
 | 后端结构 | 已移动 | `styleforge/` → `apps/api/styleforge/`（保持 `from styleforge.*` import 不变，pyproject package path），134 测试全绿 |
 | 拍照创建 / 修改衣物接口 | 已验证 | `POST /wardrobes/{user_id}/items/photo`（上传图创建个人商品+嵌入）、`PUT /items/{item_id}`（改信息重嵌入），已验证 |
-| Vue Web（v3.3 前端） | 骨架+核心功能 | 衣柜（上传/编辑/补图/移出）、推荐（语义决策/评审）、订单导入、五维偏好；Vite 运行于 5173，代理 `/api` → FastAPI |
-| 小程序（v3.3 前端） | 骨架+核心功能 | 衣柜（点击补图/长按操作）、上传新衣物、订单导入、推荐、偏好；AppID 已配；真机预览因校园网 AP 隔离待通（开发用模拟器/真机调试） |
+| Vue Web（v3.3 前端） | 核心功能已构建 | 衣柜、推荐、订单导入、五维偏好和“智能造型”五类扩展任务；Vite 生产构建通过 |
+| 小程序（v3.3 前端） | 核心功能已实现 | 衣柜、上传、订单、推荐、偏好和“造型”五类扩展任务；新增脚本通过 Node 语法检查，真机联调仍受局域网条件影响 |
 | 默认模拟衣柜（2026-08-09） | 已验证 | 重建干净数据库，catalog=衣柜 2058 件零冗余（1822 mytheresa + 236 polyvore），200 套搭配（150+50）、889 条关系、2058 张图片全部 available |
 | 演示嵌入 + 索引（2026-08-09） | 已验证 | FashionCLIP 2058/2058 嵌入（GPU 87.5s）+ FAISS IndexFlatIP，自检索 score=1.0，`/health` embedding_ready_items=2058，推荐端到端正常 |
 | 推荐评分（2026-08-09） | 已验证 | 全部候选统一走 Critic 五维 LLM 评分，按 LLM 分降序排序（规则分作并列打破）；候选同时携带 `llm_score`/`rule_score`（均归一化到 100），Web 头部分开展示两分 |
@@ -175,6 +180,31 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 | 海边度假 | accept | 清爽/自由/度假感 | 碎花连衣裙+白玛丽珍+珍珠项链 | ✅ |
 
 统一观察：8 请求全部 `accept`、正常 3 次 LLM 调用、0 回退、推荐单品 100% 来自 demo-user 衣柜；`generic_tendencies_to_avoid` 每次完整 3 条；critic 改进建议具体（"加棒球帽/防晒衫/胸针"）。备选方案评分已补确定性 `score_outfit`。
+
+### 4.6 v3.3 P2 Task Router（2026-08-09，已验证）
+
+- `TaskType` 由独立 Task Router 唯一负责，六类分别为 `outfit_recommend`、`outfit_modify`、`style_advice`、`item_advice`、`wardrobe_compatibility`、`wardrobe_gap`；没有新增业务 Agent。
+- 结构化上下文优先：已有当前搭配时进入局部修改，有新品上下文时进入衣橱兼容性；显式任务类型可用于受控调用。
+- 文本路由使用有优先级、可解释的确定性规则；无法可靠匹配时降级为标准穿搭推荐，不调用 LLM 猜测任务。
+- LangGraph 已建立 Task Router 节点和六个隔离子图占位节点，返回目标子图、能力依赖、路由原因、置信度、槽位提取与 trace。
+- `POST /tasks/route` 始终只做路由；六类任务的真实执行统一由 `POST /tasks/execute` 进入。五类扩展由 `MultiTaskWorkflow` 严格串联三 Agent，路由接口本身不会产生业务结果。
+- 新增典型中文/英文请求分类、上下文优先、目标槽位提取和六分支图测试；修复 Pytest 保留参数名冲突及“只换外套”漏判后，定向测试 31 passed、全量 Pytest 165 passed、Ruff 通过。
+
+### 4.7 v3.3 P2.5 路由评估切片（2026-08-09，已验证）
+
+- 新增 42 条固定任务路由 Cases，`outfit_recommend`、`outfit_modify`、`style_advice`、`item_advice`、`wardrobe_compatibility`、`wardrobe_gap` 各 7 条，中英文均有覆盖。
+- 新增独立离线 runner，报告总准确率、逐类准确率、混淆矩阵和错误明细，报告目标为 `artifacts/evaluation/task_routing_baseline.json`。
+- runner 已从仓库根目录成功执行：42/42 正确，总准确率 100%，六类逐类准确率均为 100%，失败样本 0；报告写入 `artifacts/evaluation/task_routing_baseline.json`。
+- 这只是 P2.5 的任务路由切片。Wardrobe Fixtures、固定穿搭结果和统一五维 benchmark 仍未实现，不能把路由准确率表述为穿搭质量。
+
+### 4.8 Context Pack 与五类扩展业务（2026-08-09，已验证）
+
+- Context Pack 统一承载请求路由、当前搭配与锁定槽位、衣橱统计、五维偏好、最近请求记忆、候选新品以及带 `source/source_id/section` 的证据。
+- 五类扩展已从独立确定性 Service 重构为严格共享三 Agent 链：Agent 1 检索并理解、Agent 2 生成任务专属结果、Agent 3 审校。
+- 五类扩展没有确定性结果降级；任一模型调用、JSON、Schema 或审校失败都会写入失败运行，不返回伪成功结果。确定性代码只负责事实读取和硬边界校验。
+- 单品搭配先解析衣橱锚点，再由 Agent 组合衣橱内支撑单品；新增黑色马甲语义与知识。衣橱缺口区分 general 和 targeted，新增中世纪灵感目标元素。
+- `POST /tasks/execute` 和运行查询接口保持统一；Web 与小程序移除独立任务选择页，所有自然语言从主推荐入口自动路由。
+- 严格三 Agent、Schema v8 与任务完成契约 v3.1 验收：编译通过、Ruff clean、Pytest 183 passed；Vue Vite 生产构建成功（1674 modules），小程序主推荐脚本和 JSON 配置检查通过。单品 `completed` 必须含锚点、兼容分组、完整样例与组合理由；缺口结果必须等于 Agent 1 的 `missing_elements`；Agent 3 可反馈 Agent 2 有限重做，不使用确定性结果降级。`/health` 暴露启动时间和契约版本用于排除旧进程。
 
 ## 5. 尚未验证或未完成
 

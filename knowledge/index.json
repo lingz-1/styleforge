@@ -1,0 +1,170 @@
+[
+  {
+    "id": "style-american-vintage",
+    "kind": "style",
+    "path": "styles/american_vintage.md",
+    "title": "American Vintage 美式复古",
+    "aliases": ["american vintage", "美式复古", "美式复古风"],
+    "preferred_item_types": ["top", "pants", "outwear", "shoes"],
+    "preferred_subtypes": ["t_shirt", "jeans", "leather_jacket", "boots", "sneakers"],
+    "preferred_colors": ["brown", "blue", "black", "cream", "棕", "蓝", "黑", "米"]
+  },
+  {
+    "id": "style-meillard",
+    "kind": "style",
+    "path": "styles/meillard.md",
+    "title": "美拉德风格",
+    "aliases": ["美拉德", "meillard", "maillard"],
+    "preferred_item_types": ["top", "pants", "skirt", "outwear", "shoes"],
+    "preferred_subtypes": ["knitwear", "wide_leg_pants", "coat", "loafers", "boots"],
+    "preferred_colors": ["brown", "camel", "cream", "beige", "棕", "焦糖", "驼", "米"]
+  },
+  {
+    "id": "style-gorpcore",
+    "kind": "style",
+    "path": "styles/gorpcore.md",
+    "title": "Gorpcore 户外机能风",
+    "aliases": ["gorpcore", "户外机能", "山系穿搭"],
+    "preferred_item_types": ["top", "pants", "outwear", "shoes", "bag"],
+    "preferred_subtypes": ["hoodie", "wide_leg_pants", "jacket", "sneakers", "backpack"],
+    "preferred_colors": ["green", "gray", "black", "beige", "绿", "灰", "黑", "卡其"]
+  },
+  {
+    "id": "style-french-chic",
+    "kind": "style",
+    "path": "styles/french_chic.md",
+    "title": "法式简约",
+    "aliases": ["法式", "法式简约", "french chic"],
+    "preferred_item_types": ["top", "pants", "skirt", "dress", "outwear", "shoes"],
+    "preferred_subtypes": ["shirt", "knitwear", "midi_skirt", "trench_coat", "loafers"],
+    "preferred_colors": ["black", "white", "navy", "beige", "黑", "白", "海军蓝", "米"]
+  },
+  {
+    "id": "style-business-casual",
+    "kind": "style",
+    "path": "styles/business_casual.md",
+    "title": "Business Casual 商务休闲",
+    "aliases": ["business casual", "商务休闲", "职场休闲"],
+    "preferred_item_types": ["top", "pants", "skirt", "outwear", "shoes", "bag"],
+    "preferred_subtypes": ["shirt", "tailored_trousers", "blazer", "loafers", "tote_bag"],
+    "preferred_colors": ["navy", "gray", "white", "beige", "黑", "灰", "白", "米"]
+  },
+  {
+    "id": "style-medieval-inspired",
+    "kind": "style",
+    "path": "styles/medieval_inspired.md",
+    "title": "Medieval-Inspired 中世纪灵感风格",
+    "aliases": ["中世纪", "中世纪风格", "中世纪灵感", "medieval", "medieval inspired"],
+    "preferred_item_types": ["top", "skirt", "dress", "outwear", "shoes", "bag", "neckwear"],
+    "preferred_subtypes": ["vest", "maxi_skirt", "maxi_dress", "boots", "leather_jacket", "satchel"],
+    "preferred_colors": ["brown", "cream", "black", "green", "red", "棕", "米", "黑", "墨绿", "酒红"],
+    "target_elements": [
+      {
+        "id": "medieval-layering-vest",
+        "label": "有结构感的叠穿马甲",
+        "item_types": ["top", "outwear"],
+        "subtypes": ["vest"],
+        "colors": [],
+        "priority": "high",
+        "suggestion": "补充一件有结构感的马甲或系带背心，用于建立中世纪式叠穿轮廓"
+      },
+      {
+        "id": "medieval-long-silhouette",
+        "label": "长线条裙装",
+        "item_types": ["skirt", "dress"],
+        "subtypes": ["maxi_skirt", "maxi_dress"],
+        "colors": [],
+        "priority": "high",
+        "suggestion": "补充一件长裙或长连衣裙，形成连续、垂坠的纵向线条"
+      },
+      {
+        "id": "medieval-grounded-boots",
+        "label": "皮革感靴履",
+        "item_types": ["shoes"],
+        "subtypes": ["boots"],
+        "colors": ["brown", "black", "棕", "黑"],
+        "priority": "medium",
+        "suggestion": "补充棕色或黑色靴履，为造型提供朴素而稳重的落点"
+      },
+      {
+        "id": "medieval-textured-accessory",
+        "label": "天然质感配件",
+        "item_types": ["bag", "neckwear"],
+        "subtypes": [],
+        "colors": ["brown", "cream", "棕", "米"],
+        "priority": "low",
+        "suggestion": "用皮革包或有织物肌理的颈部配件补充手工质感"
+      }
+    ]
+  },
+  {
+    "id": "item-cowboy-boots",
+    "kind": "item",
+    "path": "items/cowboy_boots.md",
+    "title": "Cowboy Boots 牛仔靴",
+    "aliases": ["cowboy boots", "cowboy boot", "牛仔靴", "西部靴"],
+    "preferred_item_types": ["dress", "skirt", "pants", "top", "outwear"],
+    "compatible_slots": ["top", "bottom", "one_piece", "outerwear"],
+    "preferred_colors": ["brown", "black", "blue", "cream", "棕", "黑", "蓝", "米"]
+  },
+  {
+    "id": "item-trench-coat",
+    "kind": "item",
+    "path": "items/trench_coat.md",
+    "title": "Trench Coat 风衣",
+    "aliases": ["trench coat", "风衣", "战壕风衣"],
+    "preferred_item_types": ["top", "pants", "skirt", "dress", "shoes"],
+    "compatible_slots": ["top", "bottom", "one_piece", "footwear"],
+    "preferred_colors": ["beige", "navy", "black", "white", "卡其", "蓝", "黑", "白"]
+  },
+  {
+    "id": "item-mary-jane",
+    "kind": "item",
+    "path": "items/mary_jane.md",
+    "title": "Mary Jane 玛丽珍鞋",
+    "aliases": ["mary jane", "玛丽珍", "玛丽珍鞋"],
+    "preferred_item_types": ["skirt", "dress", "pants", "top"],
+    "compatible_slots": ["top", "bottom", "one_piece"],
+    "preferred_colors": ["black", "brown", "cream", "red", "黑", "棕", "米", "红"]
+  },
+  {
+    "id": "item-leather-jacket",
+    "kind": "item",
+    "path": "items/leather_jacket.md",
+    "title": "Leather Jacket 皮夹克",
+    "aliases": ["leather jacket", "皮夹克", "机车夹克"],
+    "preferred_item_types": ["top", "pants", "skirt", "dress", "shoes"],
+    "compatible_slots": ["top", "bottom", "one_piece", "footwear"],
+    "preferred_colors": ["black", "brown", "blue", "white", "黑", "棕", "蓝", "白"]
+  },
+  {
+    "id": "item-pleated-skirt",
+    "kind": "item",
+    "path": "items/pleated_skirt.md",
+    "title": "Pleated Skirt 百褶裙",
+    "aliases": ["pleated skirt", "百褶裙", "百迭裙"],
+    "preferred_item_types": ["top", "outwear", "shoes"],
+    "compatible_slots": ["top", "outerwear", "footwear"],
+    "preferred_colors": ["gray", "navy", "black", "cream", "灰", "蓝", "黑", "米"]
+  },
+  {
+    "id": "item-cargo-pants",
+    "kind": "item",
+    "path": "items/cargo_pants.md",
+    "title": "Cargo Pants 工装裤",
+    "aliases": ["cargo pants", "cargo trousers", "工装裤"],
+    "preferred_item_types": ["top", "outwear", "shoes", "bag"],
+    "compatible_slots": ["top", "outerwear", "footwear", "bag"],
+    "preferred_colors": ["green", "black", "gray", "beige", "绿", "黑", "灰", "卡其"]
+  },
+  {
+    "id": "item-vest",
+    "kind": "item",
+    "path": "items/vest.md",
+    "title": "Vest / Waistcoat 叠穿马甲",
+    "aliases": ["马甲", "针织背心", "西装背心", "vest", "waistcoat"],
+    "preferred_item_types": ["top", "shirt", "pants", "skirt", "dress", "outwear", "shoes"],
+    "compatible_slots": ["top", "bottom", "one_piece", "outerwear", "footwear"],
+    "preferred_colors": ["black", "white", "gray", "brown", "cream", "黑", "白", "灰", "棕", "米"]
+  }
+]

@@ -286,6 +286,11 @@ class StyleForgeWorkflow:
         initialize_database(self.database_path)
         self.graph = self._build_graph()
 
+    @property
+    def llm_client(self) -> Any | None:
+        """Expose the configured client to the shared multi-task workflow."""
+        return self._llm_client
+
     # --- routing ----------------------------------------------------------
 
     def _route_entry(self, state: WorkflowState) -> str:

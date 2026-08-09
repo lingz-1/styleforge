@@ -217,18 +217,41 @@ User Request → Task Router → TaskType → 选择子图
 | 阶段 | 内容 | 完成判据 |
 |---|---|---|
 | **P1** | 后端目录重构（保持 `styleforge` namespace）+ Repository Protocol + 三层 Schema 落地 | 134 测试全绿；import 不变；路由可访问 |
-| **P2** | **Task Router + 多任务 Graph Skeleton**（TaskType 六类 → 子图） | 请求能路由到正确子图 |
-| **P2.5** | **`evals/` baseline**：30-50 固定 Cases + Wardrobe Fixtures + 五维评分 + Task Routing Accuracy | 建立 v3.2.1 baseline，供后续对比 |
-| **P3** | **Context Pack + Context Router + Tool Registry**（统一扩展接入接口） | 外部信息统一入 Context Pack 且带 source 溯源 |
-| **P4** | **Style/Item RAG** + Knowledge Index Pipeline（`scripts/knowledge/` 离线构建） | 美拉德/American Vintage/Cowboy Boots 有知识依据 |
+| **P2（已验证）** | **Task Router + 多任务 Graph Skeleton**（TaskType 六类 → 子图） | 请求能路由到正确子图 |
+| **P2.5（路由切片已验证）** | **`evals/` baseline**：30-50 固定 Cases + Wardrobe Fixtures + 五维评分 + Task Routing Accuracy | 建立 v3.2.1 baseline，供后续对比 |
+| **P3（核心已完成）** | **Context Pack** 共享领域契约；Context Router / Tool Registry 留给外部工具接入 | 请求、当前搭配、衣橱、偏好、记忆、候选新品和证据进入统一结构 |
+| **P4（本地检索已完成）** | **Style/Item grounded retrieval** + 可追溯 Markdown 知识资产；向量化索引为后续增强 | 美拉德/American Vintage/Cowboy Boots 等条目有本地证据 |
 | **P5** | **Weather Tool**（Open-Meteo + Location Resolution）；需要展示 MCP 时再做真 MCP Server | "明天纽约户外活动穿什么"能查天气并影响推荐 |
-| **P6** | **Vue Web MVP + API v1** | Web 端功能齐平 Streamlit（Wardrobe/Chat/Recommendation/Trace） |
+| **P6（核心已完成）** | **Vue Web MVP + API** | 衣橱、推荐、扩展任务与 Trace 可操作 |
 | **P7** | **Feedback + Preference Memory** + 前端 Feedback UI | 用户反馈影响后续推荐（闭环） |
-| **P8** | **Outfit Modify + Compatibility**（子图 + 锁定槽位）+ 对应 Web UI | "换双鞋"只改目标单品；"这件大衣搭吗"可答 |
-| **P9** | **微信小程序**（复用稳定 API） | 衣柜/拍照/订单导入可用 |
+| **P8（已完成）** | **Outfit Modify + Compatibility + Wardrobe Gap**（子图 + 锁定槽位）+ Web UI | "换双鞋"只改目标单品；新品兼容和衣橱缺口可解释 |
+| **P9（核心已完成）** | **微信小程序**（复用稳定 API） | 衣柜、拍照、订单、推荐和五类扩展任务可操作 |
 | **后期** | Brand Knowledge、PostgreSQL、Nginx 正式部署、`evals/` 系统评估（对比 RAG/Weather/Memory 增益） | 生产就绪 + 实验报告 |
 
 > **evals 提前到 P2.5**：给后续每次扩展（RAG/Weather/Memory）留对比基线，最终能报告"Style RAG 将 style-specificity 从 X 提升到 Y"。
+
+### 6.1 P2 实现记录（2026-08-09）
+
+- 新增 `styleforge/orchestration/task_router.py`：`TaskType` 六类、显式上下文优先、可审计确定性规则、默认推荐降级和局部修改槽位提取。
+- 新增 `styleforge/orchestration/graph.py`：LangGraph 路由节点与六个隔离的子图占位节点；占位节点只报告 `routed`，不冒充已实现业务能力。
+- 新增 `POST /tasks/route`：返回任务类型、目标子图、置信度、路由原因、所需能力和 trace；保留 `/recommendations` 现有行为。
+- 新增代表性中英文路由测试和六分支图测试。修复 Pytest 保留参数名冲突及“只换外套”漏判后，`compileall`、31 个定向测试、165 个全量测试和 Ruff 均通过。
+
+### 6.2 P2.5 路由评估切片（2026-08-09）
+
+- `evals/cases/task_routing.json` 固化 42 条中英文任务用例，六类任务各 7 条，避免类别不均衡掩盖少数类错误。
+- `evals/runners/evaluate_task_routing.py` 输出总准确率、逐类准确率、混淆矩阵、失败样本和评估限制，并将报告写入 `artifacts/evaluation/`。
+- `evals/` 与运行时 `styleforge/core/scoring.py` 保持分离；路由准确率不能替代五维穿搭质量。
+- 路由 runner 已验证 42/42 正确，六类逐类准确率均为 100%，失败 0。P2.5 尚未全部完成：Wardrobe Fixtures 和五维固定穿搭 benchmark 仍待实现。
+
+### 6.3 五类扩展业务实现记录（2026-08-09）
+
+- `models/context.py` 与 `context/builder.py` 建立 Context Pack：请求路由、当前搭配锁定、衣橱统计、五维偏好、最近记忆、候选新品和带来源证据使用同一契约。
+- `knowledge/` 使用索引元数据和 Markdown 分段资产实现本地、可追溯事实检索；知识是 Agent 依据，不是独立结果生成器。
+- `MultiTaskWorkflow` 将五类扩展统一接入现有 Agent 1/2/3；三者成功时各真实调用模型一次，不存在扩展任务确定性结果降级。
+- 事实工具只解析衣橱、锚点、知识、候选和目标元素；Validator 只执行 ID 白名单、锁定槽位、证据来源、新品不落库和链接边界检查。
+- 局部修改硬锁所有非目标槽位；单品搭配以衣橱锚点组合；衣橱缺口区分整体模式和目标风格模式。
+- FastAPI、Vue Web 和微信小程序均通过主推荐自然语言入口自动路由。完整契约和限制见[扩展任务业务与 API](../EXTENDED_TASKS.md)。
 
 ## 7. 风险与注意
 

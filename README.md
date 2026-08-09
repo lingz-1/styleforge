@@ -21,6 +21,8 @@ StyleForge 是一个本地优先的个人衣柜多 Agent 穿搭系统。用户�
 - 订单导入：Excel 脱敏预览、收货状态硬门槛、可选售后字段过滤、文件级幂等、人工确认和个人增量嵌入（回归与一次性数据库验收已通过，待真实提交）。
 - Mytheresa：62,457 件多受众商品、328,754 个图片引用全部存在，类别映射遗漏为 0；尚未导入主库。
 - 语义驱动三 Agent（v3.2.1）：可选接入 DeepSeek，Agent 1 语义检索（request_signature + 多查询加权检索 + Top-50 候选池）、Agent 2 搭配组合、Agent 3 评审判定（五维盲评 + accept/recompose/retrieve_more/wardrobe_gap 四决策分支）。已用真实 DeepSeek API 对 8 类代表性请求完成端到端验收（全部 accept、0 回退、推荐 100% 衣柜归属）；无 API Key 时自动回退确定性链路。
+- v3.3 六任务执行链（已实现并定向验证）：Task Router 在三个 Agent 之前将请求路由为穿搭推荐、局部修改、风格知识、单品知识、衣橱兼容性或衣橱缺口；`POST /tasks/execute` 执行对应子图，统一使用 Context Pack，并把结果、证据和轨迹持久化到 `task_runs`。Web 的“智能造型”和小程序的“造型”页已接入五类扩展业务；输入输出见[扩展任务业务与 API](docs/EXTENDED_TASKS.md)。
+- P2.5 路由评估切片（已验证）：`evals/cases/task_routing.json` 固化 42 条中英文用例，六类各 7 条；基线准确率 100%，六类逐类准确率均为 100%，失败样本 0。该指标只评价固定集任务路由，不代表穿搭质量。
 
 ## 职责边界
 
@@ -120,6 +122,8 @@ D:\anaconda\envs\style\python.exe -m styleforge.workflow.graph `
 首次请求会将 FashionCLIP 加载到 GPU，通常比后续请求慢数秒。视觉组件缺失时，工作流会明确记录降级原因并继续使用规则候选生成。
 
 配置了 `DEEPSEEK_API_KEY` 时上述命令自动走语义链路（输出含 `request_signature`、`retrieval_plans`、`pool`、`critic` 决策等字段）；可用 `--no-llm` 强制走确定性链路，或 `--llm-verbose` 输出每轮 LLM 的完整提示词与响应：
+
+Web 和小程序的主推荐输入统一调用 `POST /tasks/execute`。Task Router 会自动识别普通推荐、局部修改、风格知识、单品搭配、新品兼容性和衣橱缺口。五类扩展任务严格执行同一套 Agent 1/2/3；没有配置 LLM 或任一 Agent 输出非法时会明确失败，不提供确定性结果降级。标准穿搭推荐仍保留原有离线降级能力。
 
 ## 关键产物
 

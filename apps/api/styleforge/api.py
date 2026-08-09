@@ -13,8 +13,13 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from styleforge.core.config import Settings
+from styleforge.core.config import WORKSPACE_ROOT, Settings
 from styleforge.core.taxonomy import build_taxonomy
+from styleforge.llm.client import LlmInvalidJson, LlmSchemaViolation, LlmUnavailable
+from styleforge.llm.extension_prompts import EXTENSION_PROMPT_VERSION
+from styleforge.models.task import TaskExecutionInput
+from styleforge.orchestration.graph import MultiTaskGraph
+from styleforge.orchestration.task_router import TaskType
 from styleforge.repositories.database import database_session, initialize_database
 from styleforge.repositories.dataset_source_repository import (
     get_source_image_root,
@@ -31,6 +36,7 @@ from styleforge.repositories.user_preferences_repository import (
     get_evaluation_weights,
     save_evaluation_weights,
 )
+from styleforge.repositories.task_run_repository import get_task_run
 from styleforge.services.order_import import parse_order_workbook
 from styleforge.services.personal_embeddings import embed_personal_items
 from styleforge.services.personal_images import bind_personal_image
@@ -39,12 +45,21 @@ from styleforge.services.wardrobe_item_service import (
     update_personal_item,
 )
 from styleforge.workflow.graph import StyleForgeWorkflow
+from styleforge.workflow.task_workflow import MultiTaskWorkflow
 
 
 class RecommendationRequest(BaseModel):
     user_id: str = Field(min_length=1, max_length=128)
     request: str = Field(min_length=1, max_length=2000)
     max_results: int = Field(default=3, ge=1, le=10)
+
+
+class TaskRoutingRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    request: str = Field(min_length=1, max_length=2000)
+    current_outfit_id: str = Field(default="", max_length=128)
+    has_candidate_item: bool = False
+    task_type: TaskType | None = None
 
 
 class WardrobeItemRequest(BaseModel):
@@ -101,10 +116,11 @@ class UpdateItemRequest(BaseModel):
 
 
 settings = Settings.from_env()
+API_STARTED_AT = datetime.now(timezone.utc).isoformat()
 initialize_database(settings.database_path)
 app = FastAPI(
     title="StyleForge API",
-    version="0.2.0",
+    version="0.3.0",
     description="Local-first multi-agent personal wardrobe styling API.",
 )
 
@@ -116,6 +132,22 @@ def get_workflow() -> StyleForgeWorkflow:
         embedding_dir=settings.embedding_dir,
         model_dir=settings.artifact_root / "models",
         device="cuda",
+    )
+
+
+@lru_cache(maxsize=1)
+def get_task_graph() -> MultiTaskGraph:
+    return MultiTaskGraph()
+
+
+@lru_cache(maxsize=1)
+def get_multi_task_workflow() -> MultiTaskWorkflow:
+    workflow = get_workflow()
+    return MultiTaskWorkflow(
+        database_path=settings.database_path,
+        knowledge_root=WORKSPACE_ROOT / "knowledge",
+        llm_client=workflow.llm_client,
+        recommendation_runner=lambda **kwargs: workflow.recommend_payload(**kwargs),
     )
 
 
@@ -179,6 +211,8 @@ def health() -> dict[str, Any]:
             }
     return {
         "status": "ok",
+        "api_started_at": API_STARTED_AT,
+        "extension_prompt_version": EXTENSION_PROMPT_VERSION,
         "database": str(settings.database_path),
         "catalog_items": catalog_count,
         "embedding_ready_items": ready_count,
@@ -224,6 +258,54 @@ def recommend(request: RecommendationRequest) -> dict[str, Any]:
             detail=f"Recommendation workflow failed: {type(error).__name__}: {error}",
         ) from error
     payload["image_endpoint_template"] = "/items/{item_id}/image"
+    return payload
+
+
+@app.post("/tasks/route")
+def route_task(request: TaskRoutingRequest) -> dict[str, Any]:
+    """Classify one request without executing its v3.3 task subgraph."""
+    try:
+        return get_task_graph().route(
+            user_id=request.user_id,
+            request=request.request,
+            current_outfit_id=request.current_outfit_id,
+            has_candidate_item=request.has_candidate_item,
+            requested_task_type=request.task_type,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/tasks/execute")
+def execute_task(request: TaskExecutionInput) -> dict[str, Any]:
+    """Route and execute one complete StyleForge task subgraph."""
+    try:
+        return get_multi_task_workflow().execute(request)
+    except LlmUnavailable as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Three-agent task execution unavailable: {error}",
+        ) from error
+    except (LlmInvalidJson, LlmSchemaViolation) as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Three-agent task execution returned invalid output: {error}",
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Task execution failed: {type(error).__name__}: {error}",
+        ) from error
+
+
+@app.get("/tasks/{user_id}/{run_id}")
+def read_task_run(user_id: str, run_id: str) -> dict[str, Any]:
+    with database_session(settings.database_path) as connection:
+        payload = get_task_run(connection, user_id=user_id, run_id=run_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
     return payload
 
 

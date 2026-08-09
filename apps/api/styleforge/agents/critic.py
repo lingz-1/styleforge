@@ -11,7 +11,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic import ValidationError
+
 from styleforge.core.schemas import TaskSpec
+from styleforge.llm.extension_prompts import (
+    EXTENSION_PROMPT_VERSION,
+    build_extension_agent3_prompt,
+)
 from styleforge.llm.client import LlmCallDiagnostics, LlmInvalidJson, LlmSchemaViolation, LlmUnavailable
 from styleforge.llm.prompts import PROMPT_VERSION, build_agent3_prompt
 from styleforge.llm.schema import (
@@ -23,6 +29,14 @@ from styleforge.llm.schema import (
     WardrobeGapItem,
     parse_llm_json,
 )
+from styleforge.models.agent_tasks import (
+    Agent1TaskOutput,
+    Agent2TaskOutput,
+    Agent3TaskOutput,
+    ExtensionReview,
+)
+from styleforge.models.context import ContextPack
+from styleforge.tools.extension_validation import validate_extension_draft
 
 
 def _neutral_assessment(outfit_id: str, reasoning: str) -> OutfitAssessment:
@@ -107,6 +121,56 @@ class CriticAgent:
     """Agent 3 backend: LLM critic with deterministic fallback."""
 
     backend = "llm"
+
+    def run_extension(
+        self,
+        *,
+        user_query: str,
+        context_pack: ContextPack,
+        agent1_output: Agent1TaskOutput,
+        agent2_output: Agent2TaskOutput,
+        wardrobe_ids: set[str],
+        llm: Any,
+    ) -> tuple[Agent3TaskOutput, dict[str, Any], LlmCallDiagnostics]:
+        """Hard-validate, then run Agent 3 strictly without fallback."""
+        checks = validate_extension_draft(
+            agent1=agent1_output,
+            agent2=agent2_output,
+            wardrobe_ids=wardrobe_ids,
+        )
+        if llm is None:
+            raise LlmUnavailable("extension Agent 3 requires a configured LLM client")
+        system, user = build_extension_agent3_prompt(
+            request=user_query,
+            context_pack=context_pack,
+            agent1_output=agent1_output,
+            agent2_output=agent2_output,
+            hard_checks=checks,
+        )
+        payload, diagnostics = llm.chat_json(
+            system=system,
+            user=user,
+            json_schema=ExtensionReview.model_json_schema(),
+        )
+        try:
+            review = ExtensionReview.model_validate(payload)
+        except ValidationError as error:
+            raise LlmSchemaViolation(f"extension Agent 3 schema violation: {error}") from error
+        output = Agent3TaskOutput(
+            task_type=agent2_output.task_type,
+            status=agent2_output.status,
+            approved=review.approved,
+            grounded=review.grounded,
+            summary=review.summary or agent2_output.summary,
+            checks=checks,
+            issues=review.issues,
+            result=agent2_output.result,
+        )
+        return output, {
+            "degraded": False,
+            "prompt_version": EXTENSION_PROMPT_VERSION,
+            "diagnostics": diagnostics.to_dict(),
+        }, diagnostics
 
     def run(
         self,

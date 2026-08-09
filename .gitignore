@@ -18,6 +18,7 @@ polyvore_outfit_v1.0_2512.json
 .idea/
 .vscode/
 .tmp_order_analysis/
+.tmp/
 node_modules/
 
 # 前端构建产物

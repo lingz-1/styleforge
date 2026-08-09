@@ -1,81 +1,68 @@
 <view class="container">
-  <view class="card">
-    <textarea
-      value="{{request}}"
-      bindinput="onInput"
-      placeholder="今天想怎么穿？"
-      maxlength="500"
-      auto-height
-      class="input"
-    />
-    <view class="btn-primary" bindtap="onRecommend">
-      {{loading ? '生成中...' : '生成搭配'}}
-    </view>
+  <view class="intro">
+    <view class="eyebrow">WARDROBE STUDIO</view>
+    <view class="title">把需求交给三位造型 Agent</view>
+    <view class="lead">直接描述推荐、修改、单品、风格或衣橱缺口，系统会自动判断。</view>
+  </view>
+
+  <view class="card prompt-card">
+    <textarea value="{{request}}" bindinput="onInput" placeholder="例如：黑色马甲怎么搭？" maxlength="500" auto-height class="input" />
+    <scroll-view scroll-x class="examples">
+      <text wx:for="{{examples}}" wx:key="*this" data-value="{{item}}" bindtap="onExample" class="example">{{item}}</text>
+    </scroll-view>
+    <view class="btn-primary" bindtap="onRecommend">{{loading ? '三位 Agent 处理中…' : '让三位 Agent 处理'}}</view>
   </view>
 
   <block wx:if="{{payload}}">
-    <!-- 决策条 -->
-    <view class="card">
-      <view class="row">
-        <text class="kv">决策</text>
-        <text class="val">{{payload.decisionLabel}}</text>
-      </view>
-      <view class="row">
-        <text class="kv">LLM 调用</text>
-        <text class="val">{{payload.llm_call_count || 0}}</text>
-      </view>
-      <view class="row">
-        <text class="kv">候选池</text>
-        <text class="val">{{payload.pool.total || 0}}</text>
+    <view class="card result-head">
+      <view><text class="task-chip">{{payload.task_label}}</text><view class="result-title">{{result.title || result.message || result.summary || payload.task_label}}</view></view>
+      <view class="status">{{payload.status_label}} · {{payload.llm_call_count || 0}} 次模型调用</view>
+    </view>
+
+    <view class="agent-rail">
+      <view wx:for="{{agentSteps}}" wx:key="name" class="agent-step">
+        <text class="agent-index">0{{index + 1}}</text><text>{{item.name}}</text><text class="agent-status">{{item.done ? '完成' : '未执行'}}</text>
       </view>
     </view>
 
-    <!-- 请求画像 -->
-    <view class="card">
-      <view class="section-title">🧭 请求画像</view>
-      <view class="row"><text class="kv">主题</text><text class="val">{{payload.request_signature.theme}}</text></view>
-      <view class="row">
-        <text class="kv">情绪</text>
-        <text class="val">{{payload.request_signature.unique_mood_text}}</text>
-      </view>
-      <view class="row">
-        <text class="kv">场景</text>
-        <text class="val">{{payload.request_signature.practical_context_text}}</text>
+    <view class="card warning" wx:if="{{result.status === 'needs_clarification' || result.clarification_question}}">
+      {{result.clarification_question || '需要补充信息后才能继续。'}}
+    </view>
+
+    <view class="card" wx:if="{{result.summary || result.recommendation_text}}">
+      <view class="section-title">Agent 结论</view>
+      <view class="summary">{{result.summary || result.recommendation_text}}</view>
+      <view class="metrics" wx:if="{{payload.task_type === 'wardrobe_compatibility'}}">
+        <text>兼容 {{result.compatibility_score}}</text><text>搭配 {{result.complete_outfit_count}}</text><text>重复 {{result.redundancy_score}}</text>
       </view>
     </view>
 
-    <!-- 推荐方案 -->
-    <view class="card" wx:for="{{payload.structured_result.recommendations}}" wx:key="outfit_id" wx:for-item="rec">
-      <view class="section-title">
-        方案 {{index + 1}} · {{rec.score_display}} 分
-      </view>
+    <view class="card" wx:for="{{outfits}}" wx:key="outfit_id" wx:for-item="outfit">
+      <view class="section-title">{{outfit.label}} <text wx:if="{{outfit.score_display}}">· {{outfit.score_display}} 分</text></view>
       <view class="outfit-grid">
-        <image
-          wx:for="{{rec.imgs}}"
-          wx:for-item="img"
-          wx:key="itemId"
-          wx:if="{{img.local}}"
-          src="{{img.local}}"
-          mode="aspectFill"
-          class="outfit-img"
-        />
+        <image wx:for="{{outfit.images}}" wx:key="itemId" wx:for-item="img" wx:if="{{img.local}}" src="{{img.local}}" mode="aspectFill" class="outfit-img" />
       </view>
-      <view wx:for="{{rec.reasons}}" wx:for-item="reason" wx:key="*this" class="reason">
-        · {{reason}}
+      <view class="reason">{{outfit.reasoning || outfit.reason || ''}}</view>
+    </view>
+
+    <view class="card" wx:for="{{itemGroups}}" wx:key="slot" wx:for-item="group">
+      <view class="section-title">{{group.label}} · {{group.items.length}} 件</view>
+      <view class="item-grid">
+        <view wx:for="{{group.items}}" wx:key="item_id" wx:for-item="garment" class="item-tile">
+          <image wx:if="{{garment.local}}" src="{{garment.local}}" mode="aspectFill" class="item-img" />
+          <view class="item-name">{{garment.name || garment.item_id}}</view><view class="muted">{{garment.color}}</view>
+        </view>
       </view>
     </view>
 
-    <!-- 评审 -->
-    <view class="card" wx:if="{{payload.critic}}">
-      <view class="section-title">⚖️ 评审判定</view>
-      <view class="row">
-        <text class="kv">首选</text>
-        <text class="val">{{payload.critic.outfit_assessment.outfit_id}}</text>
-      </view>
-      <view class="row">
-        <text class="kv">理由</text>
-        <text class="val">{{payload.critic.outfit_assessment.reasoning}}</text>
-      </view>
+    <view class="card" wx:if="{{payload.task_type === 'wardrobe_gap'}}">
+      <view class="section-title">{{result.analysis_mode === 'targeted' ? '目标风格缺口' : '整体衣橱缺口'}}</view>
+      <view wx:for="{{result.gaps}}" wx:key="id" class="gap"><text class="priority">{{item.priority}}</text><view>{{item.label || item.slot || item.gap_type}}</view><text>{{item.suggestion}}</text></view>
+    </view>
+
+    <view class="card">
+      <view class="section-title">Context Pack 与 Agent 输出</view>
+      <scroll-view scroll-y class="trace"><text selectable>{{traceText}}</text></scroll-view>
     </view>
   </block>
 </view>

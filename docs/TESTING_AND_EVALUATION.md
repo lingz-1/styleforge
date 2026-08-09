@@ -5,8 +5,8 @@
 ### 静态检查
 
 ```powershell
-D:\anaconda\envs\style\python.exe -m compileall -q styleforge
-D:\anaconda\envs\style\python.exe -m ruff check styleforge tests
+D:\anaconda\envs\style\python.exe -m compileall -q apps\api\styleforge tests evals
+D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests evals
 ```
 
 ### 单元测试
@@ -15,7 +15,7 @@ D:\anaconda\envs\style\python.exe -m ruff check styleforge tests
 D:\anaconda\envs\style\python.exe -m pytest -q
 ```
 
-测试用例已经编写以覆盖以下行为；最近新增的用例尚未实际执行：
+测试用例覆盖以下行为：
 
 - Stylist 不选择硬约束失败候选。
 - Reviewer 拒绝衣柜外商品。
@@ -27,13 +27,11 @@ D:\anaconda\envs\style\python.exe -m pytest -q
 - 子类词典覆盖主要服装和配饰类别。
 - 混合风格衣柜配置和分层选择。
 
-## 2. 下一步必须执行的回归测试
-
-最近新增的子类、多配饰、beam search、Mytheresa 多数据源和订单状态硬过滤尚未执行最新整套回归。下一步先运行：
+## 2. 全量回归命令
 
 ```powershell
 D:\anaconda\envs\style\python.exe -m pytest -q
-D:\anaconda\envs\style\python.exe -m ruff check styleforge tests
+D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests evals
 ```
 
 如果失败，先修单元测试，不要直接启动 UI。
@@ -104,4 +102,29 @@ D:\anaconda\envs\style\python.exe -m ruff check styleforge tests
 - 子类解析中英文混合测试集。
 - LLM Agent 接入后的结构化输出有效率和降级率。
 
+## 6. v3.3 P2.5 任务路由基线（已验证）
+
+- 固定用例：`evals/cases/task_routing.json`，42 条，六类任务各 7 条。
+- runner：`D:\anaconda\envs\style\python.exe -m evals.runners.evaluate_task_routing`。
+- 输出：`artifacts/evaluation/task_routing_baseline.json`，包含准确率、逐类准确率、混淆矩阵和错误明细。
+- 结果：42/42 正确，总准确率 100%，六类逐类准确率均为 100%，失败样本 0。
+- 边界：该评估只证明 Task Router 分类表现，不评价检索、搭配、五维分数或用户满意度。
+
+当前仅完成 P2.5 的路由切片；Wardrobe Fixtures 和五维固定穿搭 benchmark 仍在尚缺列表中。
+
 检索指标不能替代整体穿搭质量指标。作品集报告必须分开陈述。
+
+## 7. 五类扩展业务验收
+
+核心测试文件：
+
+- `tests/test_context_pack.py`：请求、衣橱统计、五维偏好进入共享上下文。
+- `tests/test_knowledge_retriever.py`：本地知识分段、来源和检索命中。
+- `tests/test_extended_tasks.py`：五类业务均验证真实三次模型调用、无 degraded trace、局部锁定、单品锚点、新品不落库、目标风格缺口和失败持久化。
+- `tests/test_extended_task_api.py`：通过真实 FastAPI HTTP 层执行任务、按用户读取运行记录和越权 404。
+
+扩展专项还必须验证：未配置 LLM 时返回失败而非确定性结果；Agent 2 引用衣橱外 ID、锁定槽位被改、证据来源越界时硬失败；Agent 3 拒绝时不发布草稿。
+
+前端验收包括 `apps/web` 的 `npm.cmd run build` 和小程序主推荐脚本的 `node --check`。小程序 WXML/WXSS 的开发者工具真机预览仍属于人工验收项。
+
+2026-08-10 严格三 Agent、Schema v8 与完成契约 v3.1 结果：`compileall` 通过、Ruff clean、Pytest 183 passed；覆盖 Agent 1 多事实候选汇总、v7→v8 数据保留迁移、合法澄清状态、Agent 2 不完整草稿修复、Agent 3 拒绝后的有限重做、缺口清单与 `missing_elements` 一致性，以及健康检查运行版本标识。Vue 生产构建成功，小程序脚本及配置 JSON 检查通过。唯一 warning 是 FastAPI `TestClient` 的第三方适配层弃用提示。

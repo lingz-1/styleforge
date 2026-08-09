@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -269,6 +269,29 @@ CREATE TABLE IF NOT EXISTS request_memory (
 
 CREATE INDEX IF NOT EXISTS idx_request_memory_user_created
 ON request_memory (user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS task_runs (
+    run_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    task_type TEXT NOT NULL CHECK (
+        task_type IN (
+            'outfit_recommend', 'outfit_modify', 'style_advice',
+            'item_advice', 'wardrobe_compatibility', 'wardrobe_gap'
+        )
+    ),
+    request TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('running', 'completed', 'infeasible', 'needs_clarification', 'failed')
+    ),
+    context_pack_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_runs_user_created
+ON task_runs (user_id, created_at DESC);
 """
 
 
@@ -298,6 +321,7 @@ def initialize_database(database_path: Path) -> None:
                 f"database={version_row['value']}, supported={SCHEMA_VERSION}"
             )
         connection.executescript(SCHEMA_SQL)
+        _migrate_task_runs_status(connection)
         _ensure_column(connection, "dataset_outfits", "style", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(connection, "dataset_outfits", "season", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(connection, "dataset_outfits", "occasion", "TEXT NOT NULL DEFAULT ''")
@@ -365,6 +389,59 @@ def initialize_database(database_path: Path) -> None:
         raise
     finally:
         connection.close()
+
+
+def _migrate_task_runs_status(connection: sqlite3.Connection) -> None:
+    """Add needs_clarification to the task_runs status constraint in schema v8."""
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
+    ).fetchone()
+    if row is None or "needs_clarification" in str(row["sql"]):
+        return
+    connection.execute(
+        """
+        CREATE TABLE task_runs_v8 (
+            run_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            task_type TEXT NOT NULL CHECK (
+                task_type IN (
+                    'outfit_recommend', 'outfit_modify', 'style_advice',
+                    'item_advice', 'wardrobe_compatibility', 'wardrobe_gap'
+                )
+            ),
+            request TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'running', 'completed', 'infeasible',
+                    'needs_clarification', 'failed'
+                )
+            ),
+            context_pack_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            finished_at TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO task_runs_v8(
+            run_id, user_id, task_type, request, status,
+            context_pack_json, result_json, error_message, created_at, finished_at
+        )
+        SELECT
+            run_id, user_id, task_type, request, status,
+            context_pack_json, result_json, error_message, created_at, finished_at
+        FROM task_runs
+        """
+    )
+    connection.execute("DROP TABLE task_runs")
+    connection.execute("ALTER TABLE task_runs_v8 RENAME TO task_runs")
+    connection.execute(
+        "CREATE INDEX idx_task_runs_user_created "
+        "ON task_runs (user_id, created_at DESC)"
+    )
 
 
 def _ensure_column(

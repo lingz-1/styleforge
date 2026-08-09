@@ -3,6 +3,38 @@
 > 更新时间：2026-08-03  
 > 原则：先验证最新代码，再预览真实订单，最后才允许提交衣柜或导入 Mytheresa 主库。
 
+## P0：v3.3 P2 Task Router 回归（✅ 2026-08-09 已完成）
+
+> `compileall` 通过；P2/P2.5 定向测试 31 passed；全量 Pytest 165 passed；Ruff 通过；42 条路由基线准确率 100%。
+
+按顺序验证新路由模块，任一步失败时停止：
+
+```powershell
+D:\anaconda\envs\style\python.exe -m compileall -q apps\api\styleforge tests
+D:\anaconda\envs\style\python.exe -m pytest -q tests\test_task_router.py
+D:\anaconda\envs\style\python.exe -m pytest -q tests\test_task_routing_eval.py
+D:\anaconda\envs\style\python.exe -m pytest -q
+D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests
+```
+
+完成判据：六类代表性请求全部路由到对应子图；`/recommendations` 原回归保持通过；`POST /tasks/route` 只返回 `routed`。五类扩展业务现由独立的 `POST /tasks/execute` 执行。
+
+复现 P2.5 路由基线报告：
+
+```powershell
+D:\anaconda\envs\style\python.exe -m evals.runners.evaluate_task_routing
+```
+
+该报告只记录 Task Routing Accuracy。P2.5 的 Wardrobe Fixtures 与五维穿搭 benchmark 尚未实现，完成前不要把 P2.5 整体标记为已完成。
+
+## P0：Context Pack 与五类扩展业务（✅ 2026-08-09 已完成）
+
+- 已完成共享领域结构、Context Pack、六分支执行器、`task_runs` Schema v7、执行与查询 API。
+- 已完成局部修改、风格知识、单品知识、新品兼容性、衣橱缺口及 Web/小程序入口。
+- 已完成扩展业务单元测试、HTTP 接口测试、知识未覆盖失败持久化测试和 Web 生产构建。
+- 最终结果：Python 编译通过、Ruff clean、Pytest 175 passed、路由评估 42/42、真实 API 进程烟测通过。
+- 后续质量工作是扩大知识覆盖、建立 Wardrobe Fixtures/五维 benchmark 和人工偏好评测，不属于本轮业务闭环缺失。
+
 ## P0：最新代码回归
 
 > ✅ 2026-08-04 已完成：`compileall` 退出码 0；Pytest 47 passed（0.67s）；Ruff `All checks passed`。

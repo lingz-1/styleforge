@@ -10,6 +10,7 @@ export default createRouter({
   routes: [
     { path: '/', redirect: '/recommend' },
     { path: '/recommend', component: RecommendPage },
+    { path: '/assistant', redirect: '/recommend' },
     { path: '/wardrobe', component: WardrobePage },
     { path: '/import', component: ImportPage },
     { path: '/settings', component: SettingsPage },

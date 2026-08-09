@@ -27,6 +27,7 @@ TYPE_TO_SLOT = {
     "neckwear": "accessory",
     "brooch": "accessory",
     "hairwear": "accessory",
+    "accessory": "accessory",
     "gloves": "accessory",
     "legwear": "accessory",
     "swimwear": "swimwear",

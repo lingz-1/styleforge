@@ -1,6 +1,55 @@
 # StyleForge 问题与解决记录
 
-> 每次排查和修复按日期记录，每条包含现象、根因、修复与验证。验收证据和状态总览见[项目状态](PROJECT_STATUS.md)。最新代码回归：Pytest 134 passed，Ruff 通过。
+> 每次排查和修复按日期记录，每条包含现象、根因、修复与验证。验收证据和状态总览见[项目状态](PROJECT_STATUS.md)。
+
+## 2026-08-10
+
+### 14. 旧 API 进程继续执行宽松契约，Agent 3 反复拒绝扩展任务
+
+- **现象**：单品搭配仍返回 `needs_clarification` 和空 `sample_outfits`；中世纪衣橱缺口把零缺口当成必须澄清，并且 Agent 3 要求使用与当前请求无关的历史偏好。
+- **根因**：失败进程启动于 00:17，而 Agent 2 完成契约与复审闭环在 00:22–00:23 才写入，00:27–00:29 的失败任务实际一直运行旧代码。与此同时，Agent 3 提示词没有明确阶段职责和零缺口边界，缺口硬校验也只验证 ID 边界，没有校验 `gaps` 是否等于 Agent 1 的 `missing_elements`。
+- **修复**：契约升级为 `extension-three-agent-v3.1`；`/health` 返回 API 启动时间和扩展契约版本。完整搭配的 `reasoning` 改为必填；缺口硬校验要求 Agent 2 的覆盖证据只能来自 Agent 1，并让 `gaps` 与 Agent 1 `missing_elements` 一致。覆盖证据允许只展示相关子集，不能因未抄回全部已覆盖元素而失败。Agent 3 明确不得要求 Agent 1 直接给建议、不得强制使用无关历史、不得因用户询问缺口而虚构缺口。
+- **验证**：当前默认衣橱的“黑色马甲怎么搭？”解析出唯一真实锚点 `P01034343`；“中世纪风格衣橱缺口”解析为 targeted、无需澄清。专项 43 passed；全量 Pytest 183 passed；compileall 与 Ruff 通过。
+
+## 2026-08-09
+
+### 13. 单品任务通过外层 Schema，却没有回答“怎么搭”
+
+- **现象**：Agent 2 返回 `needs_clarification`、可搭配单品列表和空 `sample_outfits`；外层 JSON 校验通过，直到 Agent 3 才发现它没有回答“黑色马甲怎么搭”，随后工作流直接失败。
+- **根因**：阶段输入输出只冻结了字段类型，没有冻结任务完成条件；Agent 1 的模型补充信息还能把缺少场合误升为阻塞条件；Agent 3 拒绝后没有重做闭环。
+- **修复**：提示词升级为 `extension-three-agent-v2`；事实工具的 `needs_clarification` 成为唯一阻塞依据；单品 `completed` 强制要求锚点、兼容分组和至少一套包含锚点的完整搭配。Agent 2 Schema/完成条件失败可自修复一次，Agent 3 首次拒绝会触发一次 Agent 2 重做和 Agent 3 复审，全程没有确定性结果降级。
+- **验证**：新增“缺场合误澄清 + 空 sample_outfits”修复用例和“Critic 拒绝后重做”用例；专项 13 passed、全量 Pytest 182 passed、编译和 Ruff 通过。真实 DeepSeek 验收因需要把 demo-user 衣橱上下文发送给外部服务，等待用户明确授权。
+
+### 11. 扩展任务绕过三 Agent，并用确定性 Service 直接产出结果
+
+- **现象**：主推荐由三 Agent 执行，但五类扩展业务被独立 Service 直接算出结果；前端还要求用户手选任务类型。未知知识会直接报“本地知识库未覆盖”，单品搭配和目标风格衣橱缺口没有按用户语义执行。
+- **根因**：首次扩展实现把“不同输入输出”误解成“独立决策服务”，事实检索、业务判断和失败降级没有分层。
+- **修复**：删除扩展 `TaskExecutionService` 和五类结果 Service；新增 `MultiTaskWorkflow`，所有扩展严格执行 `SemanticRetrieverAgent → ComposerAgent → CriticAgent`。确定性代码仅保留事实读取和硬校验，模型不可用或输出非法时直接失败并持久化。补充黑色马甲锚点、中世纪目标缺口知识和路由词；Web/小程序合并到主推荐自然语言入口。
+- **验证**：编译通过、Ruff clean、Pytest 178 passed；五类扩展专项断言每次成功任务恰好三次模型调用且 trace 无 degraded，未配置 LLM 明确失败并持久化；Vue 生产构建和小程序脚本/JSON 检查通过。默认 `demo-user` 保持 2062 件活跃衣橱，黑色马甲解析到真实衣橱锚点并返回鞋履/下装候选。
+
+### 12. Agent 1 事实单品被误判越界，待补充状态无法落库
+
+- **现象**：黑色马甲任务中，Agent 2 引用 `facts.wardrobe_matches` 内的 5 个衣橱 ID，却报“Agent 1 候选范围外”；衣橱缺口返回 `needs_clarification` 时又触发 `task_runs.status` CHECK 约束错误。
+- **根因**：Agent 1 同时向提示词暴露 `wardrobe_matches` 和 `compatible_items_by_slot`，但 `candidate_item_ids` 只汇总后者；Schema v7 的任务状态约束也遗漏了合法终态 `needs_clarification`。
+- **修复**：候选 ID 统一汇总 Agent 1 暴露的知识匹配、兼容分组和锚点事实，仍受当前衣橱白名单限制；数据库升级到 Schema v8，自动重建 `task_runs` 约束并保留原记录。
+- **验证**：用户报出的 5 个 ID 全部进入 Agent 1 的 25 个候选集合；v7→v8 迁移前后均为 11 条运行记录、2062 件活跃衣橱；编译、Ruff 和 Pytest 180 passed。
+
+### 10. 五类扩展任务从“只路由”补齐为完整业务（已被第 11 项架构替换）
+
+- **现象**：Task Router 能区分六类请求，但除标准推荐外只返回占位子图，局部修改、知识建议、新品兼容和衣橱缺口没有统一输入、上下文、持久化、API 与双端界面。
+- **根因**：P2 的目标只是建立安全路由骨架；P3/P4/P8 的共享领域结构和业务服务尚未落地。
+- **修复**：新增 Context Pack、共享 Pydantic 输入、Markdown 知识检索、五类独立服务、`TaskExecutionService`、Schema v7 `task_runs`、`/tasks/execute` 与运行查询接口；Web 和小程序新增智能造型页。
+- **细节修复**：实际被编辑的方案 ID 写入 Context Pack；新品完整搭配数不再等于仅展示的样例数；日常/商务缺口改为完整槽位判断；未知知识明确失败且保留可审计记录。
+- **验证**：`compileall` 通过、Ruff clean、Pytest 175 passed、42 条路由评估 42/42；小程序新增脚本语法检查和 Web Vite 生产构建通过；真实 API 进程的健康检查、风格知识、衣橱缺口和运行记录查询烟测通过。
+
+### 9. v3.3 Task Router 测试在 Pytest 收集阶段失败
+
+- **现象**：P2 定向测试和全量测试均在收集 `tests/test_task_router.py` 时停止，报错：`'request' is a reserved name and cannot be used in @pytest.mark.parametrize`。
+- **根因**：参数化测试把参数命名为 `request`，与 Pytest 内置 `request` fixture 的保留名称冲突；业务代码和 Task Router 尚未进入执行阶段。
+- **修复**：把参数化字段及测试函数形参统一改为 `user_query`，调用逻辑不变。
+- **后续发现**：42 条路由基线中“保留上衣和裤子，只换外套”首次被默认路由为推荐；局部修改规则只接受“换一/换双/换件/换掉”，未覆盖“换+目标槽位”。同时，评估 runner 从仓库根目录执行时因 `apps/api` 不在模块路径而无法导入 `styleforge`。
+- **补充修复**：局部修改规则增加“换鞋/靴/外套/上衣/下装/裤子/裙子/包/配饰”；runner 从自身路径解析工作区并添加 `apps/api`，报告固定写入工作区 `artifacts/evaluation/`。
+- **验证**：`compileall` 通过；P2/P2.5 定向测试 31 passed；全量 Pytest 165 passed；Ruff `All checks passed`；42 条路由基线准确率 100%，六类逐类准确率均为 100%，失败 0。
 
 ## 2026-08-06
 

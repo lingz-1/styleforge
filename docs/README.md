@@ -9,6 +9,7 @@
 | [项目状态](PROJECT_STATUS.md) | 当前完成度、验证证据、未验证改动与已知限制 |
 | [问题与解决记录](ISSUE_LOG.md) | 按日期记录每次排查与修复（现象、根因、修复、验证） |
 | [系统架构](ARCHITECTURE.md) | 多 Agent 边界、数据流、约束与降级路径 |
+| [扩展任务业务与 API](EXTENDED_TASKS.md) | Context Pack、五类扩展业务、统一执行接口、输入输出与边界 |
 | [数据与模型](DATA_AND_MODELS.md) | 数据审计、严格搭配子集、FashionCLIP 与 FAISS 产物 |
 | [本地部署](LOCAL_DEPLOYMENT.md) | 环境、初始化、API、Streamlit 和故障排查 |
 | [测试与评估](TESTING_AND_EVALUATION.md) | 单元测试、集成测试和离线质量指标 |

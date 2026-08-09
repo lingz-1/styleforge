@@ -16,7 +16,7 @@
     "color": "#999999",
     "selectedColor": "#409eff",
     "list": [
-      { "pagePath": "pages/wardrobe/index", "text": "衣柜" },
+      { "pagePath": "pages/wardrobe/index", "text": "衣橱" },
       { "pagePath": "pages/recommend/index", "text": "推荐" },
       { "pagePath": "pages/profile/index", "text": "我的" }
     ]

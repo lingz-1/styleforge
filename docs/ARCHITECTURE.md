@@ -26,6 +26,19 @@ flowchart TD
     O --> DB["SQLite 运行记录"]
 ```
 
+v3.3 在主推荐链路之前新增独立 `Task Router`。它是确定性系统能力，不是第四个 Agent。六类任务现在共享 `TaskExecutionInput`、`ContextPack` 和 `task_runs` 持久化契约；标准推荐复用原工作流，五类扩展任务由隔离的确定性服务执行。路由模式与执行模式分离：`/tasks/route` 只分类，`/tasks/execute` 才运行业务。
+
+```mermaid
+flowchart LR
+    U["用户请求"] --> R["Task Router"]
+    R --> A["OUTFIT_RECOMMEND"]
+    R --> B["OUTFIT_MODIFY"]
+    R --> C["STYLE_ADVICE"]
+    R --> D["ITEM_ADVICE"]
+    R --> E["WARDROBE_COMPATIBILITY"]
+    R --> F["WARDROBE_GAP"]
+```
+
 ## 3. 组件职责
 
 ### Planner Agent
@@ -103,6 +116,9 @@ TaskSpec
 
 - `/health`：数据库、嵌入和索引状态。
 - `/recommendations`：运行完整多 Agent 流程。
+- `/tasks/route`：只选择 v3.3 任务子图并返回可审计路由信息。
+- `/tasks/execute`：统一执行六类任务，返回 `Context Pack + result + trace` 并持久化运行记录。
+- `/tasks/{user_id}/{run_id}`：读取当前用户的一次扩展任务运行，用户 ID 不匹配时返回 404。
 - `/catalog/search`：按元数据搜索商品。
 - `/wardrobes/{user_id}`：读取用户衣柜。
 - `/wardrobes/{user_id}/items`：添加或停用衣柜商品。
@@ -127,3 +143,8 @@ TaskSpec
 | 图片不存在 | API 返回 404，不使用替代商品冒充 |
 | Agent 输出非法 ID | Reviewer 拒绝 |
 | 节点异常 | 写入失败运行记录并抛出明确错误 |
+| 五类扩展任一 Agent 不可用/超时/JSON 非法 | 不生成降级结果，任务记录为 `failed` |
+| 本地知识未覆盖 | 作为证据限制交给三 Agent 判断，不用模板冒充结论 |
+| 新品兼容性分析 | 新品只作为瞬态候选，不写入目录或用户衣橱 |
+
+> 上表中 FashionCLIP/规则候选降级只适用于标准穿搭推荐。五类扩展任务统一使用严格三 Agent 链，没有确定性结果降级。
