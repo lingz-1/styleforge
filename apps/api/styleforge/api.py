@@ -47,6 +47,7 @@ from styleforge.services.order_import import parse_order_workbook
 from styleforge.services.personal_embeddings import embed_personal_items
 from styleforge.services.recognition_batch import (
     get_batch,
+    list_batches,
     start_batch,
 )
 from styleforge.services.personal_images import bind_personal_image
@@ -676,6 +677,16 @@ def start_wardrobe_photo_batch(
         model_dir=settings.artifact_root / "models",
     )
     return batch.snapshot()
+
+
+@app.get("/wardrobes/{user_id}/recognition-batches")
+def list_wardrobe_photo_batches(
+    user_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    """Recent recognition batches for a user, newest first (for the wardrobe page)."""
+    batches = list_batches(user_id, limit)
+    return {"user_id": user_id, "count": len(batches), "batches": batches}
 
 
 @app.get("/wardrobes/{user_id}/recognition-batches/{batch_id}")

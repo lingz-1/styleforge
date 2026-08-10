@@ -302,3 +302,15 @@ def get_batch(batch_id: str) -> RecognitionBatch | None:
     with _store_lock:
         batch = _store.get(batch_id)
         return copy.deepcopy(batch) if batch is not None else None
+
+
+def list_batches(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Summaries of a user's batches, newest first (deep copies, no race)."""
+    with _store_lock:
+        owned = [
+            copy.deepcopy(batch)
+            for batch in _store.values()
+            if batch.user_id == user_id
+        ]
+    owned.sort(key=lambda batch: batch.started_at, reverse=True)
+    return [batch.snapshot() for batch in owned[:limit]]

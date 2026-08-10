@@ -14,6 +14,72 @@
       </el-button>
     </div>
 
+    <!-- 批量识别任务（提交后后台处理，进度与结果持久显示） -->
+    <div v-if="batchTasks.length" class="mb">
+      <el-card
+        v-for="task in batchTasks"
+        :key="task.batch_id"
+        class="batch-card"
+        shadow="never"
+      >
+        <template #header>
+          <div class="batch-card-header">
+            <span class="batch-title">批量识别任务</span>
+            <el-tag size="small" effect="plain" :type="task.status === 'running' ? 'primary' : 'success'">
+              {{ task.status === 'running' ? '识别中' : '已完成' }}
+            </el-tag>
+            <span class="batch-time">{{ fmtTime(task.started_at) }}</span>
+          </div>
+        </template>
+        <template v-if="task.status === 'running'">
+          <el-progress :percentage="task.percent || 0" :stroke-width="12" />
+          <div class="batch-status">
+            已识别 {{ task.done }}/{{ task.total }}
+            · 成功 {{ task.succeeded }} · 失败 {{ task.failed }}
+            · 预计剩余 {{ fmtEta(task.eta_seconds) }}
+          </div>
+        </template>
+        <template v-else>
+          <el-table :data="task.results" size="small">
+            <el-table-column prop="filename" label="文件" min-width="130" show-overflow-tooltip />
+            <el-table-column label="识别结果" min-width="210">
+              <template #default="{ row }">
+                <template v-if="row.status === 'succeeded'">
+                  <el-tag size="small" type="success">已入库</el-tag>
+                  <div class="result-detail">
+                    {{ vn(row.item_type) }} / {{ vn(row.subtype) || '未细分' }} · {{ vn(row.color) }}
+                    <template v-if="row.confidence"> · {{ vnPct(row.confidence) }}</template>
+                  </div>
+                </template>
+                <template v-else>
+                  <el-tag size="small" type="danger">{{ reasonText(row.reason) }}</el-tag>
+                  <div v-if="row.attributes?.description" class="result-detail">
+                    {{ row.attributes.description }}
+                  </div>
+                </template>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120">
+              <template #default="{ row }">
+                <el-button
+                  v-if="row.status === 'failed'"
+                  size="small"
+                  type="primary"
+                  plain
+                  @click="manualAdd(row, task)"
+                >
+                  手动添加
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="mt">
+            <el-button size="small" @click="load">刷新衣柜</el-button>
+          </div>
+        </template>
+      </el-card>
+    </div>
+
     <el-alert v-if="error" :title="error" type="error" show-icon class="mb" />
 
     <el-collapse v-model="expandedTypes" class="mb">
@@ -109,105 +175,48 @@
       </template>
     </el-dialog>
 
-    <!-- 批量导入 -->
+    <!-- 批量导入（提交后在衣柜顶部查看进度/结果） -->
     <el-dialog
       v-model="batchVisible"
       title="批量导入衣物（AI 自动识别）"
       width="640px"
-      @closed="stopPoll"
     >
-      <template v-if="batchMode === 'select'">
-        <el-upload
-          drag
-          multiple
-          :limit="30"
-          :auto-upload="false"
-          accept="image/*"
-          :file-list="batchFileList"
-          :on-change="onBatchFile"
-          :on-remove="onBatchRemove"
-          :on-exceed="onBatchExceed"
-        >
-          <el-icon class="el-icon--upload"><upload-filled /></el-icon>
-          <div class="el-upload__text">拖拽多张图片到此处，或 <em>点击选择</em>（最多 30 张）</div>
-        </el-upload>
-        <el-form label-width="80px" class="mt">
-          <el-form-item label="人群">
-            <el-select v-model="batchGender">
-              <el-option label="女" value="women" />
-              <el-option label="男" value="men" />
-            </el-select>
-          </el-form-item>
-        </el-form>
-        <div class="mt-hint">
-          提交后 AI 在后台逐张识别，识别成功且可信的自动加入衣柜；失败项可在结果中手动补录。
-        </div>
-      </template>
-
-      <template v-else-if="batchMode === 'progress'">
-        <el-progress :percentage="batchPercent" :stroke-width="14" />
-        <div class="batch-status">
-          已识别 {{ batchState.done }}/{{ batchState.total }}
-          · 成功 {{ batchState.succeeded }}
-          · 失败 {{ batchState.failed }}
-          <template v-if="batchState.status === 'running'"> · 预计剩余 {{ fmtEta(batchState.eta_seconds) }}</template>
-        </div>
-      </template>
-
-      <template v-else>
-        <el-table :data="batchState.results" size="small" max-height="380">
-          <el-table-column prop="filename" label="文件" min-width="130" show-overflow-tooltip />
-          <el-table-column label="识别结果" min-width="210">
-            <template #default="{ row }">
-              <template v-if="row.status === 'succeeded'">
-                <el-tag size="small" type="success">已入库</el-tag>
-                <div class="result-detail">
-                  {{ vn(row.item_type) }} / {{ vn(row.subtype) || '未细分' }} · {{ vn(row.color) }}
-                  <template v-if="row.confidence"> · {{ vnPct(row.confidence) }}</template>
-                </div>
-              </template>
-              <template v-else>
-                <el-tag size="small" type="danger">{{ reasonText(row.reason) }}</el-tag>
-                <div v-if="row.attributes?.description" class="result-detail">
-                  {{ row.attributes.description }}
-                </div>
-              </template>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="120">
-            <template #default="{ row }">
-              <el-button
-                v-if="row.status === 'failed'"
-                size="small"
-                type="primary"
-                plain
-                @click="manualAdd(row)"
-              >
-                手动添加
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-        <div class="mt">
-          <el-button @click="load">刷新衣柜</el-button>
-        </div>
-      </template>
-
+      <el-upload
+        drag
+        multiple
+        :limit="30"
+        :auto-upload="false"
+        accept="image/*"
+        :file-list="batchFileList"
+        :on-change="onBatchFile"
+        :on-remove="onBatchRemove"
+        :on-exceed="onBatchExceed"
+      >
+        <el-icon class="el-icon--upload"><upload-filled /></el-icon>
+        <div class="el-upload__text">拖拽多张图片到此处，或 <em>点击选择</em>（最多 30 张）</div>
+      </el-upload>
+      <el-form label-width="80px" class="mt">
+        <el-form-item label="人群">
+          <el-select v-model="batchGender">
+            <el-option label="女" value="women" />
+            <el-option label="男" value="men" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <div class="mt-hint">
+        提交后关闭窗口即可，AI 在后台逐张识别，识别成功且可信的自动加入衣柜；
+        进度和结果请在衣柜顶部"批量识别任务"查看，失败项可手动补录。
+      </div>
       <template #footer>
-        <template v-if="batchMode === 'select'">
-          <el-button @click="batchVisible = false">取消</el-button>
-          <el-button
-            type="primary"
-            :loading="batchSubmitting"
-            :disabled="!batchFiles.length"
-            @click="submitBatch"
-          >
-            开始批量识别
-          </el-button>
-        </template>
-        <template v-else>
-          <el-button @click="batchVisible = false">关闭</el-button>
-        </template>
+        <el-button @click="batchVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="batchSubmitting"
+          :disabled="!batchFiles.length"
+          @click="submitBatch"
+        >
+          开始批量识别
+        </el-button>
       </template>
     </el-dialog>
 
@@ -261,7 +270,7 @@ import { Loading, UploadFilled } from '@element-plus/icons-vue'
 import {
   getWardrobe, removeWardrobeItem, createPhotoItem, analyzeItem, getTaxonomy,
   updateItem, uploadItemImage, imageUrl,
-  startBatchRecognition, getBatchRecognition,
+  startBatchRecognition, listBatchRecognition,
 } from '../services/api'
 import { getUserId, setUserId } from '../services/user'
 
@@ -345,7 +354,10 @@ const typeLabel = (type) => {
   return TYPE_LABELS[type] || type
 }
 
-function onUserIdChange(value) { setUserId(value) }
+function onUserIdChange(value) {
+  setUserId(value)
+  loadBatches()
+}
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -495,27 +507,19 @@ async function submitCreate() {
   }
 }
 
-// --- 批量导入识别 ---
+// --- 批量导入识别（提交后后台处理，进度与结果在衣柜顶部常驻显示） ---
 const batchVisible = ref(false)
-const batchMode = ref('select') // select | progress | results
 const batchFiles = ref([]) // 原始 File[]，索引与后端 results 的 index 对应
 const batchGender = ref('women')
 const batchSubmitting = ref(false)
-const batchState = reactive({
-  batch_id: '', total: 0, done: 0, succeeded: 0, failed: 0,
-  status: 'running', eta_seconds: 0, results: [],
-})
+// 历史任务列表；每项为后端 snapshot + _files（手动添加回填用）
+const batchTasks = ref([])
 const batchPollTimer = ref(null)
 const batchPolling = ref(false)
-const batchUserIdAtSubmit = ref('')
 
 const batchFileList = computed(() =>
   batchFiles.value.map((file, index) => ({ name: file.name, uid: index, raw: file })),
 )
-const batchPercent = computed(() => {
-  if (!batchState.total) return 0
-  return Math.round((batchState.done * 100) / batchState.total)
-})
 
 const REASON_TEXT = {
   low_confidence: '识别不可信', vision_unavailable: '识别服务不可用',
@@ -533,8 +537,12 @@ function fmtEta(eta) {
   return `${minutes} 分 ${seconds} 秒`
 }
 
+function fmtTime(iso) {
+  if (!iso) return ''
+  return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+}
+
 function openBatch() {
-  batchMode.value = 'select'
   batchFiles.value = []
   batchGender.value = 'women'
   batchVisible.value = true
@@ -564,10 +572,12 @@ async function submitBatch() {
       content_base64: base64s[index],
     }))
     const res = await startBatchRecognition(userId.value, images, batchGender.value)
-    batchUserIdAtSubmit.value = userId.value
-    Object.assign(batchState, res.data)
-    batchMode.value = 'progress'
-    startPoll()
+    // 提交成功即关闭对话框，后台继续识别；进度/结果常驻在衣柜顶部任务卡片
+    batchTasks.value.unshift({ ...res.data, _files: [...batchFiles.value] })
+    batchFiles.value = []
+    batchVisible.value = false
+    ElMessage.success('已提交，AI 在后台识别，可在衣柜顶部查看进度')
+    startBatchPolling()
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || e.message)
   } finally {
@@ -575,26 +585,43 @@ async function submitBatch() {
   }
 }
 
-function startPoll() {
-  stopPoll()
-  batchPollTimer.value = setInterval(pollBatch, 2000)
+// 拉取历史任务列表；合并已保留的原始文件引用（_files），并按有无运行中任务启停轮询
+async function loadBatches() {
+  try {
+    const res = await listBatchRecognition(userId.value, 50)
+    const filesById = new Map(batchTasks.value.map((t) => [t.batch_id, t._files]))
+    batchTasks.value = (res.data.batches || []).map((b) => ({
+      ...b, _files: filesById.get(b.batch_id) || [],
+    }))
+    const hasRunning = batchTasks.value.some((t) => t.status === 'running')
+    if (hasRunning) startBatchPolling()
+    else stopBatchPolling()
+  } catch (e) {
+    // 静默失败：批次列表加载失败不影响衣柜主流程，下次刷新再试
+  }
 }
-function stopPoll() {
+
+function startBatchPolling() {
+  stopBatchPolling()
+  batchPollTimer.value = setInterval(pollBatches, 2000)
+}
+function stopBatchPolling() {
   if (batchPollTimer.value) {
     clearInterval(batchPollTimer.value)
     batchPollTimer.value = null
   }
 }
-async function pollBatch() {
+async function pollBatches() {
   if (batchPolling.value) return
   batchPolling.value = true
   try {
-    const res = await getBatchRecognition(batchUserIdAtSubmit.value, batchState.batch_id)
-    Object.assign(batchState, res.data)
-    if (res.data.status !== 'running') {
-      stopPoll()
-      batchMode.value = 'results'
-    }
+    const res = await listBatchRecognition(userId.value, 50)
+    const filesById = new Map(batchTasks.value.map((t) => [t.batch_id, t._files]))
+    batchTasks.value = (res.data.batches || []).map((b) => ({
+      ...b, _files: filesById.get(b.batch_id) || [],
+    }))
+    const hasRunning = batchTasks.value.some((t) => t.status === 'running')
+    if (!hasRunning) stopBatchPolling()
   } catch (e) {
     // 网络抖动：跳过本次轮询，下次再试
   } finally {
@@ -603,10 +630,8 @@ async function pollBatch() {
 }
 
 // 失败项手动补录：回填原图与识别属性到单图创建对话框
-function manualAdd(row) {
-  const file = batchFiles.value[row.index] || null
-  stopPoll()
-  batchVisible.value = false
+function manualAdd(row, task) {
+  const file = (task._files && task._files[row.index]) || null
   openCreate()
   createForm.file = file
   createForm.attributes = row.attributes || null
@@ -620,7 +645,7 @@ function manualAdd(row) {
   }
 }
 
-onBeforeUnmount(stopPoll)
+onBeforeUnmount(stopBatchPolling)
 
 // --- 编辑 ---
 const editVisible = ref(false)
@@ -680,6 +705,7 @@ onMounted(async () => {
     ElMessage.error(`加载分类失败：${e.response?.data?.detail || e.message}`)
   }
   load()
+  loadBatches()
 })
 </script>
 
@@ -702,4 +728,8 @@ onMounted(async () => {
 .mt-hint { margin-top: 8px; font-size: 12px; color: #999; }
 .batch-status { margin-top: 12px; font-size: 13px; color: #555; }
 .result-detail { margin-top: 4px; font-size: 12px; color: #888; line-height: 1.4; }
+.batch-card { margin-bottom: 12px; }
+.batch-card-header { display: flex; align-items: center; gap: 10px; }
+.batch-title { font-weight: 600; }
+.batch-time { font-size: 12px; color: #999; margin-left: auto; }
 </style>

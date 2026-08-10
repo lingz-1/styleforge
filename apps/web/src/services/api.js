@@ -29,6 +29,8 @@ export const startBatchRecognition = (userId, images, gender = 'women') =>
   })
 export const getBatchRecognition = (userId, batchId) =>
   http.get(`/wardrobes/${userId}/recognition-batches/${batchId}`)
+export const listBatchRecognition = (userId, limit = 20) =>
+  http.get(`/wardrobes/${userId}/recognition-batches`, { params: { limit } })
 export const updateItem = (userId, itemId, fields) =>
   http.put(`/wardrobes/${userId}/items/${itemId}`, fields)
 export const uploadItemImage = (userId, itemId, filename, contentBase64) =>
