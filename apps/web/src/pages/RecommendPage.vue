@@ -46,6 +46,8 @@
       <p class="shortcut">Ctrl / ⌘ + Enter 提交</p>
     </section>
 
+    <WeatherCard />
+
     <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="block" />
 
     <template v-if="payload">
@@ -233,9 +235,11 @@
 import { computed, defineComponent, h, ref } from 'vue'
 import { ElImage } from 'element-plus'
 import { storeToRefs } from 'pinia'
+import WeatherCard from '../components/WeatherCard.vue'
 import { imageUrl } from '../services/api'
 import { useRecommendationStore } from '../stores/recommendation'
 import { getUserId, setUserId } from '../services/user'
+import { useTempUnit, weatherHint, weatherIcon } from '../utils/weather'
 
 const EXAMPLES = ['黑色马甲怎么搭？', '要搭配中世纪风格，我的衣柜还缺什么？', '鞋太正式，只换一双，其他保持不变。']
 const TASK_LABELS = { outfit_recommend: '穿搭推荐', outfit_modify: '局部修改', style_advice: '风格知识', item_advice: '单品搭配', wardrobe_compatibility: '衣橱兼容性', wardrobe_gap: '衣橱缺口' }
@@ -331,58 +335,8 @@ async function run() {
   await store.run(userId.value, request.value, 3, deviceLocation.value)
 }
 
-// --- V2.2: 温度单位切换（摄氏/华氏，localStorage 持久化） ---
-const TEMP_UNIT_KEY = 'sf_temp_unit'
-const tempUnit = ref(localStorage.getItem(TEMP_UNIT_KEY) || 'celsius')
-const toFahrenheit = (celsius) => celsius * 9 / 5 + 32
-const formatTemp = (celsius, unit = tempUnit.value) => {
-  if (celsius == null || Number.isNaN(celsius)) return '—'
-  const value = unit === 'fahrenheit' ? Math.round(toFahrenheit(celsius)) : Math.round(celsius)
-  return `${value}°${unit === 'fahrenheit' ? 'F' : 'C'}`
-}
-function setTempUnit(unit) {
-  tempUnit.value = unit
-  localStorage.setItem(TEMP_UNIT_KEY, unit)
-}
-
-// --- V2.2: 天气卡图标映射（按 WMO weather_code 分组） ---
-const WEATHER_ICON_CODES = [
-  { match: (code) => code <= 1, icon: '☀️' },
-  { match: (code) => code === 2, icon: '⛅' },
-  { match: (code) => code === 3, icon: '☁️' },
-  { match: (code) => code >= 45 && code <= 48, icon: '🌫️' },
-  { match: (code) => code >= 51 && code <= 57, icon: '🌦️' },
-  { match: (code) => code >= 61 && code <= 67, icon: '🌧️' },
-  { match: (code) => code >= 71 && code <= 77, icon: '🌨️' },
-  { match: (code) => code >= 80 && code <= 86, icon: '🌧️' },
-  { match: (code) => code >= 95, icon: '⛈️' },
-]
-function weatherIcon(code) {
-  if (code == null) return '🌡️'
-  const entry = WEATHER_ICON_CODES.find((item) => item.match(code))
-  return entry ? entry.icon : '🌡️'
-}
-
-// --- V2.2: 穿搭提示行（参考 wardrobe 参考实现的 weatherHints 规则） ---
-const WEATHER_HINTS = {
-  rainy: '降雨概率高，带伞并选防水外层与防滑鞋',
-  cold: '体感偏冷，注意保暖叠穿',
-  mild: '体感偏凉，适合薄外套或长袖叠穿',
-  hot: '天气炎热，优先透气轻薄面料并注意防晒',
-  windy: '风力较大，避免宽松裙摆与易飘单品',
-  nice: '天气宜人，常规穿搭即可',
-}
-function weatherHint(day) {
-  const temp = day.feels_like_c ?? day.temperature_max_c
-  const precip = day.precipitation_probability_percent ?? 0
-  const wind = day.wind_speed_kmh ?? 0
-  if (precip > 50) return WEATHER_HINTS.rainy
-  if (temp != null && temp < 10) return WEATHER_HINTS.cold
-  if (temp != null && temp < 18) return WEATHER_HINTS.mild
-  if (temp != null && temp > 28) return WEATHER_HINTS.hot
-  if (wind > 30) return WEATHER_HINTS.windy
-  return WEATHER_HINTS.nice
-}
+// --- V2.2: 温度单位切换与天气卡展示工具（与首页 WeatherCard 共享） ---
+const { tempUnit, setTempUnit, formatTemp } = useTempUnit()
 
 // --- V2.2: 定位授权交互（设备定位 → DeviceLocationContext） ---
 // 设备坐标只在请求内使用：后端 Location Resolver 会把坐标取整并保证
