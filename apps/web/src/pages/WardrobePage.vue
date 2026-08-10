@@ -135,7 +135,7 @@
               </el-image>
               <div class="item-name">{{ item.name || item.item_id }}</div>
               <div class="item-meta">
-                {{ item.item_type }} · {{ item.color }} · {{ item.gender === 'men' ? '男' : '女' }}
+                {{ typeLabel(item.item_type) }} · {{ item.color }} · {{ item.gender === 'men' ? '男' : '女' }}
               </div>
               <div class="item-attrs">
                 <div v-for="line in itemAttrLines(item)" :key="line" class="item-attr-line">{{ line }}</div>
