@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 # --- Controlled vocabularies (English tokens the model must output) ---
 
@@ -232,6 +232,14 @@ _TYPE_MAP_ALIASES = {
 }
 
 
+_LIST_FIELDS = ("colors", "style", "season", "occasion", "cultural_origin", "features")
+_STR_FIELDS = (
+    "type", "subtype", "primary_color", "pattern", "material", "formality",
+    "fit", "silhouette", "neckline", "collar", "sleeve_length", "length",
+    "brand", "condition", "description",
+)
+
+
 class ClothingAttributes(BaseModel):
     """Structured result of one clothing-image analysis (model vocabulary)."""
 
@@ -258,6 +266,48 @@ class ClothingAttributes(BaseModel):
     description: str = ""
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     raw_response: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _tolerate_loose_model_output(cls, data):
+        """Keep a usable result even when the model is sloppy.
+
+        Gemini often emits ``"confidence": null`` or a list field as a plain
+        string, which would otherwise reject the whole object and degrade the
+        entire analysis to a low-confidence empty result. Normalize field types
+        so a single bad field cannot discard an otherwise good recognition.
+        """
+        if not isinstance(data, dict):
+            return data
+        payload = dict(data)
+        # Only touch fields the model actually returned, so absent fields keep
+        # their pydantic defaults (e.g. type -> "other").
+        for field in _LIST_FIELDS:
+            if field not in payload:
+                continue
+            value = payload[field]
+            if isinstance(value, str):
+                payload[field] = [value] if value else []
+            elif isinstance(value, (list, tuple)):
+                payload[field] = [str(v) for v in value]
+            else:
+                payload[field] = []
+        if "confidence" in payload:
+            confidence = payload["confidence"]
+            try:
+                confidence = float(confidence)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            payload["confidence"] = max(0.0, min(1.0, confidence))
+        for field in _STR_FIELDS:
+            if field not in payload:
+                continue
+            value = payload[field]
+            if value is None:
+                payload[field] = ""
+            elif not isinstance(value, str):
+                payload[field] = str(value)
+        return payload
 
 
 def build_analysis_prompt() -> str:
@@ -295,7 +345,10 @@ def build_analysis_prompt() -> str:
         "DESCRIPTION: one short human-readable Chinese sentence (under 25 "
         "words) describing the garment.\n"
         "CONFIDENCE: a float 0.0-1.0 estimating how certain you are about the "
-        "type and primary color.\n"
+        "type and primary color. Must be a bare number, NEVER null, NEVER a "
+        "string. Every list field (COLORS, STYLE, SEASON, OCCASION, "
+        "CULTURAL_ORIGIN, FEATURES) must be a JSON array, even a single-item "
+        "one; NEVER a string.\n"
         "Output this exact JSON structure (a single object, NOT wrapped in an "
         "array):\n"
         '{"type":"TYPE","subtype":"","primary_color":"COLOR","colors":["COLOR1"],'
@@ -352,6 +405,14 @@ def parse_attributes(raw: str | dict) -> ClothingAttributes:
         return ClothingAttributes.model_validate(payload)
     except ValidationError:
         return ClothingAttributes(confidence=0.0, raw_response=str(raw))
+
+
+def is_reliable_analysis(attributes: ClothingAttributes) -> bool:
+    """True when the recognition is confident enough to prefill a form."""
+    return (
+        attributes.type not in ("", "other", "unknown")
+        and attributes.confidence >= 0.3
+    )
 
 
 def attributes_to_dict(attributes: ClothingAttributes) -> dict[str, Any]:

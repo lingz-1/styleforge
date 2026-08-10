@@ -338,11 +338,15 @@ async function onCreateFile(file) {
     const res = await analyzeItem(userId.value, file.name, b64)
     const data = res.data
     if (data && data.status === 'available' && data.attributes) {
-      createForm.attributes = data.attributes
-      if (data.item_type && !createForm.item_type) createForm.item_type = data.item_type
-      if (data.subtype && !createForm.subtype) createForm.subtype = data.subtype
-      if (data.color && !createForm.color) createForm.color = data.color
-      if (data.name && !createForm.name) createForm.name = data.name
+      if (data.recognized) {
+        createForm.attributes = data.attributes
+        if (data.item_type && !createForm.item_type) createForm.item_type = data.item_type
+        if (data.subtype && !createForm.subtype) createForm.subtype = data.subtype
+        if (data.color && !createForm.color) createForm.color = data.color
+        if (data.name && !createForm.name) createForm.name = data.name
+      } else {
+        ElMessage.info('AI 识别未成功，请手动填写衣物属性')
+      }
     }
   } catch (e) {
     // 识别失败降级为手动填写，不阻塞上传

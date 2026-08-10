@@ -53,6 +53,7 @@ from styleforge.services.wardrobe_item_service import (
 from styleforge.vision.clothing_analysis import (
     attributes_to_dict,
     build_analysis_prompt,
+    is_reliable_analysis,
     map_ai_type_to_item_fields,
     parse_attributes,
 )
@@ -612,6 +613,7 @@ def analyze_wardrobe_photo(
     )
     return {
         "status": "available",
+        "recognized": is_reliable_analysis(attributes),
         "item_type": item_type,
         "subtype": subtype,
         "color": attributes.primary_color,

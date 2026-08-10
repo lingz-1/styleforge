@@ -9,6 +9,7 @@ from PIL import Image
 from styleforge.vision.clothing_analysis import (
     ClothingAttributes,
     build_analysis_prompt,
+    is_reliable_analysis,
     map_ai_type_to_item_fields,
     parse_attributes,
 )
@@ -101,6 +102,41 @@ def test_parse_attributes_degrades_on_bad_input() -> None:
     assert broken.confidence == 0.0
     assert broken.type == "other"
     assert parse_attributes("[1, 2, 3]").type == "other"
+
+
+def test_parse_attributes_tolerates_null_confidence_and_string_lists() -> None:
+    attributes = parse_attributes(
+        {
+            "type": "jeans",
+            "season": "summer",
+            "colors": None,
+            "cultural_origin": ["none"],
+            "confidence": None,
+        }
+    )
+    assert attributes.type == "jeans"
+    assert attributes.season == ["summer"]
+    assert attributes.colors == []
+    assert attributes.confidence == 0.0
+
+
+def test_parse_attributes_tolerates_string_confidence_and_non_numeric() -> None:
+    attributes = parse_attributes(
+        {"type": "hoodie", "confidence": "0.9", "style": "streetwear"}
+    )
+    assert attributes.confidence == 0.9
+    assert attributes.style == ["streetwear"]
+    out_of_range = parse_attributes({"type": "hoodie", "confidence": 5})
+    assert out_of_range.confidence == 1.0
+    garbage = parse_attributes({"type": "hoodie", "confidence": "high"})
+    assert garbage.confidence == 0.0
+
+
+def test_is_reliable_analysis_requires_real_type_and_confidence() -> None:
+    assert is_reliable_analysis(ClothingAttributes(type="jeans", confidence=0.8))
+    assert not is_reliable_analysis(ClothingAttributes(type="other", confidence=0.9))
+    assert not is_reliable_analysis(ClothingAttributes(type="jeans", confidence=0.1))
+    assert not is_reliable_analysis(ClothingAttributes(confidence=0.0))
 
 
 def test_preprocess_image_returns_jpeg_data_url() -> None:

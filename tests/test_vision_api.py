@@ -101,6 +101,7 @@ def test_analyze_returns_mapped_fields(tmp_path, monkeypatch) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "available"
+    assert payload["recognized"] is True
     assert payload["item_type"] == "top"
     assert payload["subtype"] == "t_shirt"
     assert payload["color"] == "black"
@@ -109,6 +110,21 @@ def test_analyze_returns_mapped_fields(tmp_path, monkeypatch) -> None:
     assert payload["attributes"]["cultural_origin"] == ["none"]
     assert len(fake.calls) == 1
     assert fake.calls[0] == _photo_bytes()
+
+
+def test_analyze_flags_low_confidence_as_not_recognized(tmp_path, monkeypatch) -> None:
+    api = _import_api(tmp_path, monkeypatch)
+    fake = FakeVisionClient({"type": "shirt", "confidence": 0.05})
+    monkeypatch.setattr(api, "vision_client_from_settings", lambda _settings: fake)
+
+    with TestClient(api.app) as client:
+        response = client.post(
+            "/wardrobes/u1/items/analyze",
+            json={"filename": "tee.png", "content_base64": _b64(_photo_bytes())},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["recognized"] is False
 
 
 def test_analyze_returns_503_when_vision_disabled(tmp_path, monkeypatch) -> None:
