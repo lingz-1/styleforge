@@ -9,6 +9,7 @@ from styleforge.orchestration.location_resolver import (
     LocationResolution,
     LocationResolver,
 )
+from styleforge.tools.calendar import resolve_temporal_expression
 from styleforge.tools.registry import ToolRegistry
 from styleforge.tools.weather.schemas import (
     ContextRequirements,
@@ -17,6 +18,15 @@ from styleforge.tools.weather.schemas import (
     WeatherFacts,
     WeatherToolInput,
 )
+
+_SIMPLE_DATE_EXPRESSIONS = {
+    "today",
+    "今天",
+    "今日",
+    "tomorrow",
+    "明天",
+    "明日",
+}
 
 _DEFAULT_WINDOW_DAYS = 3
 
@@ -56,37 +66,78 @@ def _resolve_time_window(
             payload,
         )
     normalized = expression.strip().lower()
-    if normalized in {"today", "今天", "今日"}:
-        target = today
-        precision = "day"
-    elif normalized in {"tomorrow", "明天", "明日"}:
-        target = today + timedelta(days=1)
-        precision = "day"
+    if normalized in _SIMPLE_DATE_EXPRESSIONS or _is_iso_date(normalized):
+        # Today/tomorrow/ISO stay verbatim so the trace keeps the user's own
+        # wording; the calendar resolver handles every other expression.
+        target = _resolve_simple_date(normalized, today)
+        payload = {
+            "status": "resolved",
+            "expression": expression,
+            "start_date": target.isoformat(),
+            "end_date": target.isoformat(),
+            "precision": "day",
+            "default_applied": False,
+            "resolution_basis": "relative_to_request_time",
+        }
+        return {"date": expression}, payload
+
+    resolution = resolve_temporal_expression(expression, today=today)
+    if resolution.status == "unsupported":
+        payload = {
+            "status": "unsupported",
+            "expression": expression,
+            "start_date": "",
+            "end_date": "",
+            "precision": "",
+            "default_applied": False,
+            "resolution_basis": "unsupported_expression",
+        }
+        return {}, payload
+
+    window_args: dict[str, str] = {}
+    if resolution.precision in {"day", "period_day"}:
+        # A single-day window (incl. period windows) rides the ``date`` channel.
+        window_args["date"] = resolution.start_date
     else:
-        try:
-            target = date.fromisoformat(normalized)
-            precision = "day"
-        except ValueError:
-            payload = {
-                "status": "unsupported",
-                "expression": expression,
-                "start_date": "",
-                "end_date": "",
-                "precision": "",
-                "default_applied": False,
-                "resolution_basis": "unsupported_expression",
-            }
-            return {}, payload
+        window_args["start_date"] = resolution.start_date
+        window_args["end_date"] = resolution.end_date
+    if resolution.granularity == "hourly":
+        window_args["granularity"] = "hourly"
+        if resolution.period:
+            window_args["period"] = resolution.period
     payload = {
         "status": "resolved",
         "expression": expression,
-        "start_date": target.isoformat(),
-        "end_date": target.isoformat(),
-        "precision": precision,
-        "default_applied": False,
-        "resolution_basis": "relative_to_request_time",
+        "start_date": resolution.start_date,
+        "end_date": resolution.end_date,
+        "precision": resolution.precision,
+        "default_applied": resolution.default_applied,
+        "resolution_basis": resolution.resolution_basis,
+        "granularity": resolution.granularity,
+        "period": resolution.period,
+        "period_label": resolution.period_label,
+        "start_at": resolution.start_at,
+        "end_at": resolution.end_at,
+        "timezone": resolution.timezone,
+        "approximate": resolution.approximate,
     }
-    return {"date": expression}, payload
+    return window_args, payload
+
+
+def _is_iso_date(value: str) -> bool:
+    try:
+        date.fromisoformat(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_simple_date(normalized: str, today: date) -> date:
+    if normalized in {"today", "今天", "今日"}:
+        return today
+    if normalized in {"tomorrow", "明天", "明日"}:
+        return today + timedelta(days=1)
+    return date.fromisoformat(normalized)
 
 
 def _resolved_location_payload(
@@ -290,7 +341,7 @@ class ContextRouter:
         window_fields = {
             key: value
             for key, value in arguments.items()
-            if key in {"date", "start_date", "end_date"}
+            if key in {"date", "start_date", "end_date", "granularity", "period"}
         }
         display = ""
         if facts is not None and facts.resolved_location is not None:

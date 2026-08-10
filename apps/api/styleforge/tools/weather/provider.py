@@ -9,7 +9,13 @@ from typing import Any, Protocol
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from styleforge.tools.weather.schemas import ResolvedLocation, WeatherDay, WeatherFacts
+from styleforge.tools.calendar.periods import PERIOD_WINDOWS
+from styleforge.tools.weather.schemas import (
+    ResolvedLocation,
+    WeatherDay,
+    WeatherFacts,
+    WeatherHour,
+)
 
 JsonTransport = Callable[[str, float], dict[str, Any]]
 
@@ -26,6 +32,9 @@ class WeatherProvider(Protocol):
         location: ResolvedLocation,
         start_date: date,
         end_date: date,
+        *,
+        granularity: str = "daily",
+        period: str | None = None,
     ) -> WeatherFacts: ...
 
     def reverse_geocode(
@@ -76,6 +85,65 @@ def _value_at(payload: dict[str, Any], field: str, index: int) -> Any:
     return values[index] if isinstance(values, list) and index < len(values) else None
 
 
+# Open-Meteo geocoding only covers city-level names; province-level queries
+# (新疆/西藏/内蒙古...) return no results. Map them to a representative city
+# (their capital) as a best-effort weather approximation.
+_PROVINCE_CAPITALS: dict[str, str] = {
+    "新疆": "乌鲁木齐",
+    "西藏": "拉萨",
+    "内蒙古": "呼和浩特",
+    "广西": "南宁",
+    "宁夏": "银川",
+    "香港": "香港",
+    "澳门": "澳门",
+    "台湾": "台北",
+    "黑龙江": "哈尔滨",
+    "吉林": "长春",
+    "辽宁": "沈阳",
+    "河北": "石家庄",
+    "山西": "太原",
+    "陕西": "西安",
+    "甘肃": "兰州",
+    "青海": "西宁",
+    "山东": "济南",
+    "河南": "郑州",
+    "湖北": "武汉",
+    "湖南": "长沙",
+    "江苏": "南京",
+    "安徽": "合肥",
+    "浙江": "杭州",
+    "江西": "南昌",
+    "福建": "福州",
+    "广东": "广州",
+    "海南": "海口",
+    "四川": "成都",
+    "贵州": "贵阳",
+    "云南": "昆明",
+}
+
+_PROVINCE_SUFFIXES = (
+    "特别行政区",
+    "维吾尔自治区",
+    "壮族自治区",
+    "回族自治区",
+    "藏族自治区",
+    "自治区",
+    "省",
+    "市",
+)
+
+
+def _normalize_province_query(query: str) -> str:
+    """Strip administrative suffixes and map province names to a geocodable
+    representative city (their capital) as a weather approximation."""
+    name = query.strip()
+    for suffix in _PROVINCE_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[: -len(suffix)]
+            break
+    return _PROVINCE_CAPITALS.get(name, query.strip())
+
+
 class OpenMeteoProvider:
     """Fetch geocoding, reverse geocoding and daily facts from Open-Meteo."""
 
@@ -101,7 +169,7 @@ class OpenMeteoProvider:
     def resolve_location(self, query: str) -> ResolvedLocation | None:
         params = urlencode(
             {
-                "name": query,
+                "name": _normalize_province_query(query),
                 "count": 1,
                 "language": "zh",
                 "format": "json",
@@ -169,25 +237,39 @@ class OpenMeteoProvider:
         location: ResolvedLocation,
         start_date: date,
         end_date: date,
+        *,
+        granularity: str = "daily",
+        period: str | None = None,
     ) -> WeatherFacts:
         start = start_date.isoformat()
         end = end_date.isoformat()
+        daily_variables = [
+            "temperature_2m_max",
+            "temperature_2m_min",
+            "apparent_temperature_max",
+            "apparent_temperature_min",
+            "precipitation_probability_max",
+            "weather_code",
+            "wind_speed_10m_max",
+        ]
+        hourly_variables = ["relative_humidity_2m"]
+        if granularity == "hourly":
+            # UV / sun timing belong to the day; the key-period aggregation
+            # reuses them together with the extended hourly series.
+            daily_variables += ["uv_index_max", "sunrise", "sunset"]
+            hourly_variables += [
+                "temperature_2m",
+                "apparent_temperature",
+                "precipitation_probability",
+                "weather_code",
+                "wind_speed_10m",
+            ]
         params = urlencode(
             {
                 "latitude": location.latitude,
                 "longitude": location.longitude,
-                "daily": ",".join(
-                    [
-                        "temperature_2m_max",
-                        "temperature_2m_min",
-                        "apparent_temperature_max",
-                        "apparent_temperature_min",
-                        "precipitation_probability_max",
-                        "weather_code",
-                        "wind_speed_10m_max",
-                    ]
-                ),
-                "hourly": "relative_humidity_2m",
+                "daily": ",".join(daily_variables),
+                "hourly": ",".join(hourly_variables),
                 "timezone": location.timezone or "auto",
                 "start_date": start,
                 "end_date": end,
@@ -198,9 +280,8 @@ class OpenMeteoProvider:
         dates = [str(value) for value in daily.get("time", [])]
         if start not in dates or end not in dates:
             raise ValueError(f"forecast does not cover requested window: {start}..{end}")
-        humidity_by_date = _humidity_by_date(
-            payload.get("hourly", {}), start=start, end=end
-        )
+        hourly = payload.get("hourly", {})
+        humidity_by_date = _humidity_by_date(hourly, start=start, end=end)
         response_timezone = str(payload.get("timezone") or location.timezone or "auto")
         resolved = (
             location.model_copy(update={"timezone": response_timezone})
@@ -225,6 +306,16 @@ class OpenMeteoProvider:
                     wind_speed_kmh=_value_at(daily, "wind_speed_10m_max", index),
                     weather_code=weather_code,
                     condition=_WEATHER_CODES.get(weather_code, "未知天气"),
+                    uv_index_max=_value_at(daily, "uv_index_max", index),
+                    sunrise=str(_value_at(daily, "sunrise", index) or ""),
+                    sunset=str(_value_at(daily, "sunset", index) or ""),
+                    key_periods=(
+                        _key_periods_for_day(
+                            hourly, daily, day_str, index, period=period
+                        )
+                        if granularity == "hourly"
+                        else []
+                    ),
                 )
             )
         if not days:
@@ -247,6 +338,94 @@ class OpenMeteoProvider:
             weather_code=first.weather_code,
             condition=first.condition,
         )
+
+
+def _key_periods_for_day(
+    hourly: dict[str, Any],
+    daily: dict[str, Any],
+    day: str,
+    index: int,
+    *,
+    period: str | None = None,
+) -> list[WeatherHour]:
+    """Aggregate hourly series into canonical time-of-day windows.
+
+    ``period`` restricts the output to that single window; otherwise all five
+    standard windows are produced. ``feels_like_c`` is the window mean,
+    ``precipitation_probability_percent``/``wind_speed_kmh`` are the window
+    maxima, and ``uv_index_max`` mirrors the day-level value. Windows never
+    cross midnight; missing values fall back to None.
+    """
+    buckets: dict[str, dict[str, list[float]]] = {}
+    times = hourly.get("time", [])
+    for hour_index, timestamp in enumerate(times):
+        timestamp = str(timestamp)
+        if timestamp[:10] != day:
+            continue
+        hour = int(timestamp[11:13]) if len(timestamp) >= 13 else None
+        if hour is None:
+            continue
+        for label, (start_hour, end_hour, _) in PERIOD_WINDOWS.items():
+            if start_hour <= hour < end_hour:
+                bucket = buckets.setdefault(
+                    label, {"feels": [], "precip": [], "wind": []}
+                )
+                _append_hour(bucket, hourly, hour_index)
+                break
+    labels = [period] if period is not None else list(PERIOD_WINDOWS)
+    result: list[WeatherHour] = []
+    for label in labels:
+        start_hour, end_hour, label_cn = PERIOD_WINDOWS[label]
+        start_at = f"{day}T{start_hour:02d}:00:00"
+        if end_hour == 24:
+            end_at = f"{day}T23:59:59"
+        else:
+            end_at = f"{day}T{end_hour - 1:02d}:59:59"
+        bucket = buckets.get(label)
+        if bucket is None:
+            result.append(
+                WeatherHour(
+                    label=label_cn,
+                    start_at=start_at,
+                    end_at=end_at,
+                    uv_index_max=_value_at(daily, "uv_index_max", index),
+                )
+            )
+            continue
+        feels = _window_mean(bucket["feels"])
+        precip = max(bucket["precip"]) if bucket["precip"] else None
+        wind = max(bucket["wind"]) if bucket["wind"] else None
+        result.append(
+            WeatherHour(
+                label=label_cn,
+                start_at=start_at,
+                end_at=end_at,
+                feels_like_c=feels,
+                precipitation_probability_percent=precip,
+                wind_speed_kmh=wind,
+                uv_index_max=_value_at(daily, "uv_index_max", index),
+            )
+        )
+    return result
+
+
+def _append_hour(
+    bucket: dict[str, list[float]],
+    hourly: dict[str, Any],
+    hour_index: int,
+) -> None:
+    for key, field in (
+        ("feels", "apparent_temperature"),
+        ("precip", "precipitation_probability"),
+        ("wind", "wind_speed_10m"),
+    ):
+        value = _value_at(hourly, field, hour_index)
+        if value is not None:
+            bucket[key].append(float(value))
+
+
+def _window_mean(values: list[float]) -> float | None:
+    return round(sum(values) / len(values), 1) if values else None
 
 
 def _mean_feels_like(daily: dict[str, Any], index: int) -> float | None:

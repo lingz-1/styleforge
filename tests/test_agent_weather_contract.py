@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from styleforge.agents.composer import sanitize_environment_fields
-from styleforge.llm.prompts import PROMPT_VERSION
+from styleforge.llm.prompts import PROMPT_VERSION, build_agent1_prompt, build_agent2_prompt
 from styleforge.llm.schema import (
     Agent1Output,
     CarryRecommendation,
@@ -221,5 +221,31 @@ def test_sanitize_keeps_proposal_untouched_when_all_grounded() -> None:
     assert len(cleaned.environment_adjustments) == 1
 
 
-def test_prompt_version_bumped_for_weather_v2_1() -> None:
-    assert PROMPT_VERSION == "2026.08.10-weather-v2.1"
+def test_prompt_version_bumped_for_weather_v2_4() -> None:
+    assert PROMPT_VERSION == "2026.08.10-weather-v2.4"
+
+
+def test_agent1_prompt_contains_weather_condition_scene_rule() -> None:
+    system, _ = build_agent1_prompt(
+        user_query="下雨穿什么",
+        wardrobe_summary={},
+        recent_memories=[],
+        environment_context={
+            "weather": {"status": "unavailable"},
+            "resolved_time_context": {"approximate": False},
+        },
+    )
+    assert "天气条件词场景" in system
+    assert "按该天气条件的常识" in system
+
+
+def test_agent2_prompt_contains_weather_condition_scene_rule() -> None:
+    system, _ = build_agent2_prompt(
+        user_query="下雨穿什么",
+        request_signature={"practical_context": ["雨天出行，需防水防滑"]},
+        pool_manifest=[],
+        recent_structure_signatures=[],
+        environment_context={"weather": {"status": "available"}},
+    )
+    assert "天气条件词" in system
+    assert "防水/保暖/透气/防滑" in system

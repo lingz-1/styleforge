@@ -175,3 +175,28 @@ def test_precise_coordinates_never_exposed_on_resolution() -> None:
     assert result.longitude == round(121.474444, 2)
     assert result.latitude != 31.234567
     assert result.longitude != 121.474444
+
+
+def test_captured_at_with_trailing_z_accepted() -> None:
+    # ``new Date().toISOString()`` ends with "Z"; Python 3.10 fromisoformat
+    # rejects it, so the resolver must normalize before parsing.
+    result = _resolver().resolve(
+        _requirements(),
+        device_location=_device(captured_at="2026-08-10T08:00:00.000Z"),
+        global_default="",
+    )
+
+    assert result.mode == "coordinates"
+    assert result.source == "device"
+    assert result.latitude == 31.23
+
+
+def test_captured_at_with_trailing_lowercase_z_accepted() -> None:
+    result = _resolver().resolve(
+        _requirements(),
+        device_location=_device(captured_at="2026-08-10T08:00:00z"),
+        global_default="",
+    )
+
+    assert result.source == "device"
+    assert result.error_code == ""

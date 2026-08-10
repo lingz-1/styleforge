@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from styleforge.tools.calendar.periods import PERIOD_LABELS
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -104,6 +106,10 @@ class WeatherToolInput(BaseModel):
     timezone: str = "auto"
     display_name: str = Field(default="", max_length=160)
     accuracy_bucket: Literal["high", "medium", "low"] | None = None
+    # Hourly key-window entry point (V2.2). ``period`` is validated against the
+    # canonical labels below; the granularity is forced to hourly when present.
+    granularity: Literal["daily", "hourly"] = "daily"
+    period: str | None = None
 
     @model_validator(mode="after")
     def _validate_windows(self) -> "WeatherToolInput":
@@ -120,6 +126,13 @@ class WeatherToolInput(BaseModel):
             raise ValueError("latitude and longitude must be provided together")
         if self.latitude is not None and self.location.strip():
             raise ValueError("named location and coordinates are mutually exclusive")
+        if self.period is not None:
+            if self.period not in PERIOD_LABELS:
+                raise ValueError(
+                    f"period must be one of {', '.join(PERIOD_LABELS)}"
+                )
+            if self.granularity != "hourly":
+                self.granularity = "hourly"
         return self
 
 
@@ -139,6 +152,25 @@ class ResolvedLocation(BaseModel):
         return ", ".join(dict.fromkeys(part for part in parts if part))
 
 
+class WeatherHour(BaseModel):
+    """Aggregated facts for one canonical time-of-day key window (V2.2).
+
+    Windows never cross midnight (see ``calendar.periods``); values are
+    aggregated from the provider's hourly series and may be missing when the
+    provider returned no data for the window.
+    """
+
+    label: str = ""
+    start_at: str = ""
+    end_at: str = ""
+    feels_like_c: float | None = None
+    precipitation_probability_percent: float | None = Field(
+        default=None, ge=0, le=100
+    )
+    wind_speed_kmh: float | None = Field(default=None, ge=0)
+    uv_index_max: float | None = Field(default=None, ge=0)
+
+
 class WeatherDay(BaseModel):
     """One calendar day of facts inside a multi-day window."""
 
@@ -153,6 +185,10 @@ class WeatherDay(BaseModel):
     wind_speed_kmh: float | None = Field(default=None, ge=0)
     weather_code: int | None = None
     condition: str = ""
+    uv_index_max: float | None = Field(default=None, ge=0)
+    sunrise: str = ""
+    sunset: str = ""
+    key_periods: list[WeatherHour] = Field(default_factory=list)
 
 
 class WeatherFacts(BaseModel):

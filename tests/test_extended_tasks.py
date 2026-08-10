@@ -54,6 +54,42 @@ def test_recommendation_weather_is_copied_into_shared_context_pack(
     assert payload["result"]["environment_context"]["weather"] == weather
 
 
+def test_task_execution_forwards_device_location_context(tmp_path: Path) -> None:
+    database_path = _seed_database(tmp_path)
+    captured: dict[str, object] = {}
+    workflow = MultiTaskWorkflow(
+        database_path=database_path,
+        knowledge_root=KNOWLEDGE_ROOT,
+        llm_client=None,
+        recommendation_runner=lambda **kwargs: captured.update(kwargs) or {
+            "structured_result": {"status": "completed", "recommendations": []},
+            "environment_context": {},
+        },
+    )
+    location_context = {
+        "latitude": 31.234567,
+        "longitude": 121.474444,
+        "accuracy_m": 85.0,
+        "captured_at": "2026-08-10T08:00:00+00:00",
+        "source": "device",
+        "consent_granted": True,
+    }
+
+    workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="今晚在上海的露台约会穿什么",
+            requested_task_type=TaskType.OUTFIT_RECOMMEND,
+            location_context=location_context,
+        )
+    )
+
+    # The device location flows verbatim into the recommendation subgraph.
+    assert captured.get("location_context") == location_context
+    assert captured.get("user_id") == "u"
+    assert captured.get("request") == "今晚在上海的露台约会穿什么"
+
+
 def _seed_database(tmp_path: Path, user_id: str = "u") -> Path:
     database_path = tmp_path / "styleforge.db"
     initialize_database(database_path)

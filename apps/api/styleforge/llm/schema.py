@@ -22,7 +22,7 @@ class RequestSignature(BaseModel):
     theme: str
     explicit_style: list[str] = Field(default_factory=list, max_length=6)
     unique_mood: list[str] = Field(default_factory=list, max_length=6)
-    practical_context: list[str] = Field(default_factory=list, max_length=6)
+    practical_context: list[str] = Field(default_factory=list, max_length=8)
     generic_tendencies_to_avoid: list[str] = Field(default_factory=list, min_length=1, max_length=5)
 
 

@@ -12,14 +12,19 @@ export const useRecommendationStore = defineStore('recommendation', () => {
   // Guards against an old request overwriting a newer one.
   let requestKey = ''
 
-  async function run(userId, request, maxResults = 3) {
+  async function run(userId, request, maxResults = 3, locationContext = null) {
     if (loading.value) return // already generating
     loading.value = true
     error.value = ''
-    const key = `${userId}|${maxResults}|${request}`
+    const key = `${userId}|${maxResults}|${request}|${locationContext ? JSON.stringify(locationContext) : ''}`
     requestKey = key
     try {
-      const res = await executeTask({ user_id: userId, request, max_results: maxResults })
+      const res = await executeTask({
+        user_id: userId,
+        request,
+        max_results: maxResults,
+        ...(locationContext ? { location_context: locationContext } : {}),
+      })
       if (requestKey === key) {
         payload.value = res.data
       }

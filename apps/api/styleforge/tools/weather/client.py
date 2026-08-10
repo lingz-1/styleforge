@@ -57,7 +57,13 @@ class WeatherTool:
                         error_code="location_not_found",
                         error_message=f"无法解析地点：{tool_input.location}",
                     )
-            facts = self.provider.forecast_range(location, start, end)
+            facts = self.provider.forecast_range(
+                location,
+                start,
+                end,
+                granularity=tool_input.granularity,
+                period=tool_input.period,
+            )
             return facts.model_copy(
                 update={
                     "requested_location": requested_location

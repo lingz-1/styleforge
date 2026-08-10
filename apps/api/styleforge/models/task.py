@@ -5,6 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, model_validator
 
 from styleforge.orchestration.task_router import TaskType
+from styleforge.tools.weather.schemas import DeviceLocationContext
 
 
 class CandidateItem(BaseModel):
@@ -29,6 +30,7 @@ class TaskExecutionInput(BaseModel):
     target_slot: str = Field(default="", max_length=32)
     item_id: str = Field(default="", max_length=128)
     candidate_item: CandidateItem | None = None
+    location_context: DeviceLocationContext | None = None
 
     @model_validator(mode="after")
     def _deduplicate_item_ids(self) -> "TaskExecutionInput":

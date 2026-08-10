@@ -134,6 +134,11 @@ class MultiTaskWorkflow:
                 user_id=task_input.user_id,
                 request=task_input.request,
                 max_results=task_input.max_results,
+                location_context=(
+                    task_input.location_context.model_dump(exclude_none=True)
+                    if task_input.location_context is not None
+                    else None
+                ),
             )
             status = str(result.get("structured_result", {}).get("status", "completed"))
         else:

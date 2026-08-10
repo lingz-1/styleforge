@@ -22,6 +22,17 @@
         @keydown.ctrl.enter="run"
         @keydown.meta.enter="run"
       />
+      <div class="location-bar">
+        <el-button size="small" :loading="locationState.status === 'locating'" @click="useDeviceLocation">
+          {{ deviceLocation ? '更新定位' : '使用当前定位' }}
+        </el-button>
+        <span v-if="locationState.message" :class="['location-msg', locationState.status]">
+          {{ locationState.message }}
+        </span>
+        <span v-else-if="permissionState === 'granted'" class="location-msg ready">
+          已启用自动定位，每次提问将使用最新位置
+        </span>
+      </div>
       <div class="prompt-footer">
         <div class="examples" aria-label="示例问题">
           <button v-for="example in EXAMPLES" :key="example" type="button" @click="request = example">
@@ -63,20 +74,30 @@
             <span v-if="weatherFacts.default_applied" class="weather-badge">近 3 天默认窗口</span>
           </strong>
           <strong v-else>天气暂不可用，三个 Agent 已继续按衣橱事实处理</strong>
+          <div class="temp-unit-switch" role="group" aria-label="温度单位切换">
+            <button type="button" :class="{ active: tempUnit === 'celsius' }" @click="setTempUnit('celsius')">°C</button>
+            <button type="button" :class="{ active: tempUnit === 'fahrenheit' }" @click="setTempUnit('fahrenheit')">°F</button>
+          </div>
         </div>
         <div class="weather-body">
           <template v-if="weatherFacts.status === 'available'">
             <div v-if="weatherDays.length" class="weather-days">
               <div v-for="day in weatherDays" :key="day.date" class="weather-day">
                 <strong>{{ day.date.slice(5) }}</strong>
-                <span>{{ day.condition }}</span>
-                <span>{{ day.temperature_min_c }}–{{ day.temperature_max_c }}°C</span>
-                <span>体感 {{ day.feels_like_c }}°C · 降水 {{ day.precipitation_probability_percent }}% · 风 {{ day.wind_speed_kmh }} km/h</span>
+                <span class="weather-icon" :title="day.condition">{{ weatherIcon(day.weather_code) }} {{ day.condition }}</span>
+                <span>{{ formatTemp(day.temperature_min_c) }}–{{ formatTemp(day.temperature_max_c) }}</span>
+                <span>体感 {{ formatTemp(day.feels_like_c) }} · 降水 {{ day.precipitation_probability_percent }}% · 风 {{ day.wind_speed_kmh }} km/h</span>
+                <div v-if="day.key_periods && day.key_periods.length" class="weather-periods">
+                  <span v-for="period in day.key_periods" :key="period.label" class="weather-period">
+                    {{ period.label }}：体感 {{ formatTemp(period.feels_like_c) }} · 降水 {{ period.precipitation_probability_percent }}% · 风 {{ period.wind_speed_kmh }} km/h<template v-if="period.uv_index_max != null"> · UV{{ Math.round(period.uv_index_max) }}</template>
+                  </span>
+                </div>
+                <span class="weather-hint">💡 {{ weatherHint(day) }}</span>
               </div>
             </div>
             <dl v-else>
-              <div><dt>温度</dt><dd>{{ weatherFacts.temperature_min_c }}–{{ weatherFacts.temperature_max_c }}°C</dd></div>
-              <div><dt>体感</dt><dd>{{ weatherFacts.feels_like_c }}°C</dd></div>
+              <div><dt>温度</dt><dd>{{ formatTemp(weatherFacts.temperature_min_c) }}–{{ formatTemp(weatherFacts.temperature_max_c) }}</dd></div>
+              <div><dt>体感</dt><dd>{{ formatTemp(weatherFacts.feels_like_c) }}</dd></div>
               <div><dt>降水概率</dt><dd>{{ weatherFacts.precipitation_probability_percent }}%</dd></div>
               <div><dt>风速</dt><dd>{{ weatherFacts.wind_speed_kmh }} km/h</dd></div>
             </dl>
@@ -270,7 +291,13 @@ const weatherLocationNote = computed(() => {
   if (!time) return ''
   if (time.status === 'unsupported') return `日期表达式「${time.expression}」暂不支持，已继续按衣橱事实推荐`
   if (time.default_applied) return '未指定日期，自动查询近 3 天窗口'
-  if (time.status === 'resolved') return `按「${time.expression || time.start_date}」查询`
+  if (time.status === 'resolved') {
+    if (time.granularity === 'hourly' && time.period_label) {
+      const day = (time.start_date || '').slice(5).replace('-', '/')
+      return `按「${time.expression || time.start_date}」查询（${day} ${time.period_label} · 小时级）`
+    }
+    return `按「${time.expression || time.start_date}」查询`
+  }
   return ''
 })
 const envByOutfit = computed(() => {
@@ -296,7 +323,194 @@ const fmtScore = (value) => typeof value === 'number' ? value.toFixed(1) : '—'
 const slotLabel = (slot) => SLOT_LABELS[slot] || slot
 const recommendationLabel = (value) => ({ recommended: '建议', consider: '可考虑', not_recommended: '不建议', unknown: '待判断' }[value] || value || '—')
 function onUserIdChange(value) { setUserId(value) }
-async function run() { if (request.value.trim()) await store.run(userId.value, request.value) }
+async function run() {
+  if (!request.value.trim()) return
+  // 已授予「使用期间允许」定位权限时，每次新提问都静默取一次最新位置；
+  // 未授权不打扰（不实时定位，明确目的地仍由后端按地点名解析天气）。
+  await refreshLocationIfGranted()
+  await store.run(userId.value, request.value, 3, deviceLocation.value)
+}
+
+// --- V2.2: 温度单位切换（摄氏/华氏，localStorage 持久化） ---
+const TEMP_UNIT_KEY = 'sf_temp_unit'
+const tempUnit = ref(localStorage.getItem(TEMP_UNIT_KEY) || 'celsius')
+const toFahrenheit = (celsius) => celsius * 9 / 5 + 32
+const formatTemp = (celsius, unit = tempUnit.value) => {
+  if (celsius == null || Number.isNaN(celsius)) return '—'
+  const value = unit === 'fahrenheit' ? Math.round(toFahrenheit(celsius)) : Math.round(celsius)
+  return `${value}°${unit === 'fahrenheit' ? 'F' : 'C'}`
+}
+function setTempUnit(unit) {
+  tempUnit.value = unit
+  localStorage.setItem(TEMP_UNIT_KEY, unit)
+}
+
+// --- V2.2: 天气卡图标映射（按 WMO weather_code 分组） ---
+const WEATHER_ICON_CODES = [
+  { match: (code) => code <= 1, icon: '☀️' },
+  { match: (code) => code === 2, icon: '⛅' },
+  { match: (code) => code === 3, icon: '☁️' },
+  { match: (code) => code >= 45 && code <= 48, icon: '🌫️' },
+  { match: (code) => code >= 51 && code <= 57, icon: '🌦️' },
+  { match: (code) => code >= 61 && code <= 67, icon: '🌧️' },
+  { match: (code) => code >= 71 && code <= 77, icon: '🌨️' },
+  { match: (code) => code >= 80 && code <= 86, icon: '🌧️' },
+  { match: (code) => code >= 95, icon: '⛈️' },
+]
+function weatherIcon(code) {
+  if (code == null) return '🌡️'
+  const entry = WEATHER_ICON_CODES.find((item) => item.match(code))
+  return entry ? entry.icon : '🌡️'
+}
+
+// --- V2.2: 穿搭提示行（参考 wardrobe 参考实现的 weatherHints 规则） ---
+const WEATHER_HINTS = {
+  rainy: '降雨概率高，带伞并选防水外层与防滑鞋',
+  cold: '体感偏冷，注意保暖叠穿',
+  mild: '体感偏凉，适合薄外套或长袖叠穿',
+  hot: '天气炎热，优先透气轻薄面料并注意防晒',
+  windy: '风力较大，避免宽松裙摆与易飘单品',
+  nice: '天气宜人，常规穿搭即可',
+}
+function weatherHint(day) {
+  const temp = day.feels_like_c ?? day.temperature_max_c
+  const precip = day.precipitation_probability_percent ?? 0
+  const wind = day.wind_speed_kmh ?? 0
+  if (precip > 50) return WEATHER_HINTS.rainy
+  if (temp != null && temp < 10) return WEATHER_HINTS.cold
+  if (temp != null && temp < 18) return WEATHER_HINTS.mild
+  if (temp != null && temp > 28) return WEATHER_HINTS.hot
+  if (wind > 30) return WEATHER_HINTS.windy
+  return WEATHER_HINTS.nice
+}
+
+// --- V2.2: 定位授权交互（设备定位 → DeviceLocationContext） ---
+// 设备坐标只在请求内使用：后端 Location Resolver 会把坐标取整并保证
+// 坐标永不进入 payloads/traces/persistence。
+//
+// 自动定位规则：
+// - permissionState === 'granted'（用户已授予「使用期间允许」）：每次新提问
+//   前静默 getCurrentPosition 取一次最新位置，不再需要手动点按钮。
+// - permissionState === 'prompt' / 'denied' / 'unsupported'：不实时定位，
+//   不打扰用户；「使用当前定位」按钮仅用于首次授权或手动刷新。
+// - 未授权时不传坐标，但请求里写明目的地（如「去北京出差」）时，后端
+//   Location Resolver 的 explicit 分支仍会用地点名解析天气。
+const NETWORK_LOCATION_FALLBACK = import.meta.env.VITE_ENABLE_IP_LOCATION_FALLBACK === 'true'
+const locationState = ref({ status: 'idle', message: '' })
+const deviceLocation = ref(null)
+const permissionState = ref('unknown') // granted | prompt | denied | unsupported | unknown
+
+async function checkLocationPermission() {
+  if (!navigator.permissions?.query) {
+    permissionState.value = 'unsupported'
+    return
+  }
+  try {
+    const status = await navigator.permissions.query({ name: 'geolocation' })
+    permissionState.value = status.state
+    status.onchange = () => { permissionState.value = status.state }
+  } catch {
+    // Safari 等浏览器不支持 geolocation 权限查询，退化为仅按钮定位。
+    permissionState.value = 'unsupported'
+  }
+}
+// 组件初始化即检查一次权限状态（等价于 onMounted）。
+void checkLocationPermission()
+
+function geolocationErrorMessage(error) {
+  const reasons = {
+    1: '定位权限被拒绝，可继续使用默认城市或手动指定地点',
+    2: '定位暂不可用，请稍后重试',
+    3: '定位请求超时，请重试',
+  }
+  return reasons[error.code] || `定位失败：${error.message || '未知错误'}`
+}
+
+function getPosition() {
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,
+      timeout: 5000,
+      maximumAge: 0, // 每次都要最新位置
+    })
+  })
+}
+
+function makeDeviceLocation({ latitude, longitude, accuracy_m }) {
+  return {
+    latitude: Math.round(latitude * 1e6) / 1e6,
+    longitude: Math.round(longitude * 1e6) / 1e6,
+    accuracy_m,
+    captured_at: new Date().toISOString(),
+    source: 'device',
+    consent_granted: true,
+  }
+}
+
+// 静默取一次最新位置。成功返回 true；失败返回 false（不抛出、不阻塞提问，
+// 已有 deviceLocation 会被保留）。
+async function locateDevice() {
+  if (!navigator.geolocation) return false
+  try {
+    const position = await getPosition()
+    deviceLocation.value = makeDeviceLocation({
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+      accuracy_m: position.coords.accuracy,
+    })
+    return true
+  } catch (error) {
+    if (error && error.code === 1) permissionState.value = 'denied'
+    return false
+  }
+}
+
+async function refreshLocationIfGranted() {
+  if (permissionState.value !== 'granted') return
+  await locateDevice()
+}
+
+async function detectLocationFromNetwork() {
+  const response = await fetch('https://ipapi.co/json/')
+  if (!response.ok) throw new Error('网络定位服务不可用')
+  const data = await response.json()
+  if (data.error || typeof data.latitude !== 'number' || typeof data.longitude !== 'number') {
+    throw new Error(data.reason || data.message || '无法从网络确定位置')
+  }
+  return { latitude: data.latitude, longitude: data.longitude, accuracy_m: 5000 }
+}
+
+async function fallbackToNetworkLocation(reason) {
+  if (!NETWORK_LOCATION_FALLBACK) {
+    locationState.value = { status: 'denied', message: reason }
+    return
+  }
+  locationState.value = { status: 'locating', message: `${reason}，尝试网络定位…` }
+  try {
+    const position = await detectLocationFromNetwork()
+    deviceLocation.value = makeDeviceLocation(position)
+    locationState.value = { status: 'ready', message: '已使用网络定位（约 5 公里精度）' }
+  } catch {
+    locationState.value = { status: 'denied', message: reason }
+  }
+}
+
+async function useDeviceLocation() {
+  if (locationState.value.status === 'locating') return
+  if (!navigator.geolocation) {
+    void fallbackToNetworkLocation('当前浏览器不支持设备定位')
+    return
+  }
+  // prompt / unknown 状态：getCurrentPosition 会触发浏览器授权询问。
+  locationState.value = { status: 'locating', message: '正在请求定位授权…' }
+  const ok = await locateDevice()
+  if (!ok) {
+    void fallbackToNetworkLocation('定位失败，可继续使用默认城市或手动指定地点')
+    return
+  }
+  permissionState.value = 'granted'
+  locationState.value = { status: 'ready', message: '已授权，每次提问将自动使用最新位置' }
+}
 </script>
 
 <style scoped>
@@ -330,8 +544,13 @@ h1 { margin: 0; max-width: 720px; font-family: Georgia, 'Noto Serif SC', serif; 
 .weather-main { min-width: 220px; }.weather-body { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .weather-facts dl { display: flex; gap: 22px; margin: 0; }.weather-facts dl div { min-width: 70px; }.weather-facts dt { color: #7c8580; font-size: 11px; }.weather-facts dd { margin: 4px 0 0; font-weight: 700; }.weather-facts small { color: #7c8580; }
 .weather-badge { display: inline-block; margin-left: 8px; padding: 2px 8px; border: 1px solid var(--copper); border-radius: 999px; color: var(--copper); font-size: 11px; vertical-align: middle; }
-.weather-days { display: flex; gap: 10px; }.weather-day { min-width: 150px; padding: 8px 10px; border: 1px solid #dcd9ce; background: #fff; }.weather-day strong, .weather-day span { display: block; }.weather-day strong { color: var(--moss); font-size: 12px; }.weather-day span { margin-top: 3px; color: #5e6863; font-size: 12px; }
+.weather-days { display: flex; gap: 10px; }.weather-day { min-width: 160px; max-width: 230px; padding: 8px 10px; border: 1px solid #dcd9ce; background: #fff; }.weather-day strong, .weather-day span { display: block; }.weather-day strong { color: var(--moss); font-size: 12px; }.weather-day span { margin-top: 3px; color: #5e6863; font-size: 12px; }
+.weather-icon { font-size: 15px; }
+.weather-periods { display: flex; flex-direction: column; gap: 2px; margin-top: 5px; padding-top: 5px; border-top: 1px dashed #dcd9ce; }.weather-period { color: var(--copper) !important; font-size: 11px !important; }
+.weather-hint { margin-top: 6px !important; padding-top: 5px; border-top: 1px dashed #dcd9ce; color: #4b5751 !important; font-size: 12px !important; line-height: 1.5; }
+.temp-unit-switch { display: inline-flex; margin-top: 6px; border: 1px solid #c9cec8; border-radius: 999px; overflow: hidden; }.temp-unit-switch button { border: 0; background: #fff; color: #7c8580; font-size: 11px; line-height: 1; padding: 5px 9px; cursor: pointer; }.temp-unit-switch button + button { border-left: 1px solid #c9cec8; }.temp-unit-switch button.active { background: var(--moss); color: #fff; }
 .weather-note { display: block; max-width: 460px; text-align: right; }
+.location-bar { display: flex; align-items: center; gap: 10px; margin-top: 12px; }.location-msg { font-size: 12px; color: #7c8580; }.location-msg.ready { color: var(--moss); }.location-msg.denied { color: #a86138; }.location-msg.error { color: #a83a38; }
 .env-adjustment { margin-top: 8px; padding: 7px 9px; border-left: 2px solid var(--copper); background: #f4f2eb; font-size: 12px; line-height: 1.5; }.env-adjustment strong { display: block; color: var(--copper); font-size: 10px; letter-spacing: .08em; }.env-adjustment span { color: #5e6863; }
 .carry-recommendations { margin-top: 8px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }.carry-recommendations strong { color: var(--moss); font-size: 12px; }.carry-chip { padding: 3px 8px; border: 1px solid #cbd2cc; border-radius: 999px; font-size: 12px; color: #4b5751; }
 .section-heading h3 { margin: 0 0 8px; font-family: Georgia, 'Noto Serif SC', serif; font-size: 23px; font-weight: 500; }.section-heading span { color: #78827c; font-size: 12px; }

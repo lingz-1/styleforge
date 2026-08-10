@@ -14,7 +14,7 @@ from typing import Any
 
 from styleforge.core.rubric import normalize_weights, rubric_text
 
-PROMPT_VERSION = "2026.08.10-weather-v2.1"
+PROMPT_VERSION = "2026.08.10-weather-v2.4"
 
 
 # --- shared JSON envelope ---------------------------------------------------
@@ -121,6 +121,74 @@ _FEW_SHOT_AGENT1_NEGATIVE: dict[str, Any] = {
     "default_policy_allowed": False,
 }
 
+_FEW_SHOT_AGENT1_FESTIVAL: dict[str, Any] = {
+    "request_signature": {
+        "theme": "中秋去杭州旅游",
+        "explicit_style": [],
+        "unique_mood": ["团圆", "假日", "松弛"],
+        "practical_context": ["外地旅行", "白天户外", "秋季温差"],
+        "generic_tendencies_to_avoid": [
+            "仅由基础款组成，缺少节日仪式感的视觉重点",
+            "组合与普通通勤推荐几乎无差异",
+        ],
+    },
+    "retrieval_plans": [
+        {"type": "core", "query": "autumn travel vacation outfit", "score_weight": 0.40},
+        {"type": "distinctive", "query": "festive mid-autumn warm tone outfit", "score_weight": 0.30},
+        {"type": "supporting", "query": "comfortable walking sightseeing layers", "score_weight": 0.10},
+    ],
+    "candidate_requirements": {"tops": 10, "bottoms": 10, "dresses": 6, "outerwear": 8, "shoes": 8, "accessories": 8},
+    "context_requirements": {
+        "temporal": {"needed": True, "expression": "中秋", "reason": "节日隐含具体日期与假期天气"},
+        "location": {"needed": True, "query": "杭州", "allow_profile_default": True, "reason": "旅行目的地天气"},
+        "weather": {
+            "needed": True,
+            "location": "杭州",
+            "date": "中秋",
+            "granularity": "daily",
+            "reason": "中秋假期白天户外活动受降水和温度影响",
+        },
+    },
+    "implicit_context_signals": ["用户未显式提天气，但节日旅行隐含日期、地点和温度依赖"],
+    "context_criticality": "helpful",
+    "uncertainties": [],
+    "default_policy_allowed": True,
+}
+
+_FEW_SHOT_AGENT1_PERIOD: dict[str, Any] = {
+    "request_signature": {
+        "theme": "今晚露台约会",
+        "explicit_style": [],
+        "unique_mood": ["浪漫", "松弛", "精致"],
+        "practical_context": ["露台", "晚间", "体感降温"],
+        "generic_tendencies_to_avoid": [
+            "忽略夜间体感变化，只按白天温度选装",
+            "组合与普通通勤推荐几乎无差异",
+        ],
+    },
+    "retrieval_plans": [
+        {"type": "core", "query": "evening terrace date outfit", "score_weight": 0.40},
+        {"type": "distinctive", "query": "romantic refined night-time layering", "score_weight": 0.30},
+        {"type": "supporting", "query": "comfortable warm evening staple pieces", "score_weight": 0.10},
+    ],
+    "candidate_requirements": {"tops": 10, "bottoms": 10, "dresses": 6, "outerwear": 8, "shoes": 8, "accessories": 8},
+    "context_requirements": {
+        "temporal": {"needed": True, "expression": "今晚", "reason": "时段隐含小时级天气需求"},
+        "location": {"needed": True, "query": "", "allow_profile_default": True, "reason": "本地约会使用默认城市或设备定位"},
+        "weather": {
+            "needed": True,
+            "location": "",
+            "date": "今晚",
+            "granularity": "hourly",
+            "reason": "晚间体感与风影响露台穿着",
+        },
+    },
+    "implicit_context_signals": ["时段表达“今晚”隐含 hour 级天气需求，应查时段关键窗口"],
+    "context_criticality": "helpful",
+    "uncertainties": [],
+    "default_policy_allowed": True,
+}
+
 _FEW_SHOT_AGENT2: dict[str, Any] = {
     "outfits": [
         {
@@ -222,14 +290,20 @@ _CONTEXT_CONTRACT = (
     "  * “明天穿什么”“明天上班怎么穿” → needed=true（隐含明天 + 当前所在位置的天气）\n"
     "  * “去北京旅游该怎么穿” → needed=true（隐含北京 + 近几天天气）\n"
     "  * “周末户外婚礼穿什么”“今晚露台约会穿什么”“明早骑车” → needed=true\n"
+    "  * 天气条件词场景（把天气状况当穿搭场景，无具体日期/目的地，如“下雨穿什么”“降温时怎么穿”“雪天穿搭”）"
+    "→ needed=true，temporal.expression 与 location 留空（系统默认查近 3 天窗口）；"
+    "practical_context 首条写明该天气条件（如「雨天出行，需防水防滑」）。\n"
     "- 不误触：纯风格/单品知识问题（“黑色马甲怎么搭”“美拉德风格是什么”），且没有出行、时间、地点或实穿环境时，"
     "weather.needed=false 且 context_criticality=not_needed。\n"
     "- needed=true 时：\n"
     "  * location.query 填显式目的地（如“北京”）；本地日常请求（“明天穿什么”）留空并保留 allow_profile_default=true，"
     "由系统优先使用设备定位、再回退用户默认城市。\n"
-    "  * temporal.expression 只填 今天/明天/YYYY-MM-DD；用户没给日期就留空，系统默认查询近 3 天窗口。\n"
+    "  * temporal.expression 支持表达式列表：今天/明天/YYYY-MM-DD，后天，周几（周一/周五…），"
+    "周末/本周末/下周末，下周/下周X，下个月，节日（元旦/中秋/圣诞 等），时段（明早/今晚/下午 等）；"
+    "用户没给日期就留空，系统默认查询近 3 天窗口。\n"
     "  * weather.date 与 weather.location 作为向后兼容字段，与 temporal/location 保持一致。\n"
-    "  * weather.granularity 默认 daily。\n"
+    "  * weather.granularity 默认 daily；时段场景（明早/今晚/下午 等）必须填 hourly，"
+    "其余日期/范围/节日场景保持 daily。\n"
     "  * context_criticality：天气对安全或决策必需（如极端天气、长期户外）→ required；只是有益增强 → helpful。\n"
     "- 天气工具只返回事实，最终穿搭判断仍由三个 Agent 完成。\n"
 )
@@ -253,11 +327,24 @@ def build_agent1_prompt(
         "- 新鲜感 → 参考近期请求记忆避免重复\n"
     )
     context_contract = _CONTEXT_CONTRACT
-    examples = _json_example(_FEW_SHOT_AGENT1)
+    examples = (
+        _json_example(_FEW_SHOT_AGENT1)
+        + "\n\n# 更多正例：节日日期表达式\n"
+        + _json_example(_FEW_SHOT_AGENT1_FESTIVAL)
+        + "\n\n# 更多正例：时段表达式（小时级天气）\n"
+        + _json_example(_FEW_SHOT_AGENT1_PERIOD)
+    )
     if environment_context:
         context_contract += (
             "- 已提供工具返回的环境事实。只能据此调整 practical_context 和英文检索短语，"
-            "不得编造缺失字段，也不得把工具事实当成穿搭结论；若 status=unavailable，则不写天气主张。\n"
+            "不得编造缺失字段，也不得把工具事实当成穿搭结论。\n"
+            "- 若 weather.status=unavailable 但 resolved_time_context.approximate=true"
+            "（如「9月」「夏天」「明年」，日期为大致范围），不写精确天气主张，"
+            "但可结合地点与季节常识给出大致穿搭方向（例如「9月纽约初秋转凉、可能有阵雨」），"
+            "并注明这是常识推断而非精确预报。\n"
+            "- 若请求是天气条件词场景（如下雨/降温/炎热）而给出的实际天气与之不匹配（如问“下雨穿什么”但近 3 天晴），"
+            "不要丢弃条件词：仍按该天气条件的常识确定穿搭方向并在 reasoning 标注为场景推断，不强行套用实际天气。\n"
+            "- practical_context 最多列 6 条，只挑最重要的；天气事实合并成一条（如「雷暴潮湿体感热」），不要逐字段堆砌。\n"
         )
         examples += (
             "\n（同一请求拿到事实后的第二次执行：context_requirements 保持第一次的值，"
@@ -312,7 +399,11 @@ def build_agent2_prompt(
     if environment_context:
         system += (
             "\n天气/环境上下文是外部事实，不是穿搭结论。请在候选池范围内据此处理层次、材质、鞋履和实穿平衡，"
-            "不得编造天气字段或池外单品；如果 status=unavailable，则忽略天气并且不要生成天气主张。\n"
+            "不得编造天气字段或池外单品；如果 status=unavailable 且 resolved_time_context.approximate=true"
+            "（如「9月」「夏天」），可依据地点季节常识调整材质与层次（例如初秋转凉选可叠穿薄外套），"
+            "但不得输出精确天气数字，并视情况注明为常识推断；否则忽略天气并且不要生成天气主张。\n"
+            "如果请求签名含天气条件词（如下雨/降温/炎热）而环境事实与之不匹配或不可用，"
+            "按该天气条件的常识调整材质与层次（防水/保暖/透气/防滑）并在 impact 中注明为场景推断，不强行照搬实际天气。\n"
             "当环境事实可用时，每个 outfit 必须提供 environment_adjustments 与 carry_recommendations：\n"
             "- environment_adjustments 每条包含 fact_refs（形如 weather:day:2026-08-11:precipitation，"
             "引用给出的环境事实键）、impact（天气如何影响）和 action（具体穿搭动作）；"

@@ -41,8 +41,14 @@ def _accuracy_bucket(accuracy_m: float) -> Literal["high", "medium", "low"]:
 def _parse_captured_at(value: str) -> datetime | None:
     if not value.strip():
         return None
+    # ``datetime.fromisoformat`` on Python 3.10 does not accept the ISO-8601
+    # trailing "Z" (supported only from 3.11); the web client emits
+    # ``new Date().toISOString()`` which ends with "Z". Normalize it first.
+    normalized = value.strip()
+    if normalized.endswith("Z") or normalized.endswith("z"):
+        normalized = normalized[:-1] + "+00:00"
     try:
-        parsed = datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(normalized)
     except ValueError:
         return None
     if parsed.tzinfo is None:
