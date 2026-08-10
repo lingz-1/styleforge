@@ -46,6 +46,7 @@ from styleforge.repositories.task_run_repository import get_task_run
 from styleforge.services.order_import import parse_order_workbook
 from styleforge.services.personal_embeddings import embed_personal_items
 from styleforge.services.recognition_batch import (
+    delete_batch,
     get_batch,
     list_batches,
     start_batch,
@@ -696,6 +697,14 @@ def get_wardrobe_photo_batch(user_id: str, batch_id: str) -> dict[str, Any]:
     if batch is None or batch.user_id != user_id:
         raise HTTPException(status_code=404, detail="Recognition batch not found")
     return batch.snapshot()
+
+
+@app.delete("/wardrobes/{user_id}/recognition-batches/{batch_id}")
+def delete_wardrobe_photo_batch(user_id: str, batch_id: str) -> dict[str, Any]:
+    """Remove a finished batch record once the user handled its results."""
+    if not delete_batch(user_id, batch_id):
+        raise HTTPException(status_code=404, detail="Recognition batch not found")
+    return {"batch_id": batch_id, "deleted": True}
 
 
 @app.put("/wardrobes/{user_id}/items/{item_id}")

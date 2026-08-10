@@ -82,22 +82,35 @@
                 </template>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="120">
+            <el-table-column label="处理" min-width="230">
               <template #default="{ row }">
-                <el-button
-                  v-if="row.status === 'failed'"
-                  size="small"
-                  type="primary"
-                  plain
-                  @click="manualAdd(row, task)"
-                >
-                  手动添加
-                </el-button>
+                <template v-if="row.status === 'failed'">
+                  <el-tag v-if="isRowDone(task, row)" size="small" type="success">已处理</el-tag>
+                  <template v-else>
+                    <el-button size="small" type="primary" plain @click="manualAdd(row, task)">
+                      手动添加
+                    </el-button>
+                    <el-button size="small" type="warning" plain @click="keepAiResult(row, task)">
+                      保留AI结果
+                    </el-button>
+                    <el-button size="small" type="danger" plain @click="dropRow(row, task)">
+                      删除
+                    </el-button>
+                  </template>
+                </template>
               </template>
             </el-table-column>
           </el-table>
-          <div class="mt">
+          <div class="batch-footer">
             <el-button size="small" @click="load">刷新衣柜</el-button>
+            <el-button
+              v-if="!hasPending(task)"
+              size="small"
+              type="success"
+              @click="confirmTask(task)"
+            >
+              确认完成，删除记录
+            </el-button>
           </div>
         </template>
       </el-card>
@@ -140,7 +153,12 @@
     <el-empty v-if="loaded && !Object.keys(grouped).length" description="衣柜为空" />
 
     <!-- 上传新衣物 -->
-    <el-dialog v-model="createVisible" title="上传新衣物" width="560px">
+    <el-dialog
+      v-model="createVisible"
+      title="上传新衣物"
+      width="560px"
+      @closed="batchManualRef = null"
+    >
       <el-upload
         drag
         :auto-upload="false"
@@ -293,7 +311,7 @@ import { Loading, UploadFilled, Plus } from '@element-plus/icons-vue'
 import {
   getWardrobe, removeWardrobeItem, createPhotoItem, analyzeItem, getTaxonomy,
   updateItem, uploadItemImage, imageUrl,
-  startBatchRecognition, listBatchRecognition,
+  startBatchRecognition, listBatchRecognition, deleteBatchRecognition,
 } from '../services/api'
 import { getUserId, setUserId } from '../services/user'
 
@@ -465,6 +483,7 @@ function openCreate() {
   createForm.file = null
   createForm.attributes = null
   analyzing.value = false
+  batchManualRef.value = null
   createVisible.value = true
 }
 async function onCreateFile(file) {
@@ -521,6 +540,11 @@ async function submitCreate() {
       attributes: createForm.attributes,
     })
     ElMessage.success('已创建并加入衣柜')
+    if (batchManualRef.value) {
+      const { task, index } = batchManualRef.value
+      batchManualRef.value = null
+      markRowDone(task, index)
+    }
     createVisible.value = false
     load()
   } catch (e) {
@@ -620,14 +644,24 @@ async function submitBatch() {
   }
 }
 
-// 拉取历史任务列表；合并已保留的原始文件引用（_files），并按有无运行中任务启停轮询
+// 将后端任务列表合并进本地：保留原图引用 _files 与失败项处理标记 _done
+function mergeBatchTasks(list) {
+  const prevById = new Map(batchTasks.value.map((t) => [t.batch_id, t]))
+  batchTasks.value = list.map((b) => {
+    const prev = prevById.get(b.batch_id)
+    const results = (b.results || []).map((r) => {
+      const pRow = prev && prev.results && prev.results[r.index]
+      return pRow && pRow._done ? { ...r, _done: true } : r
+    })
+    return { ...b, _files: prev ? prev._files : [], results }
+  })
+}
+
+// 拉取历史任务列表；合并本地状态，并按有无运行中任务启停轮询
 async function loadBatches() {
   try {
     const res = await listBatchRecognition(userId.value, 50)
-    const filesById = new Map(batchTasks.value.map((t) => [t.batch_id, t._files]))
-    batchTasks.value = (res.data.batches || []).map((b) => ({
-      ...b, _files: filesById.get(b.batch_id) || [],
-    }))
+    mergeBatchTasks(res.data.batches || [])
     const hasRunning = batchTasks.value.some((t) => t.status === 'running')
     if (hasRunning) startBatchPolling()
     else stopBatchPolling()
@@ -651,16 +685,73 @@ async function pollBatches() {
   batchPolling.value = true
   try {
     const res = await listBatchRecognition(userId.value, 50)
-    const filesById = new Map(batchTasks.value.map((t) => [t.batch_id, t._files]))
-    batchTasks.value = (res.data.batches || []).map((b) => ({
-      ...b, _files: filesById.get(b.batch_id) || [],
-    }))
+    mergeBatchTasks(res.data.batches || [])
     const hasRunning = batchTasks.value.some((t) => t.status === 'running')
     if (!hasRunning) stopBatchPolling()
   } catch (e) {
     // 网络抖动：跳过本次轮询，下次再试
   } finally {
     batchPolling.value = false
+  }
+}
+
+// 失败项处理状态：isRowDone / markRowDone / hasPending（本地标记，仅影响展示）
+function isRowDone(task, row) { return !!row._done }
+function markRowDone(task, index) {
+  const row = task.results && task.results[index]
+  if (row) row._done = true
+}
+function hasPending(task) {
+  return (task.results || []).some((r) => r.status === 'failed' && !r._done)
+}
+
+// 从"手动添加"打开的创建对话框来源；提交成功时消费它
+const batchManualRef = ref(null) // { task, index }
+
+// 保留 AI 识别结果直接入库（低置信项也按识别属性创建）
+async function keepAiResult(row, task) {
+  const file = (task._files && task._files[row.index]) || null
+  if (!file) {
+    ElMessage.warning('原图缺失，无法保留结果')
+    return
+  }
+  saving.value = true
+  try {
+    const b64 = await fileToBase64(file)
+    await createPhotoItem(userId.value, {
+      filename: file.name,
+      content_base64: b64,
+      item_type: row.item_type,
+      subtype: row.subtype,
+      name: row.name,
+      color: row.color,
+      gender: task.gender || 'women',
+      attributes: row.attributes,
+    })
+    markRowDone(task, row.index)
+    ElMessage.success('已按 AI 结果保留入库')
+    load()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  } finally {
+    saving.value = false
+  }
+}
+
+// 删除该单品：不入库，标记为已处理
+function dropRow(row, task) {
+  markRowDone(task, row.index)
+  ElMessage.success('已删除该单品（不入库）')
+}
+
+// 所有失败项处理完后，用户确认：删除整条导入记录
+async function confirmTask(task) {
+  try {
+    await deleteBatchRecognition(userId.value, task.batch_id)
+    batchTasks.value = batchTasks.value.filter((t) => t.batch_id !== task.batch_id)
+    ElMessage.success('已删除该导入记录')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
   }
 }
 
@@ -678,6 +769,8 @@ function manualAdd(row, task) {
   } else if (file) {
     onCreateFile(file) // 无属性：走单图自动识别预填
   }
+  // 记录来源：创建对话框提交成功后把该项标记为已处理
+  batchManualRef.value = { task, index: row.index }
 }
 
 function revokeBatchUrls() {
@@ -784,4 +877,5 @@ onMounted(async () => {
 .no-img { font-size: 12px; color: #bbb; }
 .batch-picks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .pick-img { width: 48px; height: 48px; border-radius: 4px; }
+.batch-footer { display: flex; gap: 8px; margin-top: 12px; }
 </style>

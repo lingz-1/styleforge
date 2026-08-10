@@ -97,6 +97,7 @@ class RecognitionBatch:
     user_id: str
     total: int
     started_at: str
+    gender: str = "women"
     done: int = 0
     succeeded: int = 0
     failed: int = 0
@@ -118,6 +119,7 @@ class RecognitionBatch:
             "batch_id": self.batch_id,
             "user_id": self.user_id,
             "total": self.total,
+            "gender": self.gender,
             "done": self.done,
             "percent": percent,
             "succeeded": self.succeeded,
@@ -265,6 +267,7 @@ def start_batch(
         user_id=user_id,
         total=len(images),
         started_at=_now(),
+        gender=default_gender,
         results=[
             BatchImageResult(index=index, filename=filename)
             for index, (filename, _) in enumerate(images)
@@ -314,3 +317,16 @@ def list_batches(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
         ]
     owned.sort(key=lambda batch: batch.started_at, reverse=True)
     return [batch.snapshot() for batch in owned[:limit]]
+
+
+def delete_batch(user_id: str, batch_id: str) -> bool:
+    """Remove a user's batch (e.g. after its results were handled).
+
+    Returns True when the batch existed and belonged to ``user_id``.
+    """
+    with _store_lock:
+        batch = _store.get(batch_id)
+        if batch is None or batch.user_id != user_id:
+            return False
+        del _store[batch_id]
+        return True
