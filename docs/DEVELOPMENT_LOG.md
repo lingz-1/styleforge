@@ -236,3 +236,49 @@ D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app --app-dir apps\a
 - **"周末户外婚礼穿什么"**：Agent 1 识别隐含天气意图并声明天气需要，但"周末"属 V2.2 Calendar Resolver 范围 → `error_code=unsupported_date_expression` → 天气 `unavailable`，方案无任何天气主张与随身物品（符合"无事实不主张"，正确降级而非静默猜测）。
 
 前端渲染链路排查确认：`structured_result.recommendations` 与顶层 `proposals` 通过 `outfit_id` 对齐（`proposal_to_candidate` 保留原 proposal 的 `outfit_id`），因此 Web 上每套方案的 `environment_adjustments`（事实→影响→行动）与 `carry_recommendations`（外部随身物品 chips）能正确渲染，只要 LLM 按事实输出了随身物品。
+
+## 10. 衣柜照片多模态识别与批量导入（2026-08-10，已实现）
+
+### 10.1 需求与边界
+
+用户上传衣物照片，由本地代理（`tools/gemini_proxy.py`，OpenAI 兼容接口，Vertex Gemini `gemini-2.5-flash`）做多模态识别得到品类/子类/颜色/属性，入库到个人衣柜。单图识别先落地，随后用户要求批量导入：一次多张图片后台逐张识别、前端轮询进度与预计剩余时间。
+
+已确认决策：
+
+- 识别成功且可信的图片自动写入衣柜；失败/低置信项在结果列表标记，由用户处理（不自动重试）。
+- **3 张并发**，前端轮询显示进度 + 预计剩余时间（EMA 单张耗时建模）。
+- 批量提交后关闭对话框，后台继续处理；进度与结果常驻在衣柜顶部"批量识别任务"卡片区。
+- 失败项处理闭环：编辑入库（自动填充 AI 属性后确认）、删除该单品；所有失败项处理完后用户确认删除整条批次记录。
+- 衣柜卡片完整显示单品属性，各属性字段可在创建/编辑对话框直接修改；已处理的失败项可撤销。
+
+### 10.2 实现清单
+
+后端：
+
+- `services/recognition_batch.py`（新）：进程内批次存储（`_store` + 锁）与 `ThreadPoolExecutor(max_workers=3)` 并发 worker。`BatchImageResult`（每张的 index/filename/status/reason/识别结果），`RecognitionBatch`（batch_id/user_id/total/done/succeeded/failed/status/eta/ema/results/gender）。worker 流程：`analyze_image` → `parse_attributes` → `map_ai_type_to_item_fields` → `is_reliable_analysis`（不可信 → `low_confidence`，保留 attributes）→ `create_photo_item(skip_embedding=True, skip_initialize=True)` 自动入库。提供 `start_batch/get_batch/list_batches/delete_batch`。
+  - **熔断止损**：连续 ≥2 次 `VisionUnavailable` 时，剩余未处理图片直接标记 `provider_unavailable` 并置批次完成（不是自动重试）。`_record_result` 中 `batch.status != "running"` 作为锁内第一个检查，避免熔断后迟到的 worker 重计/覆盖。
+  - **并发修正**：`tools/gemini_proxy.py` 从 `HTTPServer`（单线程，并发请求排队）改为 `ThreadingHTTPServer`，3 并发才真正并行。
+  - `create_photo_item` 新增 `skip_embedding` / `skip_initialize`，批量 worker 跳过单张嵌入与重复 DDL，DB `embedding_status` 保持 `pending`。
+- `api.py`：`POST /wardrobes/{user_id}/items/batch-recognize`（202，逐张 20MB 校验、总量 64MB 上限 413、vision 未配置 503）、`GET .../recognition-batches`（列表，newest-first，归属过滤）、`GET .../recognition-batches/{batch_id}`（单批轮询，归属校验 404）、`DELETE .../recognition-batches/{batch_id}`（用户处理完删除记录）。`BatchRecognitionRequest`（images 1–30 + default_gender）。单图 `POST /items/analyze`（不落库，返回属性供前端预填）与 `/items/photo`（识别后入库）。
+
+前端（`apps/web/src/pages/WardrobePage.vue`）：
+
+- 批量对话框只保留选图（`picture-card` 缩略图网格，悬停删除），提交即关闭；衣柜顶部常驻"批量识别任务"卡片区：运行中显示进度条 + 已识别 X/Y + 预计剩余 Z 秒 + 缩略图行；完成后显示结果表格（原图缩略图可点击放大 + 识别结果 + 处理操作）。
+- 全局轮询：仅在有运行中任务时每 2s 调 `listBatchRecognition` 合并刷新，全部完成自动停止；本地 `_done` 处理标记在刷新时按 index 迁移保留。
+- 失败项处理：`编辑入库`（打开创建对话框自动填充原图 + AI 属性，保存后标记已处理）、`删除`（不入库标记已处理）；已处理行显示标签 + `撤销`（恢复未处理）。所有失败项处理完后出现 `确认完成，删除记录`，调 DELETE 后记录从列表消失（刷新不复活）。
+- 衣柜卡片逐行完整显示单品属性（季节/材质/图案/正式度/风格/场合/文化渊源/版型/领口袖长/细节/描述），品类显示中文；创建与编辑对话框增加"单品属性（可编辑）"表单，各字段可用下拉（预设值取自中文词表）或自定义输入编辑，保存时 `attributes` 一并提交。
+
+### 10.3 遇到的问题
+
+- **熔断计数溢出**：并发 worker 在熔断标记完成后再完成，仍重计 `done` 并覆盖结果（`done=6 > total=5`）。根因 `_record_result` 在计数之后才检查状态。修复：把 `if batch.status != "running": return` 移到锁内第一条语句。
+- **进度卡 0**：前端 `batchState` 用驼峰 `batchId`，后端返回蛇形 `batch_id`，`Object.assign` 静默失败导致轮询 404。统一字段名为 `batch_id`。
+- **图片缩略图内存**：`URL.createObjectURL` 缓存在文件对象（`__preview`），卸载时统一 `revokeObjectURL`；刷新后重拉任务列表时原图引用丢失（后端只存元数据），失败项显示"无原图"，手动添加需另选图——已接受的本地会话限制。
+
+### 10.4 验证证据
+
+- 专项测试 `tests/test_batch_recognition.py`：混合结果（2 成功 + 1 低置信，skip_embedding 后 `embedding_status=pending`）、熔断（全部 `provider_unavailable`）、入库失败 `create_failed`、校验（>30→422、超总量→413、坏 base64→422、vision 关闭→503）、归属（他人 404）、`skip_embedding` 单测。
+- 全量回归：`pytest tests/test_batch_recognition.py tests/test_vision_api.py tests/test_vision_analysis.py` → **29 passed**；`ruff check apps/api/styleforge tests` → All checks passed；`npm run build` 通过。
+- 真实端到端（key 就位后，用数据集配饰图而非内存图）：3 张真实饰品全部识别成功自动入库（confidence 1.0），ETA 从 8s 动态下降；`POST → 后台识别 → DELETE` 链路验证他人删除 404 / 本人删除 200 / 列表清除 / 单查 404；PUT 编辑 attributes 后 GET 确认完整存储。
+- 识别结果宽容化校验（commit `48f6350`）：避免模型脏数据触发"other / 0%"降级。
+
+> 说明：批次存进程内存，后端重启丢失去运行中任务（README 已注明，本地优先工具的接受取舍）。批量 worker 的 `skip_embedding=True` 意味着新入库单品 `embedding_status=pending`，后续统一补嵌入（可复用订单导入的增量嵌入入口）。

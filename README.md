@@ -24,6 +24,7 @@ StyleForge 是一个本地优先的个人衣柜多 Agent 穿搭系统。用户�
 - v3.3 六任务执行链（已实现并定向验证）：Task Router 在三个 Agent 之前将请求路由为穿搭推荐、局部修改、风格知识、单品知识、衣橱兼容性或衣橱缺口；`POST /tasks/execute` 执行对应子图，统一使用 Context Pack，并把结果、证据和轨迹持久化到 `task_runs`。Web 的“智能造型”和小程序的“造型”页已接入五类扩展业务；输入输出见[扩展任务业务与 API](docs/EXTENDED_TASKS.md)。
 - P5 天气上下文：Agent 1 按请求决定是否需要天气，Context Router 通过 typed Open-Meteo Tool 获取事实，再把同一事实交给三个主 Agent；Weather Tool 不生成穿搭建议，当前实现不是 MCP Server。契约见[天气上下文工具](docs/WEATHER_CONTEXT.md)。
 - P2.5 路由评估切片（已验证）：`evals/cases/task_routing.json` 固化 42 条中英文用例，六类各 7 条；基线准确率 100%，六类逐类准确率均为 100%，失败样本 0。该指标只评价固定集任务路由，不代表穿搭质量。
+- 衣柜照片识别与批量导入：单图识别（`POST /items/analyze` 预填 + `/items/photo` 入库）和批量识别（`POST /items/batch-recognize`，后台 3 张并发、前端轮询进度/预计剩余、失败项可编辑入库或删除、处理完确认删除批次记录）。识别走本地代理调 Vertex Gemini 多模态；批量入库 `embedding_status=pending` 待统一补嵌入。详见[开发过程记录](docs/DEVELOPMENT_LOG.md)第 10 节。
 
 ## 职责边界
 
