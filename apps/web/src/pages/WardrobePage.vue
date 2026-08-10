@@ -502,7 +502,7 @@ const batchFiles = ref([]) // 原始 File[]，索引与后端 results 的 index 
 const batchGender = ref('women')
 const batchSubmitting = ref(false)
 const batchState = reactive({
-  batchId: '', total: 0, done: 0, succeeded: 0, failed: 0,
+  batch_id: '', total: 0, done: 0, succeeded: 0, failed: 0,
   status: 'running', eta_seconds: 0, results: [],
 })
 const batchPollTimer = ref(null)
@@ -589,7 +589,7 @@ async function pollBatch() {
   if (batchPolling.value) return
   batchPolling.value = true
   try {
-    const res = await getBatchRecognition(batchUserIdAtSubmit.value, batchState.batchId)
+    const res = await getBatchRecognition(batchUserIdAtSubmit.value, batchState.batch_id)
     Object.assign(batchState, res.data)
     if (res.data.status !== 'running') {
       stopPoll()
