@@ -5,6 +5,9 @@ const http = axios.create({ baseURL: '/api', timeout: 120000 })
 // Health
 export const getHealth = () => http.get('/health')
 
+// Today's weather for the home card (location | latitude/longitude | default city)
+export const getWeatherNow = (params = {}) => http.get('/weather/now', { params })
+
 // Catalog taxonomy (main category required, subtype optional)
 export const getTaxonomy = () => http.get('/catalog/taxonomy')
 
@@ -14,6 +17,11 @@ export const removeWardrobeItem = (userId, itemId) =>
   http.delete(`/wardrobes/${userId}/items/${itemId}`)
 export const createPhotoItem = (userId, payload) =>
   http.post(`/wardrobes/${userId}/items/photo`, payload)
+export const analyzeItem = (userId, filename, contentBase64) =>
+  http.post(`/wardrobes/${userId}/items/analyze`, {
+    filename,
+    content_base64: contentBase64,
+  })
 export const updateItem = (userId, itemId, fields) =>
   http.put(`/wardrobes/${userId}/items/${itemId}`, fields)
 export const uploadItemImage = (userId, itemId, filename, contentBase64) =>

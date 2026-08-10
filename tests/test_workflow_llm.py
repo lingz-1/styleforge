@@ -74,6 +74,7 @@ def _catalog_row(item: CatalogItem) -> tuple:
         item.color,
         item.description,
         json.dumps(list(item.features)),
+        "{}",
         item.image_filename,
         item.relative_image_path,
         item.image_status.value,
@@ -90,7 +91,7 @@ def _seed_database(db_path: Path) -> None:
         for item in WARDROBE_ITEMS:
             connection.execute(
                 "INSERT OR REPLACE INTO catalog_items VALUES "
-                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 _catalog_row(item),
             )
             connection.execute(

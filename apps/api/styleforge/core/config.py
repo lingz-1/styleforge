@@ -61,6 +61,16 @@ class Settings:
     location_max_age_seconds: int = 1800
     location_max_accuracy_m: float = 5000.0
     reverse_geocode_endpoint: str = ""
+    # Multi-modal clothing-image recognition via the OpenAI-compatible
+    # gemini_proxy (see tools/gemini_proxy.py). The proxy speaks plain
+    # /v1/chat/completions, so the base URL can point at any compatible
+    # endpoint (Gemini proxy, local LLM, etc.).
+    vision_enabled: bool = True
+    vision_base_url: str = "http://127.0.0.1:5088/v1"
+    vision_api_key: str = ""
+    vision_model: str = "gemini-2.5-flash"
+    vision_timeout: float = 120.0
+    vision_max_retries: int = 2
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -92,6 +102,14 @@ class Settings:
             )
         except ValueError:
             location_max_accuracy = 5000.0
+        try:
+            vision_timeout = float(os.getenv("STYLEFORGE_VISION_TIMEOUT", "120"))
+        except ValueError:
+            vision_timeout = 120.0
+        try:
+            vision_max_retries = int(os.getenv("STYLEFORGE_VISION_MAX_RETRIES", "2"))
+        except ValueError:
+            vision_max_retries = 2
         return cls(
             metadata_path=Path(
                 os.getenv(
@@ -149,4 +167,14 @@ class Settings:
             reverse_geocode_endpoint=os.getenv(
                 "STYLEFORGE_REVERSE_GEOCODE_ENDPOINT", ""
             ).strip(),
+            vision_enabled=_optional_bool(
+                os.getenv("STYLEFORGE_VISION_ENABLED"), default=True
+            ),
+            vision_base_url=os.getenv(
+                "STYLEFORGE_VISION_BASE_URL", "http://127.0.0.1:5088/v1"
+            ).strip(),
+            vision_api_key=os.getenv("STYLEFORGE_VISION_API_KEY", "").strip(),
+            vision_model=os.getenv("STYLEFORGE_VISION_MODEL", "gemini-2.5-flash").strip(),
+            vision_timeout=vision_timeout,
+            vision_max_retries=vision_max_retries,
         )

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS catalog_items (
     color TEXT NOT NULL,
     description TEXT NOT NULL,
     features_json TEXT NOT NULL,
+    attributes_json TEXT NOT NULL DEFAULT '{}',
     image_filename TEXT NOT NULL,
     relative_image_path TEXT NOT NULL,
     image_status TEXT NOT NULL CHECK (image_status IN ('unbound', 'available', 'missing')),
@@ -337,6 +338,9 @@ def initialize_database(database_path: Path) -> None:
         )
         _ensure_column(
             connection, "dataset_outfit_items", "item_description", "TEXT NOT NULL DEFAULT ''"
+        )
+        _ensure_column(
+            connection, "catalog_items", "attributes_json", "TEXT NOT NULL DEFAULT '{}'"
         )
         _ensure_column(
             connection,

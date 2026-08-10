@@ -42,6 +42,7 @@ def _item_to_dict(connection, item_id: str) -> dict[str, Any] | None:
         "description": row["description"],
         "image_status": row["image_status"],
         "embedding_status": row["embedding_status"],
+        "attributes": json.loads(row["attributes_json"] or "{}"),
         "image_url": f"/items/{row['item_id']}/image",
     }
 
@@ -60,6 +61,7 @@ def create_photo_item(
     color: str = "",
     gender: str = "women",
     size: str = "",
+    attributes: dict | None = None,
 ) -> dict[str, Any]:
     """Create a new personal wardrobe item from a user photo."""
     if not item_type.strip():
@@ -79,6 +81,7 @@ def create_photo_item(
         for value in (subtype.strip(), f"size:{size.strip()}" if size.strip() else "")
         if value
     )
+    ai_description = (attributes or {}).get("description") or ""
     item = CatalogItem(
         item_id=item_id,
         source=source,
@@ -87,7 +90,7 @@ def create_photo_item(
         main_category=infer_slot(item_type),
         name=name.strip() or "未命名衣物",
         color=color.strip(),
-        description="",
+        description=ai_description.strip(),
         features=features,
         image_filename=filename,
         relative_image_path=filename,
@@ -104,6 +107,11 @@ def create_photo_item(
             source_revision="personal-photo-v1",
         )
         upsert_items(connection, [item], "personal-photo-v1")
+        if attributes:
+            connection.execute(
+                "UPDATE catalog_items SET attributes_json = ? WHERE item_id = ?",
+                (json.dumps(attributes, ensure_ascii=False), item_id),
+            )
         connection.execute(
             """
             INSERT INTO wardrobe_items(user_id, item_id, active, favorite, notes, added_at)
@@ -167,6 +175,7 @@ def update_personal_item(
     color: str | None = None,
     gender: str | None = None,
     size: str | None = None,
+    attributes: dict | None = None,
 ) -> dict[str, Any]:
     """Update metadata of an item in the user's wardrobe."""
     initialize_database(database_path)
@@ -195,6 +204,8 @@ def update_personal_item(
             updates["color"] = color.strip()
         if gender is not None:
             updates["gender"] = gender.strip()
+        if attributes is not None:
+            updates["attributes_json"] = json.dumps(attributes, ensure_ascii=False)
         if not updates:
             raise ValueError("No fields to update")
 

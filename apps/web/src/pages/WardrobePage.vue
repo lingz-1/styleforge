@@ -31,7 +31,10 @@
                 </template>
               </el-image>
               <div class="item-name">{{ item.name || item.item_id }}</div>
-              <div class="item-meta">{{ item.item_type }} · {{ item.color }}</div>
+              <div class="item-meta">
+                {{ item.item_type }} · {{ item.color }}
+                <template v-if="attrText(item)"> · {{ attrText(item) }}</template>
+              </div>
               <div class="actions">
                 <el-button size="small" @click="openEdit(item)">编辑</el-button>
                 <el-button size="small" @click="openPhoto(item)">补图</el-button>
@@ -47,18 +50,22 @@
     <el-empty v-if="loaded && !Object.keys(grouped).length" description="衣柜为空" />
 
     <!-- 上传新衣物 -->
-    <el-dialog v-model="createVisible" title="上传新衣物" width="520px">
+    <el-dialog v-model="createVisible" title="上传新衣物" width="560px">
       <el-upload
         drag
         :auto-upload="false"
         :limit="1"
         accept="image/*"
         :on-change="onCreateFile"
-        :on-remove="() => (createForm.file = null)"
+        :on-remove="onRemoveCreateFile"
       >
         <el-icon class="el-icon--upload"><upload-filled /></el-icon>
         <div class="el-upload__text">拖拽图片到此处，或 <em>点击选择</em></div>
       </el-upload>
+      <div v-if="analyzing" class="analyzing-hint">
+        <el-icon class="is-loading"><loading /></el-icon>
+        AI 正在识别图片属性…
+      </div>
       <el-form :model="createForm" label-width="80px" class="mt">
         <el-form-item label="名称"><el-input v-model="createForm.name" placeholder="如：蓝色衬衫" /></el-form-item>
         <el-form-item label="品类" required>
@@ -84,9 +91,20 @@
           </el-select>
         </el-form-item>
       </el-form>
+      <template v-if="createForm.attributes && Object.keys(createForm.attributes).length">
+        <el-divider content-position="left">AI 识别属性</el-divider>
+        <el-descriptions :column="1" size="small" border class="attr-panel">
+          <el-descriptions-item v-for="row in attrRows" :key="row.label" :label="row.label">
+            {{ row.value }}
+          </el-descriptions-item>
+        </el-descriptions>
+        <div class="mt-hint">识别结果仅供参考，可在上方修改后确认入库。</div>
+      </template>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="submitCreate">创建</el-button>
+        <el-button type="primary" :loading="saving" :disabled="analyzing" @click="submitCreate">
+          创建
+        </el-button>
       </template>
     </el-dialog>
 
@@ -136,9 +154,9 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { UploadFilled } from '@element-plus/icons-vue'
+import { Loading, UploadFilled } from '@element-plus/icons-vue'
 import {
-  getWardrobe, removeWardrobeItem, createPhotoItem, getTaxonomy,
+  getWardrobe, removeWardrobeItem, createPhotoItem, analyzeItem, getTaxonomy,
   updateItem, uploadItemImage, imageUrl,
 } from '../services/api'
 import { getUserId, setUserId } from '../services/user'
@@ -166,6 +184,47 @@ const TYPE_LABELS = {
   top: '上装', pants: '裤装', skirt: '半身裙', dress: '连衣裙', jumpsuit: '连体装',
   outwear: '外套', shoes: '鞋', bag: '包', accessory: '配饰', other: '其他',
 }
+
+// AI 识别词表 → 中文（模型输出英文 token，这里仅用于展示）
+const VN = {
+  // season
+  spring: '春季', summer: '夏季', fall: '秋季', winter: '冬季', 'all-season': '四季通用',
+  // material
+  cotton: '棉', denim: '牛仔', leather: '皮革', wool: '羊毛', polyester: '涤纶',
+  silk: '丝绸', linen: '亚麻', knit: '针织', fleece: '抓绒', suede: '麂皮',
+  velvet: '天鹅绒', nylon: '尼龙', canvas: '帆布', cashmere: '羊绒', chiffon: '雪纺',
+  satin: '缎面', tulle: '薄纱', lace: '蕾丝', twill: '斜纹', corduroy: '灯芯绒',
+  down: '羽绒', 'wool-blend': '羊毛混纺',
+  // pattern
+  solid: '纯色', striped: '条纹', plaid: '格纹', checkered: '棋盘格', floral: '碎花',
+  graphic: '图案', geometric: '几何', 'polka-dot': '波点', camouflage: '迷彩',
+  'animal-print': '动物纹', paisley: '佩斯利',
+  // formality
+  'very-casual': '非常休闲', casual: '休闲', 'smart-casual': '半正式',
+  'business-casual': '商务休闲', formal: '正式',
+  // style
+  classic: '经典', sporty: '运动', minimalist: '极简', bohemian: '波西米亚',
+  preppy: '学院', streetwear: '街头', elegant: '优雅', athletic: '运动',
+  vintage: '复古', modern: '现代', rugged: '粗犷', chic: '时髦', romantic: '浪漫',
+  // fit / silhouette
+  slim: '修身', regular: '常规', relaxed: '宽松', oversized: '超大', tailored: '合体剪裁',
+  cropped: '短款', 'A-line': 'A字', fitted: '修身', loose: '宽松', boxy: '方正',
+  bodycon: '包身', straight: '直筒', flared: '喇叭',
+  // occasion
+  daily: '日常', work: '工作', party: '派对', outdoor: '户外', sports: '运动',
+  travel: '旅行', ceremony: '典礼', 'date-night': '约会', home: '居家', school: '校园',
+  // cultural origin
+  none: '无', hanfu: '汉服', 'qipao-cheongsam': '旗袍', tangzhuang: '唐装',
+  'ma-mian-skirt': '马面裙', 'ethnic-chinese': '中国民族服饰', kimono: '和服',
+  hanbok: '韩服', sari: '纱丽', kilt: '苏格兰裙', poncho: '斗篷',
+  'middle-eastern': '中东服饰', 'traditional-indian': '印度传统', african: '非洲民族服饰',
+  'native-american': '美洲原住民', nordic: '北欧传统', victorian: '维多利亚',
+  'western-cowboy': '西部牛仔', military: '军旅', gothic: '哥特', punk: '朋克',
+  'vintage-retro': '复古',
+}
+const vn = (token) => (token ? (VN[token] || token) : '')
+const vnList = (arr) => (Array.isArray(arr) ? arr.map(vn).filter(Boolean).join('、') : '')
+const vnPct = (n) => (typeof n === 'number' ? `${Math.round(n * 100)}%` : '')
 
 const grouped = computed(() => {
   const map = {}
@@ -216,13 +275,47 @@ async function remove(itemId) {
 
 // --- 创建 ---
 const createVisible = ref(false)
+const analyzing = ref(false)
 const createForm = reactive({
   name: '', item_type: '', subtype: '', color: '', gender: 'women', file: null,
+  attributes: null,
 })
 const subtypeOptions = computed(() => {
   const cat = taxonomy.value.find((c) => c.key === createForm.item_type)
   return cat ? cat.subtypes : []
 })
+
+// 识别属性只读面板：从 attributes 生成展示行
+const attrRows = computed(() => {
+  const a = createForm.attributes || {}
+  const rows = []
+  if (a.item_type) rows.push({ label: '品类', value: `${vn(a.item_type)} / ${vn(a.subtype) || '未细分'}` })
+  if (a.primary_color) rows.push({ label: '主色', value: vn(a.primary_color) })
+  if (a.season?.length) rows.push({ label: '季节', value: vnList(a.season) })
+  if (a.material) rows.push({ label: '材质', value: vn(a.material) })
+  if (a.pattern) rows.push({ label: '图案', value: vn(a.pattern) })
+  if (a.style?.length) rows.push({ label: '风格', value: vnList(a.style) })
+  if (a.formality) rows.push({ label: '正式度', value: vn(a.formality) })
+  if (a.occasion?.length) rows.push({ label: '场合', value: vnList(a.occasion) })
+  if (a.cultural_origin?.length) rows.push({ label: '文化渊源', value: vnList(a.cultural_origin) })
+  if (a.silhouette) rows.push({ label: '版型', value: vn(a.silhouette) })
+  if (a.neckline || a.sleeve_length) {
+    rows.push({ label: '领口/袖长', value: [vn(a.neckline), vn(a.sleeve_length)].filter(Boolean).join(' / ') })
+  }
+  if (a.features?.length) rows.push({ label: '细节', value: vnList(a.features) })
+  if (a.description) rows.push({ label: 'AI 描述', value: a.description })
+  if (typeof a.confidence === 'number') rows.push({ label: '置信度', value: vnPct(a.confidence) })
+  return rows
+})
+
+// 衣柜卡片：追加季节/材质摘要
+function attrText(item) {
+  const a = item.attributes || {}
+  const parts = []
+  if (a.season?.length) parts.push(vnList(a.season))
+  if (a.material) parts.push(vn(a.material))
+  return parts.join(' · ')
+}
 
 function openCreate() {
   createForm.name = ''
@@ -231,9 +324,41 @@ function openCreate() {
   createForm.color = ''
   createForm.gender = 'women'
   createForm.file = null
+  createForm.attributes = null
+  analyzing.value = false
   createVisible.value = true
 }
-function onCreateFile(file) { createForm.file = file }
+async function onCreateFile(file) {
+  createForm.file = file
+  createForm.attributes = null
+  const b64 = await fileToBase64(file)
+  if (!b64) return
+  analyzing.value = true
+  try {
+    const res = await analyzeItem(userId.value, file.name, b64)
+    const data = res.data
+    if (data && data.status === 'available' && data.attributes) {
+      createForm.attributes = data.attributes
+      if (data.item_type && !createForm.item_type) createForm.item_type = data.item_type
+      if (data.subtype && !createForm.subtype) createForm.subtype = data.subtype
+      if (data.color && !createForm.color) createForm.color = data.color
+      if (data.name && !createForm.name) createForm.name = data.name
+    }
+  } catch (e) {
+    // 识别失败降级为手动填写，不阻塞上传
+    if (e.response?.status !== 503 && e.response?.status !== 502) {
+      ElMessage.warning(`AI 识别失败（已降级为手动填写）：${e.response?.data?.detail || e.message}`)
+    } else {
+      ElMessage.warning('AI 识别暂不可用，请手动填写属性')
+    }
+  } finally {
+    analyzing.value = false
+  }
+}
+function onRemoveCreateFile() {
+  createForm.file = null
+  createForm.attributes = null
+}
 async function submitCreate() {
   if (!createForm.file || !createForm.item_type) {
     ElMessage.warning('请选择图片和品类')
@@ -250,6 +375,7 @@ async function submitCreate() {
       name: createForm.name,
       color: createForm.color,
       gender: createForm.gender,
+      attributes: createForm.attributes,
     })
     ElMessage.success('已创建并加入衣柜')
     createVisible.value = false
@@ -332,4 +458,11 @@ onMounted(async () => {
 .item-name { font-size: 13px; margin-top: 8px; }
 .item-meta { font-size: 12px; color: #888; margin-bottom: 8px; }
 .actions { display: flex; gap: 4px; }
+.analyzing-hint {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 10px; padding: 8px 12px;
+  background: #f4f8ff; border-radius: 6px; color: #409eff; font-size: 13px;
+}
+.attr-panel { margin-top: 8px; }
+.mt-hint { margin-top: 8px; font-size: 12px; color: #999; }
 </style>

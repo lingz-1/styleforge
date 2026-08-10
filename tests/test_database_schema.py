@@ -122,4 +122,4 @@ def test_schema_v8_migrates_task_runs_status_without_losing_rows(tmp_path) -> No
         connection.close()
 
     assert old_row == ("u", "completed")
-    assert version == "8"
+    assert version == str(SCHEMA_VERSION)

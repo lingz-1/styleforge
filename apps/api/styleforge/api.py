@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import base64
 import binascii
-from datetime import datetime, timezone
+import json
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -21,7 +22,11 @@ from styleforge.models.task import TaskExecutionInput
 from styleforge.orchestration.graph import MultiTaskGraph
 from styleforge.orchestration.task_router import TaskType
 from styleforge.repositories.database import database_session, initialize_database
-from styleforge.tools.weather.schemas import DeviceLocationContext
+from styleforge.tools.weather.schemas import (
+    DeviceLocationContext,
+    WeatherFacts,
+    WeatherToolInput,
+)
 from styleforge.repositories.dataset_source_repository import (
     get_source_image_root,
     list_dataset_sources,
@@ -44,6 +49,17 @@ from styleforge.services.personal_images import bind_personal_image
 from styleforge.services.wardrobe_item_service import (
     create_photo_item,
     update_personal_item,
+)
+from styleforge.vision.clothing_analysis import (
+    attributes_to_dict,
+    build_analysis_prompt,
+    map_ai_type_to_item_fields,
+    parse_attributes,
+)
+from styleforge.vision.vision_client import (
+    VisionInvalidJson,
+    VisionUnavailable,
+    vision_client_from_settings,
 )
 from styleforge.workflow.graph import StyleForgeWorkflow
 from styleforge.workflow.task_workflow import MultiTaskWorkflow
@@ -106,6 +122,7 @@ class PhotoItemRequest(BaseModel):
     color: str = Field(default="", max_length=64)
     gender: str = Field(default="women", max_length=16)
     size: str = Field(default="", max_length=16)
+    attributes: dict | None = None
 
 
 class UpdateItemRequest(BaseModel):
@@ -115,6 +132,7 @@ class UpdateItemRequest(BaseModel):
     color: str | None = Field(default=None, max_length=64)
     gender: str | None = Field(default=None, max_length=16)
     size: str | None = Field(default=None, max_length=16)
+    attributes: dict | None = None
 
 
 settings = Settings.from_env()
@@ -166,6 +184,7 @@ def _catalog_row_to_dict(row) -> dict[str, Any]:
         "relative_image_path": row["relative_image_path"],
         "image_status": row["image_status"],
         "embedding_status": row["embedding_status"],
+        "attributes": json.loads(row["attributes_json"] or "{}"),
         "image_url": f"/items/{row['item_id']}/image",
     }
 
@@ -237,6 +256,66 @@ def health() -> dict[str, Any]:
         "index_manifest_available": index_manifest.is_file(),
         "image_root_configured": bool(image_sources),
     }
+
+
+@app.get("/weather/now")
+def weather_now(
+    location: str | None = Query(default=None, max_length=160),
+    latitude: float | None = Query(default=None, ge=-90, le=90),
+    longitude: float | None = Query(default=None, ge=-180, le=180),
+) -> dict[str, Any]:
+    """Today's weather for the device location, a named location, or the default city.
+
+    The home card fetches this on load: device coordinates (when the user has
+    granted geolocation) take priority, then an explicit city name, then the
+    configured default city. An honest ``unavailable`` payload is returned
+    instead of a 500 when nothing is resolvable.
+    """
+    has_location = bool((location or "").strip())
+    has_lat = latitude is not None
+    has_lon = longitude is not None
+    if has_location and (has_lat or has_lon):
+        raise HTTPException(
+            status_code=422, detail="location 与坐标互斥，只能提供其中一种"
+        )
+    if has_lat != has_lon:
+        raise HTTPException(
+            status_code=422, detail="latitude 和 longitude 必须同时提供"
+        )
+
+    today_iso = date.today().isoformat()
+    tool = get_workflow().weather_tool
+    if tool is None:
+        return WeatherFacts.unavailable(
+            requested_location="",
+            requested_date=today_iso,
+            error_code="weather_disabled",
+            error_message="天气功能未启用",
+        ).model_dump(mode="json")
+
+    if has_location:
+        tool_input = WeatherToolInput(location=location.strip(), date=today_iso)
+    elif has_lat:
+        tool_input = WeatherToolInput(
+            latitude=latitude,
+            longitude=longitude,
+            date=today_iso,
+        )
+    elif settings.weather_default_location:
+        tool_input = WeatherToolInput(
+            location=settings.weather_default_location,
+            date=today_iso,
+        )
+    else:
+        return WeatherFacts.unavailable(
+            requested_location="",
+            requested_date=today_iso,
+            error_code="location_required",
+            error_message="未提供地点，也未配置默认城市（STYLEFORGE_DEFAULT_LOCATION）",
+        ).model_dump(mode="json")
+
+    facts = tool(tool_input)
+    return facts.model_dump(mode="json")
 
 
 @app.get("/preferences/{user_id}/evaluation")
@@ -503,9 +582,44 @@ def create_wardrobe_photo_item(
             color=request.color,
             gender=request.gender,
             size=request.size,
+            attributes=request.attributes,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/wardrobes/{user_id}/items/analyze")
+def analyze_wardrobe_photo(
+    user_id: str,
+    request: PersonalImageUpload,
+) -> dict[str, Any]:
+    """Multi-modal recognition of one clothing photo, without persisting."""
+    payload = _decode_base64(request.content_base64, maximum_bytes=20 * 1024 * 1024)
+    client = vision_client_from_settings(settings)
+    if client is None:
+        raise HTTPException(status_code=503, detail="Vision recognition is disabled")
+    try:
+        raw = client.analyze_image(payload, build_analysis_prompt())
+    except VisionUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except VisionInvalidJson as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    except OSError as error:
+        raise HTTPException(status_code=422, detail=f"Invalid image: {error}") from error
+    attributes = parse_attributes(raw)
+    item_type, subtype = map_ai_type_to_item_fields(
+        attributes.type, attributes.subtype
+    )
+    return {
+        "status": "available",
+        "item_type": item_type,
+        "subtype": subtype,
+        "color": attributes.primary_color,
+        "name": attributes.description[:32] if attributes.description else "",
+        "description": attributes.description,
+        "confidence": attributes.confidence,
+        "attributes": attributes_to_dict(attributes),
+    }
 
 
 @app.put("/wardrobes/{user_id}/items/{item_id}")
@@ -527,6 +641,7 @@ def update_wardrobe_item(
             color=request.color,
             gender=request.gender,
             size=request.size,
+            attributes=request.attributes,
         )
     except ValueError as error:
         status_code = 404 if "not found" in str(error) else 422
