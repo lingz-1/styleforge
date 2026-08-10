@@ -150,7 +150,9 @@ def _list_models() -> dict:
 
 
 # --- HTTP server (stdlib only, no Flask/FastAPI needed) ---
-from http.server import BaseHTTPRequestHandler, HTTPServer
+# ThreadingHTTPServer so the batch-recognition backend can run 3 concurrent
+# vision requests; the default single-threaded HTTPServer would serialize them.
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import urllib.parse
 
@@ -195,7 +197,8 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PROXY_PORT", "5088"))
-    server = HTTPServer(("0.0.0.0", port), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    server.daemon_threads = True
     print(f"Gemini OpenAI-proxy listening on http://0.0.0.0:{port}/v1")
     try:
         server.serve_forever()

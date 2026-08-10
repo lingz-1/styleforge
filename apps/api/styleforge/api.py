@@ -45,6 +45,10 @@ from styleforge.repositories.user_preferences_repository import (
 from styleforge.repositories.task_run_repository import get_task_run
 from styleforge.services.order_import import parse_order_workbook
 from styleforge.services.personal_embeddings import embed_personal_items
+from styleforge.services.recognition_batch import (
+    get_batch,
+    start_batch,
+)
 from styleforge.services.personal_images import bind_personal_image
 from styleforge.services.wardrobe_item_service import (
     create_photo_item,
@@ -124,6 +128,11 @@ class PhotoItemRequest(BaseModel):
     gender: str = Field(default="women", max_length=16)
     size: str = Field(default="", max_length=16)
     attributes: dict | None = None
+
+
+class BatchRecognitionRequest(BaseModel):
+    images: list[PersonalImageUpload] = Field(min_length=1, max_length=30)
+    default_gender: str = Field(default="women", max_length=16)
 
 
 class UpdateItemRequest(BaseModel):
@@ -622,6 +631,60 @@ def analyze_wardrobe_photo(
         "confidence": attributes.confidence,
         "attributes": attributes_to_dict(attributes),
     }
+
+
+BATCH_TOTAL_MAX_BYTES = 64 * 1024 * 1024
+
+
+@app.post("/wardrobes/{user_id}/items/batch-recognize", status_code=202)
+def start_wardrobe_photo_batch(
+    user_id: str,
+    request: BatchRecognitionRequest,
+) -> dict[str, Any]:
+    """Kick off background multi-modal recognition for many photos at once.
+
+    Returns immediately with a ``batch_id``; the client polls
+    ``GET /wardrobes/{user_id}/recognition-batches/{batch_id}`` for progress.
+    Reliable recognitions are written straight into the user's wardrobe,
+    failures are reported per-image so the front end can offer a manual add.
+    """
+    client = vision_client_from_settings(settings)
+    if client is None:
+        raise HTTPException(status_code=503, detail="Vision recognition is disabled")
+
+    images: list[tuple[str, bytes]] = []
+    total_bytes = 0
+    for upload in request.images:
+        payload = _decode_base64(
+            upload.content_base64, maximum_bytes=20 * 1024 * 1024
+        )
+        total_bytes += len(payload)
+        if total_bytes > BATCH_TOTAL_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Batch upload is too large (limit 64 MiB)",
+            )
+        images.append((upload.filename, payload))
+
+    batch = start_batch(
+        user_id=user_id,
+        images=images,
+        default_gender=request.default_gender,
+        vision_client=client,
+        database_path=settings.database_path,
+        artifact_root=settings.artifact_root,
+        model_dir=settings.artifact_root / "models",
+    )
+    return batch.snapshot()
+
+
+@app.get("/wardrobes/{user_id}/recognition-batches/{batch_id}")
+def get_wardrobe_photo_batch(user_id: str, batch_id: str) -> dict[str, Any]:
+    """Poll progress for one batch recognition task."""
+    batch = get_batch(batch_id)
+    if batch is None or batch.user_id != user_id:
+        raise HTTPException(status_code=404, detail="Recognition batch not found")
+    return batch.snapshot()
 
 
 @app.put("/wardrobes/{user_id}/items/{item_id}")

@@ -22,6 +22,13 @@ export const analyzeItem = (userId, filename, contentBase64) =>
     filename,
     content_base64: contentBase64,
   })
+export const startBatchRecognition = (userId, images, gender = 'women') =>
+  http.post(`/wardrobes/${userId}/items/batch-recognize`, {
+    images,
+    default_gender: gender,
+  })
+export const getBatchRecognition = (userId, batchId) =>
+  http.get(`/wardrobes/${userId}/recognition-batches/${batchId}`)
 export const updateItem = (userId, itemId, fields) =>
   http.put(`/wardrobes/${userId}/items/${itemId}`, fields)
 export const uploadItemImage = (userId, itemId, filename, contentBase64) =>

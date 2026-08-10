@@ -62,15 +62,24 @@ def create_photo_item(
     gender: str = "women",
     size: str = "",
     attributes: dict | None = None,
+    skip_embedding: bool = False,
+    skip_initialize: bool = False,
 ) -> dict[str, Any]:
-    """Create a new personal wardrobe item from a user photo."""
+    """Create a new personal wardrobe item from a user photo.
+
+    ``skip_embedding`` leaves the item at ``embedding_status = 'pending'``
+    (batch recognition imports many items at once and must not race for the
+    GPU embedding encoder). ``skip_initialize`` assumes the caller already
+    initialized the schema, avoiding repeated DDL under concurrency.
+    """
     if not item_type.strip():
         raise ValueError("item_type is required")
     item_type = item_type.strip()
     if item_type not in ALLOWED_ITEM_TYPES:
         raise ValueError(f"Unsupported item_type: {item_type}")
 
-    initialize_database(database_path)
+    if not skip_initialize:
+        initialize_database(database_path)
     item_id = f"personal:{uuid.uuid4()}"
     source = personal_source_for_user(user_id)
     root = personal_image_root(artifact_root, user_id)
@@ -142,20 +151,23 @@ def create_photo_item(
             (item_id, filename, filename),
         )
 
-    try:
-        embedding = embed_personal_items(
-            database_path=database_path,
-            item_ids=[item_id],
-            model_dir=model_dir,
-            device=device,
-            batch_size=1,
-        )
-    except BaseException as error:
-        embedding = {
-            "status": "failed",
-            "error_type": type(error).__name__,
-            "error": str(error),
-        }
+    if skip_embedding:
+        embedding = {"status": "skipped"}
+    else:
+        try:
+            embedding = embed_personal_items(
+                database_path=database_path,
+                item_ids=[item_id],
+                model_dir=model_dir,
+                device=device,
+                batch_size=1,
+            )
+        except BaseException as error:
+            embedding = {
+                "status": "failed",
+                "error_type": type(error).__name__,
+                "error": str(error),
+            }
 
     with database_session(database_path) as connection:
         item_dict = _item_to_dict(connection, item_id)

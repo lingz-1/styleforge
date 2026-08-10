@@ -2,6 +2,7 @@
   <div>
     <el-page-header content="我的衣柜">
       <template #extra>
+        <el-button @click="openBatch">批量导入</el-button>
         <el-button type="primary" @click="openCreate">＋ 上传新衣物</el-button>
       </template>
     </el-page-header>
@@ -108,6 +109,108 @@
       </template>
     </el-dialog>
 
+    <!-- 批量导入 -->
+    <el-dialog
+      v-model="batchVisible"
+      title="批量导入衣物（AI 自动识别）"
+      width="640px"
+      @closed="stopPoll"
+    >
+      <template v-if="batchMode === 'select'">
+        <el-upload
+          drag
+          multiple
+          :limit="30"
+          :auto-upload="false"
+          accept="image/*"
+          :file-list="batchFileList"
+          :on-change="onBatchFile"
+          :on-remove="onBatchRemove"
+          :on-exceed="onBatchExceed"
+        >
+          <el-icon class="el-icon--upload"><upload-filled /></el-icon>
+          <div class="el-upload__text">拖拽多张图片到此处，或 <em>点击选择</em>（最多 30 张）</div>
+        </el-upload>
+        <el-form label-width="80px" class="mt">
+          <el-form-item label="人群">
+            <el-select v-model="batchGender">
+              <el-option label="女" value="women" />
+              <el-option label="男" value="men" />
+            </el-select>
+          </el-form-item>
+        </el-form>
+        <div class="mt-hint">
+          提交后 AI 在后台逐张识别，识别成功且可信的自动加入衣柜；失败项可在结果中手动补录。
+        </div>
+      </template>
+
+      <template v-else-if="batchMode === 'progress'">
+        <el-progress :percentage="batchPercent" :stroke-width="14" />
+        <div class="batch-status">
+          已识别 {{ batchState.done }}/{{ batchState.total }}
+          · 成功 {{ batchState.succeeded }}
+          · 失败 {{ batchState.failed }}
+          <template v-if="batchState.status === 'running'"> · 预计剩余 {{ fmtEta(batchState.eta_seconds) }}</template>
+        </div>
+      </template>
+
+      <template v-else>
+        <el-table :data="batchState.results" size="small" max-height="380">
+          <el-table-column prop="filename" label="文件" min-width="130" show-overflow-tooltip />
+          <el-table-column label="识别结果" min-width="210">
+            <template #default="{ row }">
+              <template v-if="row.status === 'succeeded'">
+                <el-tag size="small" type="success">已入库</el-tag>
+                <div class="result-detail">
+                  {{ vn(row.item_type) }} / {{ vn(row.subtype) || '未细分' }} · {{ vn(row.color) }}
+                  <template v-if="row.confidence"> · {{ vnPct(row.confidence) }}</template>
+                </div>
+              </template>
+              <template v-else>
+                <el-tag size="small" type="danger">{{ reasonText(row.reason) }}</el-tag>
+                <div v-if="row.attributes?.description" class="result-detail">
+                  {{ row.attributes.description }}
+                </div>
+              </template>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="120">
+            <template #default="{ row }">
+              <el-button
+                v-if="row.status === 'failed'"
+                size="small"
+                type="primary"
+                plain
+                @click="manualAdd(row)"
+              >
+                手动添加
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div class="mt">
+          <el-button @click="load">刷新衣柜</el-button>
+        </div>
+      </template>
+
+      <template #footer>
+        <template v-if="batchMode === 'select'">
+          <el-button @click="batchVisible = false">取消</el-button>
+          <el-button
+            type="primary"
+            :loading="batchSubmitting"
+            :disabled="!batchFiles.length"
+            @click="submitBatch"
+          >
+            开始批量识别
+          </el-button>
+        </template>
+        <template v-else>
+          <el-button @click="batchVisible = false">关闭</el-button>
+        </template>
+      </template>
+    </el-dialog>
+
     <!-- 编辑衣物 -->
     <el-dialog v-model="editVisible" title="编辑衣物信息" width="480px">
       <el-form :model="editForm" label-width="80px">
@@ -152,12 +255,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Loading, UploadFilled } from '@element-plus/icons-vue'
 import {
   getWardrobe, removeWardrobeItem, createPhotoItem, analyzeItem, getTaxonomy,
   updateItem, uploadItemImage, imageUrl,
+  startBatchRecognition, getBatchRecognition,
 } from '../services/api'
 import { getUserId, setUserId } from '../services/user'
 
@@ -391,6 +495,133 @@ async function submitCreate() {
   }
 }
 
+// --- 批量导入识别 ---
+const batchVisible = ref(false)
+const batchMode = ref('select') // select | progress | results
+const batchFiles = ref([]) // 原始 File[]，索引与后端 results 的 index 对应
+const batchGender = ref('women')
+const batchSubmitting = ref(false)
+const batchState = reactive({
+  batchId: '', total: 0, done: 0, succeeded: 0, failed: 0,
+  status: 'running', eta_seconds: 0, results: [],
+})
+const batchPollTimer = ref(null)
+const batchPolling = ref(false)
+const batchUserIdAtSubmit = ref('')
+
+const batchFileList = computed(() =>
+  batchFiles.value.map((file, index) => ({ name: file.name, uid: index, raw: file })),
+)
+const batchPercent = computed(() => {
+  if (!batchState.total) return 0
+  return Math.round((batchState.done * 100) / batchState.total)
+})
+
+const REASON_TEXT = {
+  low_confidence: '识别不可信', vision_unavailable: '识别服务不可用',
+  invalid_json: '识别结果异常', invalid_image: '图片无效',
+  create_failed: '入库失败', provider_unavailable: '识别服务不可用',
+  internal_error: '处理异常',
+}
+const reasonText = (reason) => REASON_TEXT[reason] || reason
+
+function fmtEta(eta) {
+  if (eta <= 1) return '即将完成'
+  if (eta < 60) return `${eta} 秒`
+  const minutes = Math.floor(eta / 60)
+  const seconds = eta % 60
+  return `${minutes} 分 ${seconds} 秒`
+}
+
+function openBatch() {
+  batchMode.value = 'select'
+  batchFiles.value = []
+  batchGender.value = 'women'
+  batchVisible.value = true
+}
+function onBatchFile(file) {
+  if (!batchFiles.value.some((f) => f.name === file.name)) {
+    batchFiles.value.push(file.raw || file)
+  }
+}
+function onBatchRemove(file) {
+  batchFiles.value = batchFiles.value.filter((f) => f.name !== file.name)
+}
+function onBatchExceed() {
+  ElMessage.warning('最多一次选择 30 张图片')
+}
+
+async function submitBatch() {
+  if (!batchFiles.value.length) {
+    ElMessage.warning('请先选择图片')
+    return
+  }
+  batchSubmitting.value = true
+  try {
+    const base64s = await Promise.all(batchFiles.value.map((f) => fileToBase64(f)))
+    const images = batchFiles.value.map((file, index) => ({
+      filename: file.name,
+      content_base64: base64s[index],
+    }))
+    const res = await startBatchRecognition(userId.value, images, batchGender.value)
+    batchUserIdAtSubmit.value = userId.value
+    Object.assign(batchState, res.data)
+    batchMode.value = 'progress'
+    startPoll()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  } finally {
+    batchSubmitting.value = false
+  }
+}
+
+function startPoll() {
+  stopPoll()
+  batchPollTimer.value = setInterval(pollBatch, 2000)
+}
+function stopPoll() {
+  if (batchPollTimer.value) {
+    clearInterval(batchPollTimer.value)
+    batchPollTimer.value = null
+  }
+}
+async function pollBatch() {
+  if (batchPolling.value) return
+  batchPolling.value = true
+  try {
+    const res = await getBatchRecognition(batchUserIdAtSubmit.value, batchState.batchId)
+    Object.assign(batchState, res.data)
+    if (res.data.status !== 'running') {
+      stopPoll()
+      batchMode.value = 'results'
+    }
+  } catch (e) {
+    // 网络抖动：跳过本次轮询，下次再试
+  } finally {
+    batchPolling.value = false
+  }
+}
+
+// 失败项手动补录：回填原图与识别属性到单图创建对话框
+function manualAdd(row) {
+  const file = batchFiles.value[row.index] || null
+  stopPoll()
+  batchVisible.value = false
+  openCreate()
+  createForm.file = file
+  createForm.attributes = row.attributes || null
+  if (row.attributes && (row.item_type || row.attributes.item_type)) {
+    if (row.item_type && !createForm.item_type) createForm.item_type = row.item_type
+    if (row.subtype && !createForm.subtype) createForm.subtype = row.subtype
+    if (row.color && !createForm.color) createForm.color = row.color
+    if (row.name && !createForm.name) createForm.name = row.name
+  } else if (file) {
+    onCreateFile(file) // 无属性：走单图自动识别预填
+  }
+}
+
+onBeforeUnmount(stopPoll)
+
 // --- 编辑 ---
 const editVisible = ref(false)
 const editForm = reactive({ item_id: '', name: '', item_type: '', color: '', gender: '' })
@@ -469,4 +700,6 @@ onMounted(async () => {
 }
 .attr-panel { margin-top: 8px; }
 .mt-hint { margin-top: 8px; font-size: 12px; color: #999; }
+.batch-status { margin-top: 12px; font-size: 13px; color: #555; }
+.result-detail { margin-top: 4px; font-size: 12px; color: #888; line-height: 1.4; }
 </style>
