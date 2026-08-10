@@ -38,9 +38,32 @@
             · 成功 {{ task.succeeded }} · 失败 {{ task.failed }}
             · 预计剩余 {{ fmtEta(task.eta_seconds) }}
           </div>
+          <div class="batch-picks">
+            <template v-for="r in task.results" :key="r.index">
+              <el-image
+                v-if="taskFileUrl(task, r)"
+                :src="taskFileUrl(task, r)"
+                fit="cover"
+                class="pick-img"
+              />
+            </template>
+          </div>
         </template>
         <template v-else>
           <el-table :data="task.results" size="small">
+            <el-table-column label="图片" width="72">
+              <template #default="{ row }">
+                <el-image
+                  v-if="taskFileUrl(task, row)"
+                  :src="taskFileUrl(task, row)"
+                  fit="cover"
+                  class="task-img"
+                  :preview-src-list="[taskFileUrl(task, row)]"
+                  preview-teleported
+                />
+                <span v-else class="no-img">无原图</span>
+              </template>
+            </el-table-column>
             <el-table-column prop="filename" label="文件" min-width="130" show-overflow-tooltip />
             <el-table-column label="识别结果" min-width="210">
               <template #default="{ row }">
@@ -182,7 +205,7 @@
       width="640px"
     >
       <el-upload
-        drag
+        list-type="picture-card"
         multiple
         :limit="30"
         :auto-upload="false"
@@ -192,8 +215,7 @@
         :on-remove="onBatchRemove"
         :on-exceed="onBatchExceed"
       >
-        <el-icon class="el-icon--upload"><upload-filled /></el-icon>
-        <div class="el-upload__text">拖拽多张图片到此处，或 <em>点击选择</em>（最多 30 张）</div>
+        <el-icon class="el-icon--upload"><plus /></el-icon>
       </el-upload>
       <el-form label-width="80px" class="mt">
         <el-form-item label="人群">
@@ -204,8 +226,9 @@
         </el-form-item>
       </el-form>
       <div class="mt-hint">
-        提交后关闭窗口即可，AI 在后台逐张识别，识别成功且可信的自动加入衣柜；
-        进度和结果请在衣柜顶部"批量识别任务"查看，失败项可手动补录。
+        点击选择或拖拽多张图片（最多 30 张，悬停缩略图可删除）。提交后关闭窗口即可，
+        AI 在后台逐张识别，识别成功且可信的自动加入衣柜；进度和结果请在衣柜顶部
+        "批量识别任务"查看，失败项可手动补录。
       </div>
       <template #footer>
         <el-button @click="batchVisible = false">取消</el-button>
@@ -266,7 +289,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Loading, UploadFilled } from '@element-plus/icons-vue'
+import { Loading, UploadFilled, Plus } from '@element-plus/icons-vue'
 import {
   getWardrobe, removeWardrobeItem, createPhotoItem, analyzeItem, getTaxonomy,
   updateItem, uploadItemImage, imageUrl,
@@ -517,9 +540,21 @@ const batchTasks = ref([])
 const batchPollTimer = ref(null)
 const batchPolling = ref(false)
 
+// 本地文件缩略图 URL（缓存到文件对象上，避免重复 createObjectURL）
+function previewUrl(file) {
+  if (!file) return ''
+  if (file.__preview) return file.__preview
+  return (file.__preview = URL.createObjectURL(file))
+}
 const batchFileList = computed(() =>
-  batchFiles.value.map((file, index) => ({ name: file.name, uid: index, raw: file })),
+  batchFiles.value.map((file, index) => ({
+    name: file.name, uid: index, raw: file, url: previewUrl(file),
+  })),
 )
+// 任务结果表格的图片列：优先取任务保留的原始文件，无则显示占位
+function taskFileUrl(task, row) {
+  return previewUrl(task._files && task._files[row.index])
+}
 
 const REASON_TEXT = {
   low_confidence: '识别不可信', vision_unavailable: '识别服务不可用',
@@ -645,7 +680,20 @@ function manualAdd(row, task) {
   }
 }
 
-onBeforeUnmount(stopBatchPolling)
+function revokeBatchUrls() {
+  for (const task of batchTasks.value) {
+    for (const file of task._files || []) {
+      if (file.__preview) {
+        URL.revokeObjectURL(file.__preview)
+        file.__preview = null
+      }
+    }
+  }
+}
+onBeforeUnmount(() => {
+  stopBatchPolling()
+  revokeBatchUrls()
+})
 
 // --- 编辑 ---
 const editVisible = ref(false)
@@ -732,4 +780,8 @@ onMounted(async () => {
 .batch-card-header { display: flex; align-items: center; gap: 10px; }
 .batch-title { font-weight: 600; }
 .batch-time { font-size: 12px; color: #999; margin-left: auto; }
+.task-img { width: 48px; height: 48px; border-radius: 4px; }
+.no-img { font-size: 12px; color: #bbb; }
+.batch-picks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.pick-img { width: 48px; height: 48px; border-radius: 4px; }
 </style>
