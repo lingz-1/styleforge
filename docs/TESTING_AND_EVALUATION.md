@@ -128,3 +128,12 @@ D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests evals
 前端验收包括 `apps/web` 的 `npm.cmd run build` 和小程序主推荐脚本的 `node --check`。小程序 WXML/WXSS 的开发者工具真机预览仍属于人工验收项。
 
 2026-08-10 严格三 Agent、Schema v8 与完成契约 v3.1 结果：`compileall` 通过、Ruff clean、Pytest 183 passed；覆盖 Agent 1 多事实候选汇总、v7→v8 数据保留迁移、合法澄清状态、Agent 2 不完整草稿修复、Agent 3 拒绝后的有限重做、缺口清单与 `missing_elements` 一致性，以及健康检查运行版本标识。Vue 生产构建成功，小程序脚本及配置 JSON 检查通过。唯一 warning 是 FastAPI `TestClient` 的第三方适配层弃用提示。
+
+## 8. 天气上下文验收
+
+- `tests/test_weather_tool.py`：地点解析、日期解析、逐日事实映射、湿度聚合、Provider 失败和默认地点，全部使用注入 Transport，禁止实时网络依赖。
+- `tests/test_workflow_llm.py::test_workflow_weather_context_is_shared_with_three_agents`：固定四次 LLM 响应和一次天气工具响应，验证同一 Agent 1 二次细化、Agent 2/3共享事实、工具只调用一次及输出 trace。
+- 普通请求回归必须仍为三次 LLM 调用，避免 Context Router 无条件增加成本。
+- 实时 Provider 烟测只验证外部连通性，不替代离线合同测试。
+
+2026-08-10 P5 Weather Tool 验收结果：`compileall`通过、全项目Ruff clean、Pytest 189 passed、Vue Vite生产构建成功。Pytest仅有FastAPI TestClient第三方弃用提示；Vite仅有现有大chunk和第三方PURE注释提示。

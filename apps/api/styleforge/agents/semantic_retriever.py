@@ -113,6 +113,7 @@ class SemanticRetrieverAgent:
         recent_memories: list[dict[str, Any]],
         llm: Any,
         weights: dict[str, float] | None = None,
+        environment_context: dict[str, Any] | None = None,
     ) -> tuple[Agent1Output, dict[str, Any], LlmCallDiagnostics | None]:
         if llm is None:
             output = deterministic_signature(task, user_query)
@@ -128,6 +129,7 @@ class SemanticRetrieverAgent:
                 wardrobe_summary=wardrobe_summary,
                 recent_memories=recent_memories,
                 weights=weights,
+                environment_context=environment_context,
             )
             payload, diagnostics = llm.chat_json(
                 system=system,

@@ -47,3 +47,14 @@ class WorkflowState(TypedDict, total=False):
     evaluation_weights: dict[str, float]
     composer_feedback: str
     retrieval_feedback: str
+    # External facts requested by Agent 1 and shared with all three agents.
+    context_requirements: dict[str, Any]
+    environment_context: dict[str, Any]
+    tool_calls: list[dict[str, Any]]
+    context_router_completed: bool
+    # V2.1 weather context: optional device location from the request, the
+    # user's default city/timezone, and the resolved (privacy-safe) contexts.
+    location_context: dict[str, Any]
+    environment_profile: dict[str, Any]
+    resolved_location_context: dict[str, Any]
+    resolved_time_context: dict[str, Any]

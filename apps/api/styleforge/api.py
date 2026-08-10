@@ -21,6 +21,7 @@ from styleforge.models.task import TaskExecutionInput
 from styleforge.orchestration.graph import MultiTaskGraph
 from styleforge.orchestration.task_router import TaskType
 from styleforge.repositories.database import database_session, initialize_database
+from styleforge.tools.weather.schemas import DeviceLocationContext
 from styleforge.repositories.dataset_source_repository import (
     get_source_image_root,
     list_dataset_sources,
@@ -52,6 +53,7 @@ class RecommendationRequest(BaseModel):
     user_id: str = Field(min_length=1, max_length=128)
     request: str = Field(min_length=1, max_length=2000)
     max_results: int = Field(default=3, ge=1, le=10)
+    location_context: DeviceLocationContext | None = None
 
 
 class TaskRoutingRequest(BaseModel):
@@ -213,6 +215,18 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "api_started_at": API_STARTED_AT,
         "extension_prompt_version": EXTENSION_PROMPT_VERSION,
+        "weather": {
+            "enabled": settings.weather_enabled,
+            "provider": settings.weather_provider,
+            "default_location_configured": bool(
+                settings.weather_default_location
+            ),
+            "location_max_age_seconds": settings.location_max_age_seconds,
+            "location_max_accuracy_m": settings.location_max_accuracy_m,
+            "reverse_geocode_configured": bool(
+                settings.reverse_geocode_endpoint
+            ),
+        },
         "database": str(settings.database_path),
         "catalog_items": catalog_count,
         "embedding_ready_items": ready_count,
@@ -249,6 +263,11 @@ def recommend(request: RecommendationRequest) -> dict[str, Any]:
             user_id=request.user_id,
             request=request.request,
             max_results=request.max_results,
+            location_context=(
+                request.location_context.model_dump(exclude_none=True)
+                if request.location_context is not None
+                else None
+            ),
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error

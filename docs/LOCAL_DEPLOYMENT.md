@@ -17,6 +17,15 @@
 
 后续命令统一使用完整解释器路径，不依赖 PowerShell 是否已激活 Conda 环境。
 
+从仓库根目录运行任何`python -m styleforge...`命令前，当前PowerShell窗口必须设置包目录：
+
+```powershell
+cd C:\Users\32369\Desktop\agent-p\style
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
+```
+
+Pytest会通过`pyproject.toml`自动加入该路径，但普通Python、Uvicorn和数据管线进程不会自动读取Pytest配置。
+
 ## 3. 必要环境变量
 
 每个新 PowerShell 窗口都需要设置图片目录：
@@ -29,6 +38,21 @@ Streamlit 窗口设置 API 地址：
 
 ```powershell
 $env:STYLEFORGE_API_URL="http://127.0.0.1:8000"
+```
+
+天气上下文默认启用 Open-Meteo。建议配置用户默认城市；请求显式地点优先：
+
+```powershell
+$env:STYLEFORGE_WEATHER_ENABLED="true"
+$env:STYLEFORGE_WEATHER_PROVIDER="open-meteo"
+$env:STYLEFORGE_DEFAULT_LOCATION="上海"
+$env:STYLEFORGE_WEATHER_TIMEOUT="10"
+```
+
+如果系统开了 HTTP 代理，本地 API 地址应绕过代理：
+
+```powershell
+$env:NO_PROXY="127.0.0.1,localhost,::1"
 ```
 
 ## 4. 演示衣柜（最新实现尚待回归）
@@ -51,7 +75,10 @@ D:\anaconda\envs\style\python.exe -m styleforge.pipelines.seed_balanced_wardrobe
 ```powershell
 cd C:\Users\32369\Desktop\agent-p\style
 $env:GARMENTS2LOOK_IMAGE_ROOT="E:\image.tar\image\images"
-D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app --host 127.0.0.1 --port 8000
+D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app `
+  --app-dir apps\api `
+  --host 127.0.0.1 `
+  --port 8000
 ```
 
 验证：
@@ -70,6 +97,8 @@ HTTP 200 之外，还应检查：
 - `embedding_manifest_available == true`
 - `index_manifest_available == true`
 - `image_root_configured == true`
+- `weather.enabled == true`
+- `weather.provider == "open-meteo"`
 
 索引缺失不会阻断小衣柜 NumPy 检索，但意味着全目录检索评估产物不完整；嵌入或图片根目录缺失会导致视觉降级或图片不可用。
 
@@ -79,8 +108,10 @@ HTTP 200 之外，还应检查：
 
 ```powershell
 cd C:\Users\32369\Desktop\agent-p\style
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
 $env:STYLEFORGE_API_URL="http://127.0.0.1:8000"
-D:\anaconda\envs\style\python.exe -m streamlit run styleforge\ui.py
+$env:GARMENTS2LOOK_IMAGE_ROOT="E:\image.tar\image\images"
+D:\anaconda\envs\style\python.exe -m streamlit run apps\api\styleforge\ui.py
 ```
 
 首次启动如出现 `Email:`，直接留空并按 Enter。随后访问 `http://localhost:8501`。
@@ -88,12 +119,17 @@ D:\anaconda\envs\style\python.exe -m streamlit run styleforge\ui.py
 ## 7. CLI 验证
 
 ```powershell
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
 D:\anaconda\envs\style\python.exe -m styleforge.workflow.graph `
   --user-id demo-user `
   --request "明天参加互联网公司面试，衬衫配半身裙和乐福鞋，不要红色，不要高跟鞋。"
 ```
 
 ## 8. 常见问题
+
+### `ModuleNotFoundError: No module named 'styleforge'`
+
+后端包位于`apps\api\styleforge`，仓库根目录本身不是包根目录。从仓库根目录启动 Uvicorn 时必须带`--app-dir apps\api`；运行`python -m styleforge...`形式的CLI前必须把`apps\api`写入`PYTHONPATH`。这不是重新安装依赖能够解决的问题。
 
 ### localhost 拒绝连接
 

@@ -47,9 +47,9 @@ D:\anaconda\envs\style\python.exe -m evals.runners.evaluate_task_routing
 | 4 | 更新项目状态 | 把结果、日期和失败修复写入`PROJECT_STATUS.md` |
 
 ```powershell
-D:\anaconda\envs\style\python.exe -m compileall -q styleforge tests
+D:\anaconda\envs\style\python.exe -m compileall -q apps\api\styleforge tests
 D:\anaconda\envs\style\python.exe -m pytest -q
-D:\anaconda\envs\style\python.exe -m ruff check styleforge tests
+D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests evals
 ```
 
 ## P0：完整订单表验收
@@ -59,6 +59,8 @@ D:\anaconda\envs\style\python.exe -m ruff check styleforge tests
 先使用唯一命名的独立数据库生成预览，不加`--commit-candidates`：
 
 ```powershell
+cd C:\Users\32369\Desktop\agent-p\style
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
 $previewStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_wardrobe_orders `
   --excel "E:\D_from_web\订单数据 (3).xlsx" `

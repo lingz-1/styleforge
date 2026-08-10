@@ -67,3 +67,69 @@ def save_evaluation_weights(
         ),
     )
     return normalized
+
+
+def get_environment_profile(
+    connection: sqlite3.Connection,
+    user_id: str,
+) -> dict[str, str]:
+    """Read the user's default city/timezone for weather location resolution."""
+    row = connection.execute(
+        "SELECT preference_json FROM user_preferences WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        return {}
+    try:
+        preferences = json.loads(row["preference_json"])
+        profile = preferences.get("environment_profile", {})
+    except (json.JSONDecodeError, AttributeError):
+        return {}
+    default_city = str(profile.get("default_city", "")).strip()
+    timezone = str(profile.get("timezone", "")).strip()
+    return {
+        "default_city": default_city,
+        "timezone": timezone,
+    }
+
+
+def save_environment_profile(
+    connection: sqlite3.Connection,
+    user_id: str,
+    *,
+    default_city: str,
+    timezone: str = "",
+) -> dict[str, str]:
+    if not user_id.strip():
+        raise ValueError("user_id cannot be empty")
+    default_city = default_city.strip()
+    timezone = timezone.strip()
+    row = connection.execute(
+        "SELECT preference_json FROM user_preferences WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    preferences: dict[str, Any] = {}
+    if row is not None:
+        try:
+            preferences = json.loads(row["preference_json"])
+        except json.JSONDecodeError:
+            preferences = {}
+    preferences["environment_profile"] = {
+        "default_city": default_city,
+        "timezone": timezone,
+    }
+    connection.execute(
+        """
+        INSERT INTO user_preferences(user_id, preference_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            preference_json = excluded.preference_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            user_id,
+            json.dumps(preferences, ensure_ascii=False, sort_keys=True),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    return {"default_city": default_city, "timezone": timezone}

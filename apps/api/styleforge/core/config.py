@@ -54,6 +54,13 @@ class Settings:
     deepseek_model: str = "deepseek-chat"
     deepseek_timeout: float = 60.0
     deepseek_max_retries: int = 2
+    weather_enabled: bool = True
+    weather_provider: str = "open-meteo"
+    weather_default_location: str = ""
+    weather_timeout: float = 10.0
+    location_max_age_seconds: int = 1800
+    location_max_accuracy_m: float = 5000.0
+    reverse_geocode_endpoint: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -69,6 +76,22 @@ class Settings:
             max_retries = int(os.getenv("DEEPSEEK_MAX_RETRIES", "2"))
         except ValueError:
             max_retries = 2
+        try:
+            weather_timeout = float(os.getenv("STYLEFORGE_WEATHER_TIMEOUT", "10"))
+        except ValueError:
+            weather_timeout = 10.0
+        try:
+            location_max_age = int(
+                os.getenv("STYLEFORGE_LOCATION_MAX_AGE_SECONDS", "1800")
+            )
+        except ValueError:
+            location_max_age = 1800
+        try:
+            location_max_accuracy = float(
+                os.getenv("STYLEFORGE_LOCATION_MAX_ACCURACY_M", "5000")
+            )
+        except ValueError:
+            location_max_accuracy = 5000.0
         return cls(
             metadata_path=Path(
                 os.getenv(
@@ -111,4 +134,19 @@ class Settings:
             deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip(),
             deepseek_timeout=timeout,
             deepseek_max_retries=max_retries,
+            weather_enabled=_optional_bool(
+                os.getenv("STYLEFORGE_WEATHER_ENABLED"), default=True
+            ),
+            weather_provider=os.getenv(
+                "STYLEFORGE_WEATHER_PROVIDER", "open-meteo"
+            ).strip(),
+            weather_default_location=os.getenv(
+                "STYLEFORGE_DEFAULT_LOCATION", ""
+            ).strip(),
+            weather_timeout=weather_timeout,
+            location_max_age_seconds=location_max_age,
+            location_max_accuracy_m=location_max_accuracy,
+            reverse_geocode_endpoint=os.getenv(
+                "STYLEFORGE_REVERSE_GEOCODE_ENDPOINT", ""
+            ).strip(),
         )

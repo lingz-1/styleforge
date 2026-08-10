@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from styleforge.llm.client import LlmInvalidJson, LlmSchemaViolation
+from styleforge.tools.weather.schemas import ContextRequirements
 
 PLAN_TYPES = ("core", "distinctive", "supporting")
 DECISIONS = ("accept", "recompose", "retrieve_more", "wardrobe_gap")
@@ -60,6 +61,13 @@ class Agent1Output(BaseModel):
     request_signature: RequestSignature
     retrieval_plans: list[RetrievalPlan]
     candidate_requirements: CandidateRequirements
+    context_requirements: ContextRequirements = Field(
+        default_factory=ContextRequirements
+    )
+    implicit_context_signals: list[str] = Field(default_factory=list, max_length=6)
+    context_criticality: Literal["required", "helpful", "not_needed"] = "not_needed"
+    uncertainties: list[str] = Field(default_factory=list, max_length=6)
+    default_policy_allowed: bool = False
 
     @model_validator(mode="after")
     def _exactly_three_plans(self) -> "Agent1Output":
@@ -77,6 +85,11 @@ class Agent1Output(BaseModel):
             "request_signature": self.request_signature.model_dump(),
             "retrieval_plans": [plan.model_dump() for plan in self.retrieval_plans],
             "candidate_requirements": self.candidate_requirements.to_dict(),
+            "context_requirements": self.context_requirements.model_dump(mode="json"),
+            "implicit_context_signals": list(self.implicit_context_signals),
+            "context_criticality": self.context_criticality,
+            "uncertainties": list(self.uncertainties),
+            "default_policy_allowed": self.default_policy_allowed,
         }
 
 
@@ -98,6 +111,44 @@ class RequestSpecificElement(BaseModel):
     role: str
 
 
+class EnvironmentAdjustment(BaseModel):
+    """A factual, grounded outfit change caused by weather/environment.
+
+    ``fact_refs`` must reference a real fact key from the environment context,
+    and ``wardrobe_item_ids`` must reference items inside this proposal.
+    """
+
+    fact_refs: list[str] = Field(default_factory=list)
+    impact: str = Field(default="", min_length=1)
+    action: str = Field(default="", min_length=1)
+    wardrobe_item_ids: list[str] = Field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "fact_refs": list(self.fact_refs),
+            "impact": self.impact,
+            "action": self.action,
+            "wardrobe_item_ids": list(self.wardrobe_item_ids),
+        }
+
+
+class CarryRecommendation(BaseModel):
+    """An external item to bring (umbrella, water, ...). Never a wardrobe item."""
+
+    name: str = Field(min_length=1, max_length=32)
+    reason: str = Field(default="", min_length=1, max_length=240)
+    fact_refs: list[str] = Field(default_factory=list)
+    category: Literal["external_carry_item"] = "external_carry_item"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "reason": self.reason,
+            "fact_refs": list(self.fact_refs),
+            "category": self.category,
+        }
+
+
 class OutfitProposal(BaseModel):
     outfit_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,32}$")
     composition_strategy: CompositionStrategy
@@ -105,6 +156,8 @@ class OutfitProposal(BaseModel):
     style_tag: str = ""
     reasoning: str = ""
     request_specific_elements: list[RequestSpecificElement] = Field(default_factory=list)
+    environment_adjustments: list[EnvironmentAdjustment] = Field(default_factory=list)
+    carry_recommendations: list[CarryRecommendation] = Field(default_factory=list)
 
     @field_validator("item_ids")
     @classmethod
@@ -121,6 +174,12 @@ class OutfitProposal(BaseModel):
             "style_tag": self.style_tag,
             "reasoning": self.reasoning,
             "request_specific_elements": [element.model_dump() for element in self.request_specific_elements],
+            "environment_adjustments": [
+                adjustment.to_dict() for adjustment in self.environment_adjustments
+            ],
+            "carry_recommendations": [
+                recommendation.to_dict() for recommendation in self.carry_recommendations
+            ],
         }
 
 
@@ -185,9 +244,22 @@ class WardrobeGapItem(BaseModel):
     desired_features: list[str] = Field(default_factory=list)
 
 
+class EnvironmentAssessment(BaseModel):
+    """Agent 3's review of weather/environment claims and carry advice."""
+
+    grounded: bool = True
+    coverage_complete: bool = True
+    unsupported_claims: list[str] = Field(default_factory=list)
+    missing_adjustments: list[str] = Field(default_factory=list)
+    carry_advice_grounded: bool = True
+
+
 class CriticOutput(BaseModel):
     outfit_assessment: OutfitAssessment
     explanation_assessment: ExplanationAssessment = Field(default_factory=ExplanationAssessment)
+    environment_assessment: EnvironmentAssessment = Field(
+        default_factory=EnvironmentAssessment
+    )
     alternatives: list[Alternative] = Field(default_factory=list)
     decision: Literal["accept", "recompose", "retrieve_more", "wardrobe_gap"]
     failure_source: Literal["", "composer", "candidate_pool", "wardrobe"] = ""
@@ -199,6 +271,7 @@ class CriticOutput(BaseModel):
         return {
             "outfit_assessment": self.outfit_assessment.to_dict(),
             "explanation_assessment": self.explanation_assessment.model_dump(),
+            "environment_assessment": self.environment_assessment.model_dump(),
             "alternatives": [alternative.model_dump() for alternative in self.alternatives],
             "decision": self.decision,
             "failure_source": self.failure_source,

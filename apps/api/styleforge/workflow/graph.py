@@ -44,6 +44,7 @@ from styleforge.core.schemas import (
 from styleforge.core.scoring import score_outfit
 from styleforge.core.slots import base_slot
 from styleforge.llm.client import llm_client_from_settings
+from styleforge.orchestration.context_router import ContextRouter, register_weather_tool
 from styleforge.repositories.catalog_repository import fetch_items_by_ids
 from styleforge.repositories.database import database_session, initialize_database
 from styleforge.repositories.personal_embedding_repository import PersonalEmbeddingStore
@@ -65,6 +66,8 @@ from styleforge.services.semantic_retrieval import (
 from styleforge.tools.basic_validation import proposal_to_candidate, validate_proposals
 from styleforge.tools.candidate_generation import generate_candidates
 from styleforge.tools.candidate_pool import PoolOutcome, build_candidate_pool, pool_manifest
+from styleforge.tools.registry import ToolRegistry
+from styleforge.tools.weather import OpenMeteoProvider, WeatherTool
 from styleforge.vision.fashion_clip import FashionClipEncoder
 from styleforge.workflow.state import WorkflowState
 
@@ -240,6 +243,13 @@ class WorkflowOutput:
     critic: dict[str, Any] | None = None
     decision: str = ""
     best_effort: dict[str, Any] | None = None
+    context_requirements: dict[str, Any] | None = None
+    environment_context: dict[str, Any] | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    location_context: dict[str, Any] | None = None
+    environment_profile: dict[str, Any] | None = None
+    resolved_location_context: dict[str, Any] | None = None
+    resolved_time_context: dict[str, Any] | None = None
 
 
 class StyleForgeWorkflow:
@@ -255,6 +265,7 @@ class StyleForgeWorkflow:
         llm_client: Any | None = None,
         settings: Settings | None = None,
         llm_verbose: bool = False,
+        weather_tool: Any | None = None,
     ) -> None:
         self.database_path = database_path.resolve()
         self.embedding_dir = embedding_dir.resolve()
@@ -277,6 +288,22 @@ class StyleForgeWorkflow:
         self.semantic_retriever = SemanticRetrieverAgent()
         self.composer = ComposerAgent()
         self.critic = CriticAgent()
+        self.tool_registry = ToolRegistry()
+        if (
+            weather_tool is None
+            and settings.weather_enabled
+            and settings.weather_provider == "open-meteo"
+        ):
+            weather_tool = WeatherTool(
+                OpenMeteoProvider(timeout=settings.weather_timeout)
+            )
+        self.weather_tool = weather_tool
+        if weather_tool is not None:
+            register_weather_tool(self.tool_registry, weather_tool)
+        self.context_router = ContextRouter(
+            self.tool_registry,
+            default_location=settings.weather_default_location,
+        )
         self._encoder: FashionClipEncoder | None = None
         self._vector_store: CatalogVectorStore | None = None
         self._encoder_error: str | None = None
@@ -297,7 +324,21 @@ class StyleForgeWorkflow:
         return "semantic_retriever" if state.get("llm_enabled") else "slot_retriever"
 
     def _route_after_retriever(self, state: WorkflowState) -> str:
-        return "slot_retriever" if state.get("retriever_degraded") else "multi_query_retrieval"
+        if state.get("retriever_degraded"):
+            return "slot_retriever"
+        weather = state.get("context_requirements", {}).get("weather", {})
+        if weather.get("needed") and not state.get("context_router_completed"):
+            return "context_router"
+        return "multi_query_retrieval"
+
+    @staticmethod
+    def _route_after_context(state: WorkflowState) -> str:
+        weather = state.get("environment_context", {}).get("weather") or {}
+        return (
+            "semantic_retriever"
+            if weather.get("status") == "available"
+            else "multi_query_retrieval"
+        )
 
     def _build_graph(self):
         builder = StateGraph(WorkflowState)
@@ -308,6 +349,7 @@ class StyleForgeWorkflow:
         builder.add_node("reviewer_agent", self._reviewer_node)
         builder.add_node("persist_result", self._persist_node)
         builder.add_node("semantic_retriever", self._semantic_retriever_node)
+        builder.add_node("context_router", self._context_router_node)
         builder.add_node("multi_query_retrieval", self._multi_query_retrieval_node)
         builder.add_node("candidate_pool", self._candidate_pool_node)
         builder.add_node("composer", self._composer_node)
@@ -324,7 +366,19 @@ class StyleForgeWorkflow:
         builder.add_conditional_edges(
             "semantic_retriever",
             self._route_after_retriever,
-            {"multi_query_retrieval": "multi_query_retrieval", "slot_retriever": "slot_retriever"},
+            {
+                "context_router": "context_router",
+                "multi_query_retrieval": "multi_query_retrieval",
+                "slot_retriever": "slot_retriever",
+            },
+        )
+        builder.add_conditional_edges(
+            "context_router",
+            self._route_after_context,
+            {
+                "semantic_retriever": "semantic_retriever",
+                "multi_query_retrieval": "multi_query_retrieval",
+            },
         )
         builder.add_edge("multi_query_retrieval", "candidate_pool")
         builder.add_edge("candidate_pool", "composer")
@@ -533,6 +587,7 @@ class StyleForgeWorkflow:
                 recent_memories=state.get("recent_memories", []),
                 llm=self._llm_client,
                 weights=state.get("evaluation_weights"),
+                environment_context=state.get("environment_context") or None,
             )
         except BaseException as error:
             output, info, _ = self.semantic_retriever.run(
@@ -542,12 +597,20 @@ class StyleForgeWorkflow:
                 recent_memories=state.get("recent_memories", []),
                 llm=None,
                 weights=state.get("evaluation_weights"),
+                environment_context=state.get("environment_context") or None,
             )
             info["reason"] = f"{type(error).__name__}: {error}"
+        output_dict = output.to_dict()
+        context_requirements = output_dict["context_requirements"]
+        if state.get("context_router_completed"):
+            context_requirements = state.get(
+                "context_requirements", context_requirements
+            )
         return {
-            "request_signature": output.to_dict()["request_signature"],
-            "retrieval_plans": output.to_dict()["retrieval_plans"],
-            "candidate_requirements": output.to_dict()["candidate_requirements"],
+            "request_signature": output_dict["request_signature"],
+            "retrieval_plans": output_dict["retrieval_plans"],
+            "candidate_requirements": output_dict["candidate_requirements"],
+            "context_requirements": context_requirements,
             "retriever_degraded": info["degraded"],
             "degraded_reason": info.get("reason", ""),
             "llm_call_count": state.get("llm_call_count", 0) + (0 if info["degraded"] else 1),
@@ -557,6 +620,41 @@ class StyleForgeWorkflow:
                 "semantic_retriever",
                 backend=self.semantic_retriever.backend,
                 degraded=info["degraded"],
+                contextualized=bool(state.get("environment_context")),
+            ),
+        }
+
+    def _context_router_node(self, state: WorkflowState) -> dict[str, Any]:
+        try:
+            environment, tool_calls = self.context_router.resolve(
+                state.get("context_requirements", {}),
+                location_context=state.get("location_context"),
+                environment_profile=state.get("environment_profile"),
+            )
+        except Exception as error:
+            environment = {
+                "weather": {
+                    "status": "unavailable",
+                    "source": "open-meteo",
+                    "requested_location": "",
+                    "requested_date": "",
+                    "error_code": "context_router_error",
+                    "error_message": f"{type(error).__name__}: {error}",
+                }
+            }
+            tool_calls = []
+        weather = environment.get("weather") or {}
+        return {
+            "environment_context": environment,
+            "resolved_location_context": environment.get("resolved_location_context"),
+            "resolved_time_context": environment.get("resolved_time_context"),
+            "tool_calls": tool_calls,
+            "context_router_completed": True,
+            "status": "context_ready",
+            "trace": _trace(
+                "context_router",
+                weather_status=weather.get("status", "not_requested"),
+                tool_call_count=len(tool_calls),
             ),
         }
 
@@ -668,6 +766,7 @@ class StyleForgeWorkflow:
                 pool_items=pool_items,
                 pool_scores=pool_scores,
                 weights=state.get("evaluation_weights"),
+                environment_context=state.get("environment_context") or None,
             )
         except BaseException as error:
             proposals, info, _ = self.composer.run(
@@ -681,6 +780,7 @@ class StyleForgeWorkflow:
                 pool_items=pool_items,
                 pool_scores=pool_scores,
                 weights=state.get("evaluation_weights"),
+                environment_context=state.get("environment_context") or None,
             )
             info["reason"] = f"{type(error).__name__}: {error}"
         proposal_dicts = [proposal.to_dict() for proposal in proposals]
@@ -732,6 +832,7 @@ class StyleForgeWorkflow:
                 task=state["task"],
                 wardrobe_ids=set(state.get("wardrobe_item_ids", [])),
                 weights=state.get("evaluation_weights"),
+                environment_context=state.get("environment_context") or None,
             )
         except BaseException as error:
             critic_output = deterministic_critic(
@@ -873,6 +974,9 @@ class StyleForgeWorkflow:
             "request_signature": state.get("request_signature"),
             "retrieval_plans": state.get("retrieval_plans"),
             "candidate_requirements": state.get("candidate_requirements"),
+            "context_requirements": state.get("context_requirements"),
+            "environment_context": state.get("environment_context"),
+            "tool_calls": state.get("tool_calls", []),
             "pool": {
                 "item_ids": state.get("pool_item_ids"),
                 "scores": state.get("pool_scores"),
@@ -971,12 +1075,22 @@ class StyleForgeWorkflow:
 
             return dict(DEFAULT_EVALUATION_WEIGHTS)
 
+    def _load_environment_profile(self, user_id: str) -> dict[str, str]:
+        try:
+            from styleforge.repositories.user_preferences_repository import get_environment_profile
+
+            with database_session(self.database_path) as connection:
+                return get_environment_profile(connection, user_id)
+        except BaseException:
+            return {"default_city": "", "timezone": ""}
+
     def recommend(
         self,
         *,
         user_id: str,
         request: str,
         max_results: int = 3,
+        location_context: dict[str, Any] | None = None,
     ) -> WorkflowOutput:
         initial: WorkflowState = {
             "user_id": user_id,
@@ -991,6 +1105,11 @@ class StyleForgeWorkflow:
             "recent_memories": self._load_recent_memories(user_id),
             "evaluation_weights": self._load_evaluation_weights(user_id),
             "retriever_degraded": False,
+            "context_router_completed": False,
+            "environment_context": {},
+            "tool_calls": [],
+            "location_context": location_context,
+            "environment_profile": self._load_environment_profile(user_id),
         }
         try:
             final = self.graph.invoke(initial)
@@ -1028,6 +1147,13 @@ class StyleForgeWorkflow:
             critic=final.get("critic_output"),
             decision=final.get("decision", ""),
             best_effort=final.get("best_effort"),
+            context_requirements=final.get("context_requirements"),
+            environment_context=final.get("environment_context"),
+            tool_calls=final.get("tool_calls", []),
+            location_context=final.get("location_context"),
+            environment_profile=final.get("environment_profile"),
+            resolved_location_context=final.get("resolved_location_context"),
+            resolved_time_context=final.get("resolved_time_context"),
         )
 
     def _build_pool_payload(self, final: WorkflowState) -> dict[str, Any] | None:
@@ -1061,11 +1187,13 @@ class StyleForgeWorkflow:
         user_id: str,
         request: str,
         max_results: int = 3,
+        location_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         output = self.recommend(
             user_id=user_id,
             request=request,
             max_results=max_results,
+            location_context=location_context,
         )
         presented_result = present_result(self.database_path, output.result)
         payload: dict[str, Any] = {
@@ -1103,6 +1231,11 @@ class StyleForgeWorkflow:
                     "critic": output.critic,
                     "decision": output.decision,
                     "best_effort": output.best_effort,
+                    "context_requirements": output.context_requirements,
+                    "environment_context": output.environment_context,
+                    "tool_calls": output.tool_calls,
+                    "resolved_location_context": output.resolved_location_context,
+                    "resolved_time_context": output.resolved_time_context,
                 }
             )
         if self.llm_verbose:

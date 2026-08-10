@@ -71,6 +71,8 @@ def test_execute_and_read_extended_task_over_http(
         assert health.status_code == 200
         assert health.json()["extension_prompt_version"] == "extension-three-agent-v3.1"
         assert health.json()["api_started_at"]
+        assert health.json()["weather"]["provider"] == "open-meteo"
+        assert health.json()["weather"]["enabled"] is True
 
         response = client.post(
             "/tasks/execute",

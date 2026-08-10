@@ -111,6 +111,8 @@ D:\anaconda\envs\style\python.exe -m pip install "openpyxl>=3.1,<4" `
 默认命令只生成预览，不提交、不嵌入。每次验收使用新的时间戳数据库，避免复用旧批次：
 
 ```powershell
+cd C:\Users\32369\Desktop\agent-p\style
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
 $previewStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_wardrobe_orders `
   --excel "E:\D_from_web\订单数据 (3).xlsx" `

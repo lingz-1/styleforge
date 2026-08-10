@@ -145,8 +145,14 @@ class MultiTaskWorkflow:
             recommendation = recommend_for_user(self.database_path, parsed)
             result = present_result(self.database_path, recommendation)
             status = recommendation.status
+        context_pack = state["context_pack"].model_copy(deep=True)
+        if isinstance(result, dict):
+            environment = result.get("environment_context") or {}
+            if isinstance(environment, dict):
+                context_pack.environment_context.weather = environment.get("weather")
         return {
             "result": result,
+            "context_pack": context_pack,
             "status": status,
             "trace": _trace(state, "recommendation_runner", status=status),
         }

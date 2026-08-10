@@ -20,6 +20,40 @@ from tests.helpers import make_item
 KNOWLEDGE_ROOT = Path("knowledge")
 
 
+def test_recommendation_weather_is_copied_into_shared_context_pack(
+    tmp_path: Path,
+) -> None:
+    database_path = _seed_database(tmp_path)
+    weather = {
+        "status": "available",
+        "source": "open-meteo",
+        "requested_location": "上海",
+        "forecast_date": "2026-08-11",
+        "temperature_min_c": 25,
+        "temperature_max_c": 32,
+    }
+    workflow = MultiTaskWorkflow(
+        database_path=database_path,
+        knowledge_root=KNOWLEDGE_ROOT,
+        llm_client=None,
+        recommendation_runner=lambda **_: {
+            "structured_result": {"status": "completed", "recommendations": []},
+            "environment_context": {"weather": weather},
+        },
+    )
+
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="明天在上海参加户外活动，帮我推荐穿搭",
+            requested_task_type=TaskType.OUTFIT_RECOMMEND,
+        )
+    )
+
+    assert payload["context_pack"]["environment_context"]["weather"] == weather
+    assert payload["result"]["environment_context"]["weather"] == weather
+
+
 def _seed_database(tmp_path: Path, user_id: str = "u") -> Path:
     database_path = tmp_path / "styleforge.db"
     initialize_database(database_path)

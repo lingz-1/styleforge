@@ -26,7 +26,7 @@ flowchart TD
     O --> DB["SQLite 运行记录"]
 ```
 
-v3.3 在主推荐链路之前新增独立 `Task Router`。它是确定性系统能力，不是第四个 Agent。六类任务现在共享 `TaskExecutionInput`、`ContextPack` 和 `task_runs` 持久化契约；标准推荐复用原工作流，五类扩展任务由隔离的确定性服务执行。路由模式与执行模式分离：`/tasks/route` 只分类，`/tasks/execute` 才运行业务。
+v3.3 在主推荐链路之前新增独立 `Task Router`。它是系统能力，不是第四个 Agent。六类任务现在共享 `TaskExecutionInput`、`ContextPack` 和 `task_runs` 持久化契约；标准推荐复用原工作流，五类扩展任务也统一由 SemanticRetriever / Composer / Critic 三个主 Agent 执行。路由模式与执行模式分离：`/tasks/route` 只分类，`/tasks/execute` 才运行业务。
 
 ```mermaid
 flowchart LR
@@ -75,6 +75,14 @@ flowchart LR
 - 复核 `hard_valid`、衣柜归属和槽位完整性。
 - 不能修改分数、商品 ID 或绕过硬约束。
 - 返回接受或无解说明。
+
+### Context Router 与 Weather Tool
+
+- Agent 1 输出结构化 `context_requirements.weather`，程序只执行经过 Schema 校验的参数。
+- Context Router、Tool Registry 和 Open-Meteo Provider 是共享能力，不新增 Agent，也不直接生成穿搭建议。
+- 天气成功时，同一个 Agent 1 基于事实细化检索；Agent 2 组合，Agent 3 审校实穿性。
+- 事实写入 Context Pack、工作流输出、trace 与持久化明细。详细契约见[天气上下文工具](WEATHER_CONTEXT.md)。
+- 当前实现是进程内 typed Tool；尚未实现 MCP Client/Server 协议，因此不能对外表述为 Weather MCP。
 
 ## 4. 约束层次（子类和多配饰字段尚待回归）
 
@@ -146,5 +154,6 @@ TaskSpec
 | 五类扩展任一 Agent 不可用/超时/JSON 非法 | 不生成降级结果，任务记录为 `failed` |
 | 本地知识未覆盖 | 作为证据限制交给三 Agent 判断，不用模板冒充结论 |
 | 新品兼容性分析 | 新品只作为瞬态候选，不写入目录或用户衣橱 |
+| Weather Provider 不可用 | 写入 `environment_context.weather.status=unavailable`，不生成天气主张，主推荐继续 |
 
 > 上表中 FashionCLIP/规则候选降级只适用于标准穿搭推荐。五类扩展任务统一使用严格三 Agent 链，没有确定性结果降级。

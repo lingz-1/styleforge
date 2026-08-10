@@ -20,8 +20,9 @@ StyleForge 是一个本地优先的个人衣柜多 Agent 穿搭系统。用户�
 - Streamlit：个人衣柜和穿搭推荐演示界面。
 - 订单导入：Excel 脱敏预览、收货状态硬门槛、可选售后字段过滤、文件级幂等、人工确认和个人增量嵌入（回归与一次性数据库验收已通过，待真实提交）。
 - Mytheresa：62,457 件多受众商品、328,754 个图片引用全部存在，类别映射遗漏为 0；尚未导入主库。
-- 语义驱动三 Agent（v3.2.1）：可选接入 DeepSeek，Agent 1 语义检索（request_signature + 多查询加权检索 + Top-50 候选池）、Agent 2 搭配组合、Agent 3 评审判定（五维盲评 + accept/recompose/retrieve_more/wardrobe_gap 四决策分支）。已用真实 DeepSeek API 对 8 类代表性请求完成端到端验收（全部 accept、0 回退、推荐 100% 衣柜归属）；无 API Key 时自动回退确定性链路。
+- 语义驱动三 Agent（v3.2.1）：可选接入 DeepSeek，Agent 1 语义检索（request_signature + 多查询加权检索 + Top-50 候选池）、Agent 2 搭配组合、Agent 3 评审判定（五维盲评 + accept/recompose/retrieve_more/wardrobe_gap 四决策分支）。2026-08-06真实API验收的8类请求全部accept、推荐100%衣柜归属；其中7类无回退，“高考”请求的Critic发生一次瞬时API失败并按标准推荐策略降级。
 - v3.3 六任务执行链（已实现并定向验证）：Task Router 在三个 Agent 之前将请求路由为穿搭推荐、局部修改、风格知识、单品知识、衣橱兼容性或衣橱缺口；`POST /tasks/execute` 执行对应子图，统一使用 Context Pack，并把结果、证据和轨迹持久化到 `task_runs`。Web 的“智能造型”和小程序的“造型”页已接入五类扩展业务；输入输出见[扩展任务业务与 API](docs/EXTENDED_TASKS.md)。
+- P5 天气上下文：Agent 1 按请求决定是否需要天气，Context Router 通过 typed Open-Meteo Tool 获取事实，再把同一事实交给三个主 Agent；Weather Tool 不生成穿搭建议，当前实现不是 MCP Server。契约见[天气上下文工具](docs/WEATHER_CONTEXT.md)。
 - P2.5 路由评估切片（已验证）：`evals/cases/task_routing.json` 固化 42 条中英文用例，六类各 7 条；基线准确率 100%，六类逐类准确率均为 100%，失败样本 0。该指标只评价固定集任务路由，不代表穿搭质量。
 
 ## 职责边界
@@ -34,7 +35,7 @@ FashionCLIP 负责将图片和文本映射到同一个向量空间，用于理�
 - Stylist Agent：只从合法候选中排序和选择差异化结果。
 - Reviewer Agent：复核衣柜归属、槽位完整性和硬约束，不得覆盖规则结果。
 
-当前三个 Agent 使用可离线复现的确定性后端，接口已经独立，后续可以替换为结构化输出 LLM。系统没有 API Key 时仍可完整演示。
+系统包含两套边界不同的链路：标准推荐可在无API Key时使用Planner/Stylist/Reviewer确定性链，配置DeepSeek后使用SemanticRetriever/Composer/Critic语义链；五类扩展业务只允许SemanticRetriever/Composer/Critic严格三Agent执行，模型或Schema失败时记录`failed`，不生成确定性业务结果。
 
 ## 语义驱动三 Agent（可选，DeepSeek）
 
@@ -52,13 +53,15 @@ $env:DEEPSEEK_MODEL="deepseek-chat"
 - Agent 3 评审判定：单次调用双阶段协议（先盲评单品数据，再核对解释），输出五维评分和四决策分支。
 - 回退总次数 ≤ 1，LLM 调用次数 accept=3 / recompose=5 / retrieve_more=6。
 - 跨请求记忆：持久化最近 5 次 `request_signature` 和结构签名，只做软新颖惩罚。
-- 结构签名由品类结构、颜色家族、风格标签和层数生成（`styleforge/core/structure_signature.py`）。
+- 结构签名由品类结构、颜色家族、风格标签和层数生成（`apps/api/styleforge/core/structure_signature.py`）。
 
 LLM 不可用、JSON 解析失败或候选池为空时，对应 Agent 降级到确定性实现，并记录 `degraded_reason`；语义检索器降级时整体回退确定性链路。所有语义输出（request_signature、检索计划、候选池、方案、评审与决策）写入 `styling_runs.semantic_detail_json` 供离线评估。
 
-演示衣柜可使用 `mixed-large` 配置生成约 200 件单品，均衡覆盖通勤正式、晚宴、极简、休闲、运动、浪漫、街头和复古风格：
+演示衣柜可使用`mixed-large`配置按当前配额最多选择204件单品，均衡覆盖通勤正式、晚宴、极简、休闲、运动、浪漫、街头和复古风格。它是可重建profile，不等同于2026-08-09主数据库的2058件默认快照：
 
 ```powershell
+cd C:\Users\32369\Desktop\agent-p\style
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
 D:\anaconda\envs\style\python.exe -m styleforge.pipelines.seed_balanced_wardrobe `
   --user-id demo-user --profile mixed-large --replace
 ```
@@ -66,7 +69,7 @@ D:\anaconda\envs\style\python.exe -m styleforge.pipelines.seed_balanced_wardrobe
 ## 目录
 
 ```text
-styleforge/
+apps/api/styleforge/
   agents/                # Planner / Stylist / Reviewer
   evaluation/            # 数据和检索质量评估
   pipelines/             # 导入、审计、嵌入、FAISS 构建
@@ -87,9 +90,10 @@ data/                     # SQLite 数据库（不提交 Git）
 D:\anaconda\envs\style\python.exe
 ```
 
-先在两个 PowerShell 窗口都设置图片目录：
+先在两个 PowerShell 窗口都设置后端包路径和图片目录：
 
 ```powershell
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
 $env:GARMENTS2LOOK_IMAGE_ROOT="E:\image.tar\image\images"
 ```
 
@@ -97,15 +101,19 @@ $env:GARMENTS2LOOK_IMAGE_ROOT="E:\image.tar\image\images"
 
 ```powershell
 cd C:\Users\32369\Desktop\agent-p\style
-D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app --host 127.0.0.1 --port 8000
+D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app `
+  --app-dir apps\api `
+  --host 127.0.0.1 `
+  --port 8000
 ```
 
 另一个窗口启动演示界面：
 
 ```powershell
 cd C:\Users\32369\Desktop\agent-p\style
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
 $env:GARMENTS2LOOK_IMAGE_ROOT="E:\image.tar\image\images"
-D:\anaconda\envs\style\python.exe -m streamlit run styleforge\ui.py
+D:\anaconda\envs\style\python.exe -m streamlit run apps\api\styleforge\ui.py
 ```
 
 浏览器打开 `http://localhost:8501`，API 文档位于 `http://127.0.0.1:8000/docs`。
@@ -114,6 +122,7 @@ D:\anaconda\envs\style\python.exe -m streamlit run styleforge\ui.py
 
 ```powershell
 cd C:\Users\32369\Desktop\agent-p\style
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
 D:\anaconda\envs\style\python.exe -m styleforge.workflow.graph `
   --user-id demo-user `
   --request "明天参加互联网公司的面试，希望正式但不要太老气，不穿红色。"
@@ -146,5 +155,5 @@ D:\anaconda\envs\style\python.exe -m pip install "pytest>=8" "ruff>=0.6" `
 
 ```powershell
 D:\anaconda\envs\style\python.exe -m pytest -q
-D:\anaconda\envs\style\python.exe -m ruff check styleforge tests
+D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests evals
 ```

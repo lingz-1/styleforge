@@ -14,6 +14,13 @@
 
 运行账户必须能只读访问上述 E 盘 JSON/图片目录，并能写入项目的 `data` 与 `artifacts`。元数据读取器要求 UTF-8、顶层 JSON object、以商品 ID 为 key；当前文件尚未记录独立 SHA-256，发布复现实验前需要补充。元数据审计/导入依赖标准库即可；API 和全量嵌入还分别需要项目的 API、视觉和 CUDA 依赖，具体环境见 [本地部署](LOCAL_DEPLOYMENT.md)。
 
+本文所有`python -m styleforge...`命令都从仓库根目录执行。每个新PowerShell窗口先设置后端包目录：
+
+```powershell
+cd C:\Users\32369\Desktop\agent-p\style
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
+```
+
 项目只在 SQLite 中保存商品元数据、相对路径和数据源对应的外部根目录。
 
 导入、审计和嵌入代码会拒绝把数据库、报告或嵌入输出目录设置到外部图片根目录之下。程序对原图只使用存在性检查或只读图片打开操作。如果要求操作系统级绝对保证，还应使用只有读取权限的专用 Windows 账户运行；不要仅依赖文件夹“只读”属性，因为该属性不能可靠地禁止程序写入。
@@ -74,9 +81,9 @@
 ### 5.1 静态和单元测试
 
 ```powershell
-D:\anaconda\envs\style\python.exe -m compileall -q styleforge tests
+D:\anaconda\envs\style\python.exe -m compileall -q apps\api\styleforge tests
 D:\anaconda\envs\style\python.exe -m pytest -q
-D:\anaconda\envs\style\python.exe -m ruff check styleforge tests
+D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests evals
 ```
 
 这些命令不会读取或修改 170GB 图片数据。
@@ -231,6 +238,7 @@ $drillDb = "C:\Users\32369\Desktop\agent-p\style\data\mytheresa-drill-实际时�
 $env:STYLEFORGE_DATABASE_PATH = $drillDb
 $env:GARMENTS2LOOK_IMAGE_ROOT = "E:\image.tar\image\images"
 D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app `
+  --app-dir apps\api `
   --host 127.0.0.1 --port 8000
 ```
 
@@ -290,6 +298,7 @@ Polyvore 尚未重新注册到 `dataset_sources` 时，继续保留兼容环境�
 $env:GARMENTS2LOOK_IMAGE_ROOT="E:\image.tar\image\images"
 $env:STYLEFORGE_DATABASE_PATH="C:\Users\32369\Desktop\agent-p\style\data\styleforge.db"
 D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app `
+  --app-dir apps\api `
   --host 127.0.0.1 --port 8000
 ```
 

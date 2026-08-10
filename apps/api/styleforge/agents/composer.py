@@ -20,7 +20,13 @@ from styleforge.llm.extension_prompts import (
 )
 from styleforge.llm.client import LlmCallDiagnostics, LlmInvalidJson, LlmSchemaViolation, LlmUnavailable
 from styleforge.llm.prompts import PROMPT_VERSION, build_agent2_prompt
-from styleforge.llm.schema import Agent2Output, CompositionStrategy, OutfitProposal, parse_llm_json
+from styleforge.llm.schema import (
+    Agent2Output,
+    CompositionStrategy,
+    EnvironmentAdjustment,
+    OutfitProposal,
+    parse_llm_json,
+)
 from styleforge.models.agent_tasks import Agent1TaskOutput, Agent2TaskOutput
 from styleforge.models.context import ContextPack
 from styleforge.models.task_results import validate_task_result
@@ -41,6 +47,31 @@ def sanitize_pool_ids(
 ) -> list[OutfitProposal]:
     """Drop proposals that reference any item outside the candidate pool."""
     return [proposal for proposal in proposals if set(proposal.item_ids) <= pool_ids]
+
+
+def sanitize_environment_fields(
+    proposal: OutfitProposal,
+) -> tuple[OutfitProposal, int]:
+    """Drop ungrounded environment adjustments from a single proposal.
+
+    An adjustment is kept only when it has at least one fact reference and
+    every referenced wardrobe item actually appears in the proposal's
+    ``item_ids``. Returns ``(sanitized_proposal, dropped_count)``.
+    """
+    item_set = set(proposal.item_ids)
+    kept: list[EnvironmentAdjustment] = []
+    dropped = 0
+    for adjustment in proposal.environment_adjustments:
+        if not adjustment.fact_refs:
+            dropped += 1
+            continue
+        if not set(adjustment.wardrobe_item_ids) <= item_set:
+            dropped += 1
+            continue
+        kept.append(adjustment)
+    if dropped:
+        proposal = proposal.model_copy(update={"environment_adjustments": kept})
+    return proposal, dropped
 
 
 def deterministic_composition(
@@ -150,6 +181,7 @@ class ComposerAgent:
         pool_items: list[CatalogItem] | None = None,
         pool_scores: dict[str, float] | None = None,
         weights: dict[str, float] | None = None,
+        environment_context: dict[str, Any] | None = None,
     ) -> tuple[list[OutfitProposal], dict[str, Any], LlmCallDiagnostics | None]:
         if llm is None:
             return self._fallback(
@@ -165,6 +197,7 @@ class ComposerAgent:
                 pool_manifest=pool_manifest,
                 recent_structure_signatures=recent_structure_signatures,
                 weights=weights,
+                environment_context=environment_context,
             )
             payload, diagnostics = llm.chat_json(
                 system=system,
@@ -175,11 +208,19 @@ class ComposerAgent:
             proposals = sanitize_pool_ids(output.outfits, pool_ids)
             if not proposals:
                 raise LlmInvalidJson("no proposal survived the pool-id check")
+            sanitized_proposals: list[OutfitProposal] = []
+            environment_dropped = 0
+            for proposal in proposals:
+                cleaned, dropped = sanitize_environment_fields(proposal)
+                sanitized_proposals.append(cleaned)
+                environment_dropped += dropped
+            proposals = sanitized_proposals
             info = {
                 "degraded": False,
                 "prompt_version": PROMPT_VERSION,
                 "diagnostics": diagnostics.to_dict(),
                 "sanitized_dropped": len(output.outfits) - len(proposals),
+                "environment_dropped": environment_dropped,
             }
             return proposals, info, diagnostics
         except (LlmUnavailable, LlmInvalidJson, LlmSchemaViolation) as error:

@@ -221,7 +221,8 @@ User Request → Task Router → TaskType → 选择子图
 | **P2.5（路由切片已验证）** | **`evals/` baseline**：30-50 固定 Cases + Wardrobe Fixtures + 五维评分 + Task Routing Accuracy | 建立 v3.2.1 baseline，供后续对比 |
 | **P3（核心已完成）** | **Context Pack** 共享领域契约；Context Router / Tool Registry 留给外部工具接入 | 请求、当前搭配、衣橱、偏好、记忆、候选新品和证据进入统一结构 |
 | **P4（本地检索已完成）** | **Style/Item grounded retrieval** + 可追溯 Markdown 知识资产；向量化索引为后续增强 | 美拉德/American Vintage/Cowboy Boots 等条目有本地证据 |
-| **P5** | **Weather Tool**（Open-Meteo + Location Resolution）；需要展示 MCP 时再做真 MCP Server | "明天纽约户外活动穿什么"能查天气并影响推荐 |
+| **P5（V1已验证）** | **Weather Tool**（Open-Meteo + Location Resolution）；需要展示 MCP 时再做真 MCP Server | 显式地点与今天/明天/ISO日期能查日级天气并影响推荐 |
+| **P5.1—P5.4（已规划）** | 隐含天气识别、设备定位、完整时间语义、小时天气、Event Lookup、远期气候参考和可解释随身建议 | 自然语言无需显式提天气；输出可追溯的“事实→影响→行动”，详见天气V2方案 |
 | **P6（核心已完成）** | **Vue Web MVP + API** | 衣橱、推荐、扩展任务与 Trace 可操作 |
 | **P7** | **Feedback + Preference Memory** + 前端 Feedback UI | 用户反馈影响后续推荐（闭环） |
 | **P8（已完成）** | **Outfit Modify + Compatibility + Wardrobe Gap**（子图 + 锁定槽位）+ Web UI | "换双鞋"只改目标单品；新品兼容和衣橱缺口可解释 |
@@ -252,6 +253,13 @@ User Request → Task Router → TaskType → 选择子图
 - 事实工具只解析衣橱、锚点、知识、候选和目标元素；Validator 只执行 ID 白名单、锁定槽位、证据来源、新品不落库和链接边界检查。
 - 局部修改硬锁所有非目标槽位；单品搭配以衣橱锚点组合；衣橱缺口区分整体模式和目标风格模式。
 - FastAPI、Vue Web 和微信小程序均通过主推荐自然语言入口自动路由。完整契约和限制见[扩展任务业务与 API](../EXTENDED_TASKS.md)。
+
+### 6.4 P5 Weather V1实现与V2规划（2026-08-10）
+
+- V1已实现并验证：Agent 1声明`context_requirements.weather`，Context Router调用typed Open-Meteo Tool；天气事实进入三个Agent、Context Pack、trace、持久化和Web结果。
+- 当前V1仅支持显式地点或全局默认城市、今天/明天/ISO单日、未来16天内日级事实，不等于完整的隐含时空理解。
+- V2已完成方案设计但尚未实现：本地请求使用用户授权的本次设备定位，显式目的地和事件场馆优先于当前位置；增加近3天默认窗口、相对时间/节日、小时天气、Event Lookup、远期气候参考和环境建议grounding。
+- V2仍坚持三个主Agent和“工具只给事实”；随身物品由Agent 2生成、Agent 3审校，不新增确定性结果Service。详细合同、场景矩阵和分期见[天气与时空上下文 V2 详细方案](../WEATHER_CONTEXT_V2_PLAN.md)。
 
 ## 7. 风险与注意
 

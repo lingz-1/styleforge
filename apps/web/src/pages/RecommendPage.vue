@@ -55,6 +55,37 @@
         </div>
       </section>
 
+      <section v-if="isRecommend && weatherFacts" class="weather-facts block">
+        <div class="weather-main">
+          <span class="weather-label">天气上下文 · {{ weatherSourceLabel }}</span>
+          <strong v-if="weatherFacts.status === 'available'">
+            {{ weatherLocation }} · {{ weatherWindow }}
+            <span v-if="weatherFacts.default_applied" class="weather-badge">近 3 天默认窗口</span>
+          </strong>
+          <strong v-else>天气暂不可用，三个 Agent 已继续按衣橱事实处理</strong>
+        </div>
+        <div class="weather-body">
+          <template v-if="weatherFacts.status === 'available'">
+            <div v-if="weatherDays.length" class="weather-days">
+              <div v-for="day in weatherDays" :key="day.date" class="weather-day">
+                <strong>{{ day.date.slice(5) }}</strong>
+                <span>{{ day.condition }}</span>
+                <span>{{ day.temperature_min_c }}–{{ day.temperature_max_c }}°C</span>
+                <span>体感 {{ day.feels_like_c }}°C · 降水 {{ day.precipitation_probability_percent }}% · 风 {{ day.wind_speed_kmh }} km/h</span>
+              </div>
+            </div>
+            <dl v-else>
+              <div><dt>温度</dt><dd>{{ weatherFacts.temperature_min_c }}–{{ weatherFacts.temperature_max_c }}°C</dd></div>
+              <div><dt>体感</dt><dd>{{ weatherFacts.feels_like_c }}°C</dd></div>
+              <div><dt>降水概率</dt><dd>{{ weatherFacts.precipitation_probability_percent }}%</dd></div>
+              <div><dt>风速</dt><dd>{{ weatherFacts.wind_speed_kmh }} km/h</dd></div>
+            </dl>
+            <small v-if="weatherLocationNote" class="weather-note">{{ weatherLocationNote }}</small>
+          </template>
+          <small v-else>{{ weatherFacts.error_message }}</small>
+        </div>
+      </section>
+
       <el-alert
         v-if="result.status === 'needs_clarification' || result.clarification_question"
         :title="result.clarification_question || '需要补充信息后才能继续。'"
@@ -75,6 +106,27 @@
               </el-image>
             </div>
             <p v-for="reason in outfit.reasons || []" :key="reason">{{ reason }}</p>
+            <template v-if="envByOutfit[outfit.outfit_id]">
+              <div
+                v-for="adjustment in envByOutfit[outfit.outfit_id].environment_adjustments || []"
+                :key="adjustment.action"
+                class="env-adjustment"
+              >
+                <strong>环境调整</strong>
+                <span>{{ adjustment.impact }} → {{ adjustment.action }}</span>
+              </div>
+              <div
+                v-if="(envByOutfit[outfit.outfit_id].carry_recommendations || []).length"
+                class="carry-recommendations"
+              >
+                <strong>随身</strong>
+                <span
+                  v-for="item in envByOutfit[outfit.outfit_id].carry_recommendations"
+                  :key="item.name"
+                  class="carry-chip"
+                >{{ item.name }}</span>
+              </div>
+            </template>
           </article>
         </div>
       </section>
@@ -192,6 +244,42 @@ const result = computed(() => payload.value?.result || {})
 const isRecommend = computed(() => payload.value?.task_type === 'outfit_recommend')
 const recommendationPayload = computed(() => isRecommend.value ? result.value : {})
 const recommendOutfits = computed(() => recommendationPayload.value.structured_result?.recommendations || [])
+const weatherFacts = computed(() => recommendationPayload.value.environment_context?.weather || null)
+const weatherLocation = computed(() => weatherFacts.value?.resolved_location?.display_name
+  || [weatherFacts.value?.resolved_location?.name, weatherFacts.value?.resolved_location?.admin1, weatherFacts.value?.resolved_location?.country].filter(Boolean).join('，')
+  || weatherFacts.value?.requested_location
+  || '未命名地点')
+const resolvedLocationContext = computed(() => recommendationPayload.value.resolved_location_context || null)
+const resolvedTimeContext = computed(() => recommendationPayload.value.resolved_time_context || null)
+const weatherDays = computed(() => weatherFacts.value?.days || [])
+const weatherWindow = computed(() => {
+  const start = weatherFacts.value?.start_date
+  const end = weatherFacts.value?.end_date
+  if (start && end) return start === end ? start : `${start} ~ ${end}`
+  return weatherFacts.value?.forecast_date || ''
+})
+const weatherSourceLabel = computed(() => {
+  const source = resolvedLocationContext.value?.source || weatherFacts.value?.source
+  const labels = { device: '设备定位', profile: '默认城市', global: '全局默认城市', named: '显式地点', resolved: '已解析地点' }
+  const bucket = resolvedLocationContext.value?.accuracy_bucket
+  const bucketLabel = { high: '高精度', medium: '中精度', low: '低精度' }[bucket]
+  return [labels[source] || source, bucketLabel].filter(Boolean).join(' · ')
+})
+const weatherLocationNote = computed(() => {
+  const time = resolvedTimeContext.value
+  if (!time) return ''
+  if (time.status === 'unsupported') return `日期表达式「${time.expression}」暂不支持，已继续按衣橱事实推荐`
+  if (time.default_applied) return '未指定日期，自动查询近 3 天窗口'
+  if (time.status === 'resolved') return `按「${time.expression || time.start_date}」查询`
+  return ''
+})
+const envByOutfit = computed(() => {
+  const map = {}
+  for (const proposal of recommendationPayload.value.proposals || []) {
+    map[proposal.outfit_id] = proposal
+  }
+  return map
+})
 const taskLabel = computed(() => TASK_LABELS[payload.value?.task_type] || payload.value?.task_type)
 const statusLabel = computed(() => ({ completed: '已完成', infeasible: '无可行方案', needs_clarification: '待补充' }[payload.value?.status] || payload.value?.status))
 const resultTitle = computed(() => result.value.title || result.value.message || result.value.summary || taskLabel.value)
@@ -237,6 +325,15 @@ h1 { margin: 0; max-width: 720px; font-family: Georgia, 'Noto Serif SC', serif; 
 .agent-step:last-child { border-right: 0; }.step-index { color: var(--copper); font-family: Georgia, serif; font-size: 23px; }
 .agent-step strong, .agent-step small { display: block; }.agent-step small { margin-top: 3px; color: #7e8882; }
 .step-status { color: var(--moss); font-size: 12px; }.section-heading { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid #d7ddd8; margin-bottom: 14px; }
+.weather-facts { display: flex; justify-content: space-between; gap: 24px; padding: 16px 18px; border-left: 3px solid var(--copper); background: #f3f1ea; }
+.weather-facts > div strong, .weather-label { display: block; }.weather-label { margin-bottom: 5px; color: var(--copper); font-size: 11px; letter-spacing: .08em; }
+.weather-main { min-width: 220px; }.weather-body { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+.weather-facts dl { display: flex; gap: 22px; margin: 0; }.weather-facts dl div { min-width: 70px; }.weather-facts dt { color: #7c8580; font-size: 11px; }.weather-facts dd { margin: 4px 0 0; font-weight: 700; }.weather-facts small { color: #7c8580; }
+.weather-badge { display: inline-block; margin-left: 8px; padding: 2px 8px; border: 1px solid var(--copper); border-radius: 999px; color: var(--copper); font-size: 11px; vertical-align: middle; }
+.weather-days { display: flex; gap: 10px; }.weather-day { min-width: 150px; padding: 8px 10px; border: 1px solid #dcd9ce; background: #fff; }.weather-day strong, .weather-day span { display: block; }.weather-day strong { color: var(--moss); font-size: 12px; }.weather-day span { margin-top: 3px; color: #5e6863; font-size: 12px; }
+.weather-note { display: block; max-width: 460px; text-align: right; }
+.env-adjustment { margin-top: 8px; padding: 7px 9px; border-left: 2px solid var(--copper); background: #f4f2eb; font-size: 12px; line-height: 1.5; }.env-adjustment strong { display: block; color: var(--copper); font-size: 10px; letter-spacing: .08em; }.env-adjustment span { color: #5e6863; }
+.carry-recommendations { margin-top: 8px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }.carry-recommendations strong { color: var(--moss); font-size: 12px; }.carry-chip { padding: 3px 8px; border: 1px solid #cbd2cc; border-radius: 999px; font-size: 12px; color: #4b5751; }
 .section-heading h3 { margin: 0 0 8px; font-family: Georgia, 'Noto Serif SC', serif; font-size: 23px; font-weight: 500; }.section-heading span { color: #78827c; font-size: 12px; }
 .outfit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }.outfit-card { padding: 14px; border: 1px solid #d5dbd6; background: #fff; }
 .outfit-card header { display: flex; justify-content: space-between; margin-bottom: 10px; color: #69736e; font-size: 12px; letter-spacing: .08em; }.outfit-card header strong { color: var(--copper); font-size: 16px; }
@@ -246,6 +343,6 @@ h1 { margin: 0; max-width: 720px; font-family: Georgia, 'Noto Serif SC', serif; 
 .anchor { display: flex; gap: 14px; width: fit-content; min-width: 300px; margin: 16px 0 28px; padding: 10px; border: 1px solid #d6dbd6; }.anchor :deep(.el-image) { width: 96px; height: 110px; }.anchor div { display: flex; flex-direction: column; justify-content: center; }.anchor small { color: var(--copper); }.anchor strong { margin: 6px 0; }.anchor span, .muted { color: #7c8580; font-size: 12px; }.slot-group { margin-top: 26px; }
 .scoreboard { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid #d5dbd6; }.scoreboard div { padding: 18px; border-right: 1px solid #d5dbd6; }.scoreboard div:last-child { border: 0; }.scoreboard strong, .scoreboard span { display: block; }.scoreboard strong { font-family: Georgia, serif; font-size: 28px; }.scoreboard span { margin-top: 4px; color: #7c8580; font-size: 12px; }
 .gap-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }.gap-card { padding: 16px; border-top: 3px solid var(--copper); background: #f4f2eb; }.gap-card > span { text-transform: uppercase; color: var(--copper); font-size: 10px; letter-spacing: .12em; }.gap-card h4 { margin: 9px 0; }.gap-card p { color: #626d67; line-height: 1.6; }.covered { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }.covered strong { width: 100%; }.covered span { padding: 5px 9px; border: 1px solid #cbd2cc; border-radius: 999px; font-size: 12px; }.technical pre { max-height: 440px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
-@media (max-width: 900px) { .hero { flex-direction: column; }.user-box { width: 100%; }.agent-rail, .outfit-grid, .gap-grid { grid-template-columns: 1fr; }.agent-step { border-right: 0; border-bottom: 1px solid #d9ded9; }.knowledge-layout { grid-template-columns: 1fr; }.item-grid { grid-template-columns: repeat(2, 1fr); }.scoreboard { grid-template-columns: repeat(2, 1fr); }.prompt-footer { align-items: stretch; flex-direction: column; } }
+@media (max-width: 900px) { .hero { flex-direction: column; }.user-box { width: 100%; }.agent-rail, .outfit-grid, .gap-grid { grid-template-columns: 1fr; }.agent-step { border-right: 0; border-bottom: 1px solid #d9ded9; }.weather-facts { flex-direction: column; }.weather-facts dl, .weather-days { flex-wrap: wrap; }.weather-body { align-items: flex-start; }.weather-note { text-align: left; }.knowledge-layout { grid-template-columns: 1fr; }.item-grid { grid-template-columns: repeat(2, 1fr); }.scoreboard { grid-template-columns: repeat(2, 1fr); }.prompt-footer { align-items: stretch; flex-direction: column; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
 </style>

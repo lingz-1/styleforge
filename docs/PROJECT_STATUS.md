@@ -1,16 +1,22 @@
 # StyleForge 项目状态
 
-> 更新时间：2026-08-09  
+> 更新时间：2026-08-10
 > 定位：用于实习求职展示的本地个人衣柜多 Agent 穿搭项目  
 > 当前阶段：Polyvore 演示主链路已形成可运行基线；Mytheresa 接入和订单衣柜导入已完成代码实现，订单衣柜最新版已通过回归与一次性数据库验收，但真实订单尚未提交、个人商品嵌入和 Mytheresa 全量接入仍待端到端验收。2026-08-05 修复了运动场合推荐不合理、UI 提交强制逐条填写、推荐结果不更新等问题，详见[问题与解决记录](ISSUE_LOG.md)。2026-08-05 完成 v3.2.1 语义驱动三 Agent 改造（DeepSeek）；2026-08-06 用真实 DeepSeek API 对 8 类代表性请求完成端到端验收（全部 accept、正常 3 次 LLM 调用、0 回退、推荐 100% 衣柜归属），备选方案已补确定性评分。2026-08-06 落地《评估方案.txt》五维统一评估框架：统一 Rubric 贯穿三 Agent、第三维改名 `outfit_coordination`、`request_signature` 新增 `explicit_style`、用户可配置五维权重（真实链路验证首选分=用户权重加权结果）。2026-08-06 完成架构规划 v3.3-plan.1（参考目录 + 扩展版方案收口，见 [ARCHITECTURE_PLAN.md](architecture/ARCHITECTURE_PLAN.md)），后端移动至 `apps/api/styleforge/`（保持 import），双端前端（Vue Web + 小程序）骨架与核心功能完成（衣柜/上传/编辑/补图/订单导入/推荐/偏好），新增拍照创建与修改衣物接口；小程序真机预览因校园网隔离待通。2026-08-09 完成默认模拟衣柜重建（catalog=衣柜零冗余）、FashionCLIP 嵌入 + FAISS 索引全量构建、衣柜可折叠（双端）、推荐跨页面持久化、推荐评分改为按 LLM 五维分排序并双分数展示（LLM+规则归一化到 100）、中英分类结构文档与上传表单大类必选/细分类可选联动、小程序真机 http 图片本地化修复，详见下方各节。
 
-> 2026-08-09 扩展进度：v3.3 P2 Task Router 和 P2.5 路由切片已验证；随后完成 Context Pack、任务运行持久化、局部修改、风格知识、单品知识、新品衣橱兼容性和衣橱缺口五类扩展业务，并接入 FastAPI、Vue Web 和微信小程序。最终验收：`compileall` 通过、Ruff clean、Pytest 175 passed；42 条中英文固定路由集准确率 100%；Web Vite 生产构建和小程序新增脚本语法检查通过；独立数据库上的真实 API 进程烟测 `health=ok`，任务执行和持久化查询成功。
+> 2026-08-09 扩展进度：v3.3 P2 Task Router 和 P2.5 路由切片已验证；随后完成 Context Pack、任务运行持久化、局部修改、风格知识、单品知识、新品衣橱兼容性和衣橱缺口五类扩展业务，并接入 FastAPI、Vue Web 和微信小程序。当批验收：`compileall` 通过、Ruff clean、Pytest 175 passed；42 条中英文固定路由集准确率 100%；Web Vite 生产构建和小程序新增脚本语法检查通过；独立数据库上的真实 API 进程烟测 `health=ok`，任务执行和持久化查询成功。
+
+> 2026-08-10 P5进度：Weather Tool、Context Router和三个主Agent的天气事实共享已完成，全量Pytest 189 passed、compileall、Ruff和Vue生产构建通过。API包位于`apps/api`，从仓库根目录启动必须使用`--app-dir apps\api`；本批次完整过程见[开发过程记录](DEVELOPMENT_LOG.md)。
+
+> 2026-08-10 P5 V2规划：已完成[天气与时空上下文 V2 详细方案](WEATHER_CONTEXT_V2_PLAN.md)，覆盖隐含天气需求、设备定位、近3天默认窗口、相对时间/节日、事件场次与场馆、小时级活动窗口、远期气候语义、环境调整说明和随身物品建议。该部分目前是规划，不属于189个已通过用例覆盖的实现。
+
+> 历史统计口径修正：2026-08-06真实API的8类请求全部`accept`且100%衣柜归属；其中7类无回退，“高考”请求的Critic发生一次瞬时API失败并按标准推荐策略降级。文中旧的“8请求0回退”摘要以本说明为准。
 
 ## 1. 当前结论
 
 StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协作 → 约束内搭配建议 → 商品图片与执行轨迹”的完整项目形态。已验证的 Polyvore/FashionCLIP/FAISS 基线足以演示核心思路；新增的多受众 Mytheresa 目录解决了数据覆盖问题但仍是待验收增量，个人订单衣柜已完成回归与一次性数据库验收，待真实提交验收。
 
-当前 Planner、Stylist、Reviewer 是可离线复现的确定性 Agent 后端，由 LangGraph 编排；语义链路（SemanticRetriever / Composer / Critic）可选接入 DeepSeek LLM。无 API Key 时回退确定性链路。对外表述：“多 Agent 工作流 + 确定性约束引擎”，可选“DeepSeek 语义三 Agent 已用真实 API 验收”。不能表述为“LLM 已完成全部穿搭决策”或夸大到无回退。
+标准推荐包含两条链：Planner/Stylist/Reviewer是可离线复现的确定性链，SemanticRetriever/Composer/Critic是可选DeepSeek语义链；无API Key时标准推荐回退确定性链。五类扩展业务只允许SemanticRetriever/Composer/Critic严格三Agent执行，模型、JSON、Schema或审校失败时记录`failed`，不生成确定性业务结果。不能把这两套降级政策混为一谈，也不能表述为“LLM已完成全部穿搭决策”。
 
 ## 2. 状态总览
 
@@ -31,13 +37,15 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 | 订单衣柜导入 v3 | 已验证 | 收货/退款/售后硬门槛 + Schema v5 回归通过；完整订单表一次性数据库验收通过（374 准入，0 未知），15 个非服饰误分类已修复 |
 | 个人商品自动嵌入 | 已实现，待验收 | 支持无图文字向量和实拍图重嵌入，尚未用真实提交完整验收 |
 | FastAPI/Streamlit | 基线可启动，最新 UI 待回归 | API 曾成功启动；最新订单预览和图片展示需人工验收 |
-| 语义驱动三 Agent (v3.2.1) | 已验证 | DeepSeek 三 Agent + 四决策分支 + 跨请求记忆；134 测试通过；2026-08-06 真实 API 8 请求验收全部 accept，推荐 100% 衣柜归属，备选已补确定性评分 |
+| 语义驱动三 Agent (v3.2.1) | 已验证 | DeepSeek 三 Agent + 四决策分支 + 跨请求记忆；当时里程碑134测试通过；2026-08-06真实API 8请求全部accept、100%衣柜归属，7类无回退、1类Critic瞬时降级 |
 | 五维统一评估框架（评估方案 v1.1） | 已验证 | 统一 Rubric 贯穿三 Agent；`outfit_coordination` 改名 + `explicit_style` 字段；用户可配置五维权重（API/UI），真实链路验证首选分=用户权重加权 |
 | 架构 v3.3-plan.1 | 已规划 | 参考目录 + 扩展版方案收口，规划文档 `docs/architecture/ARCHITECTURE_PLAN.md`，含职责边界与分阶段路线 |
 | v3.3 Task Router + 六任务执行 | 已验证 | `/tasks/route` 只分类；`/tasks/execute` 统一执行六个隔离子图；Context Pack、trace 和 `task_runs` 可审计持久化 |
 | v3.3 P2.5 路由评估 | 路由切片已验证 | 42 条中英文固定 Cases（六类各 7 条）准确率 100%；Wardrobe Fixtures 与五维 benchmark 未完成 |
 | 五类扩展业务 | 已验证 | 局部修改硬锁非目标单品；风格/单品建议使用本地证据；新品兼容不落库；衣橱缺口检查槽位、场景与重复度 |
-| 后端结构 | 已移动 | `styleforge/` → `apps/api/styleforge/`（保持 `from styleforge.*` import 不变，pyproject package path），134 测试全绿 |
+| P5 天气上下文工具 | 已验证 | Agent 1 按需声明天气；Context Router 调用 typed Open-Meteo Tool；事实共享给三个 Agent、Context Pack、trace 与持久化；当前不是 MCP Server；全量 Pytest 189 passed |
+| P5 天气与时空上下文 V2 | 已规划，未实现 | 隐含环境需求、设备定位、时间/事件解析、小时天气、远期气候参考、事实→影响→行动解释和随身物品清单 |
+| 后端结构 | 已移动 | `styleforge/` → `apps/api/styleforge/`（保持 `from styleforge.*` import 不变，pyproject package path）；迁移当时134测试全绿，当前全量为189 passed |
 | 拍照创建 / 修改衣物接口 | 已验证 | `POST /wardrobes/{user_id}/items/photo`（上传图创建个人商品+嵌入）、`PUT /items/{item_id}`（改信息重嵌入），已验证 |
 | Vue Web（v3.3 前端） | 核心功能已构建 | 衣柜、推荐、订单导入、五维偏好和“智能造型”五类扩展任务；Vite 生产构建通过 |
 | 小程序（v3.3 前端） | 核心功能已实现 | 衣柜、上传、订单、推荐、偏好和“造型”五类扩展任务；新增脚本通过 Node 语法检查，真机联调仍受局域网条件影响 |
@@ -156,7 +164,7 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 
 ### 4.4 语义驱动三 Agent（v3.2.1）
 
-- `styleforge/llm/`：DeepSeek OpenAI 兼容客户端（JSON mode + 三层重试兜底 + 诊断记录）、三个 Agent 的 Pydantic 契约、Prompt 构建器（含 few-shot）。
+- `apps/api/styleforge/llm/`：DeepSeek OpenAI 兼容客户端（JSON mode + 三层重试兜底 + 诊断记录）、三个 Agent 的 Pydantic 契约、Prompt 构建器（含 few-shot）。
 - Agent 1 语义检索：LLM 生成 `request_signature`（theme/unique_mood/practical_context/generic_tendencies_to_avoid）与三类检索计划（core 0.40/distinctive 0.30/supporting 0.10），多查询加权检索叠加偏好 0.10 与新颖 0.10，按品类配额构建 Top-50 候选池（配额不足动态转移并记录日志）。
 - Agent 2 搭配组合：从候选池选品组成 3-5 套方案 + `composition_strategy`；池外单品 ID 由 `sanitize_pool_ids` 与基础校验双层拦截。
 - Agent 3 评审判定：单次调用双阶段协议（先盲评单品数据、再核对解释），五维评分 + accept/recompose/retrieve_more/wardrobe_gap 四决策分支；回退总次数 ≤ 1，LLM 调用 accept=3/recompose=5/retrieve_more=6。
@@ -179,7 +187,7 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 | 打篮球 | accept | 活力/动感/清爽 | 篮球背心+短裤+运动鞋 | ✅ 运动硬约束 |
 | 海边度假 | accept | 清爽/自由/度假感 | 碎花连衣裙+白玛丽珍+珍珠项链 | ✅ |
 
-统一观察：8 请求全部 `accept`、正常 3 次 LLM 调用、0 回退、推荐单品 100% 来自 demo-user 衣柜；`generic_tendencies_to_avoid` 每次完整 3 条；critic 改进建议具体（"加棒球帽/防晒衫/胸针"）。备选方案评分已补确定性 `score_outfit`。
+统一观察：8请求全部`accept`、推荐单品100%来自demo-user衣柜；7请求正常3次LLM调用且无回退，“高考”请求的Critic一次瞬时API失败并降级。`generic_tendencies_to_avoid`每次完整3条；Critic改进建议具体（"加棒球帽/防晒衫/胸针"）。备选方案评分已补确定性`score_outfit`。
 
 ### 4.6 v3.3 P2 Task Router（2026-08-09，已验证）
 
@@ -214,12 +222,12 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 2. 订单候选的品类人工抽查尚未由真人完成；当前只做了规则级自动化校验与修复。
 3. `personal-user` 衣柜为空：`catalog_items` 有 111 件 `personal-*` 商品，但 `wardrobe_items` 无 `personal-user` 的 `active=1` 记录，该用户推荐一直无解，待排查（见[问题与解决记录](ISSUE_LOG.md)）。
 4. Mytheresa 62,457 件商品尚未导入主数据库。
-4. Mytheresa 328,754 张图片尚未执行全量像素解码。
-5. 尚未构建 Polyvore + Mytheresa 共 189,385 件商品的合并嵌入与 FAISS 索引。
-6. Mytheresa 导入的中断续跑、重复执行、备份恢复演练尚未完成。
-7. 最新 Streamlit 订单状态列、提交错误提示和个人图片重嵌入尚未人工验收。
-8. 语义三 Agent 已用假 LLM 完成工作流级回归，并于 2026-08-06 用真实 DeepSeek API 对 8 类代表性请求完成端到端验收（全部 accept、正常 3 次调用、0 回退、100% 衣柜归属）。验收中"高考"请求的 critic 出现一次瞬时降级（API 瞬时失败按设计回退确定性评审），结果仍正确。
-9. 搭配质量尚无人工偏好评测；现有 95.5% 是检索品类指标，不是穿搭满意度。
+5. Mytheresa 328,754 张图片尚未执行全量像素解码。
+6. 尚未构建 Polyvore + Mytheresa 共 189,385 件商品的合并嵌入与 FAISS 索引。
+7. Mytheresa 导入的中断续跑、重复执行、备份恢复演练尚未完成。
+8. 最新 Streamlit 订单状态列、提交错误提示和个人图片重嵌入尚未人工验收。
+9. 语义三 Agent 已用假 LLM 完成工作流级回归，并于2026-08-06用真实DeepSeek API验收8类请求（全部accept、100%衣柜归属；7类无回退，“高考”请求Critic瞬时降级一次）。
+10. 搭配质量尚无人工偏好评测；现有 95.5% 是检索品类指标，不是穿搭满意度。
 
 ## 6. 已知限制
 
@@ -260,7 +268,7 @@ P0 回归与订单表预览已于 2026-08-04 通过：`compileall` 退出码 0�
 
 1. `DEEPSEEK_API_KEY` 配置于项目根 `.env`（已被 `.gitignore` 排除），工作流自动启用语义链路。
 2. 确认 `mode=llm_semantic_multi_agent`，`request_signature`/`retrieval_plans`/`pool`/`critic` 字段完整，`llm_call_count=3`。
-3. 8 类代表性请求（面试/悲惨世界/周杰伦演唱会/美拉德/小雨通勤/高考/打篮球/海边度假）全部 `accept`、0 回退、推荐 100% 衣柜归属。
+3. 8类代表性请求（面试/悲惨世界/周杰伦演唱会/美拉德/小雨通勤/高考/打篮球/海边度假）全部`accept`、推荐100%衣柜归属；7类无回退，“高考”请求Critic瞬时降级一次。
 4. 无 key 时同一命令返回确定性链路，行为与改造前一致（CLI `--no-llm` 冒烟通过）。
 5. 备选方案评分已补确定性 `score_outfit`（此前为 0）。
 6. 证据：`artifacts/llm_acceptance.json`（8 请求原始 JSON）、`artifacts/llm_acceptance_summary.txt`（可读摘要）。
