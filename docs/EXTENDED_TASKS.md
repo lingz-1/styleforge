@@ -46,11 +46,12 @@ Context Pack 是三位 Agent 共享的同一份可审计上下文，不是第四
 {
   "user_id": "demo-user",
   "request": "要搭配中世纪风格的话，我的衣柜还缺什么？",
-  "max_results": 3
+  "max_results": 3,
+  "session_id": "f1a2b3…"
 }
 ```
 
-主 Web 和小程序只发送自然语言，不传 `requested_task_type`。后端字段仍为测试、内部受控调用和兼容性保留。响应包含：
+主 Web 和小程序只发送自然语言，不传 `requested_task_type`。后端字段仍为测试、内部受控调用和兼容性保留。`session_id` 可选：带时表示该轮属于一个持久化会话（见 [会话与记忆契约](SESSION_CHAT_MEMORY.md)），响应附 `session_id/message_id`。响应包含：
 
 ```json
 {

@@ -45,6 +45,23 @@ TASK_COMPLETION_RULES: dict[TaskType, str] = {
 }
 
 
+_OVERALL_ADJUST_RULE = (
+    "completed 时 alternatives 至少一套，且每套是一套完整可穿搭配；"
+    "target_slot 为空、无锁定单品；每套只可从 Agent 1 candidate_item_ids 中选择单品，"
+    "至少更换或新增 1 件；整套朝向用户请求的正式度/颜色/风格方向调整；"
+    "若衣橱无法满足调整方向则返回 infeasible。"
+)
+
+
+def completion_rule_for(agent1_output: Agent1TaskOutput) -> str:
+    """Return the task-completion rule, branching for overall-adjust mode."""
+    if agent1_output.task_type is TaskType.OUTFIT_MODIFY and agent1_output.facts.get(
+        "adjustment_mode"
+    ) == "overall":
+        return _OVERALL_ADJUST_RULE
+    return TASK_COMPLETION_RULES[agent1_output.task_type]
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
 
@@ -98,7 +115,7 @@ def build_extension_agent2_prompt(
         f"用户请求：{request}\n"
         f"Context Pack：\n{_json(context_pack.model_dump(mode='json'))}\n"
         f"Agent 1 输出：\n{_json(agent1_output.model_dump(mode='json'))}\n"
-        f"当前任务完成条件：{TASK_COMPLETION_RULES[task_type]}\n"
+        f"当前任务完成条件：{completion_rule_for(agent1_output)}\n"
         f"Agent 3 上轮反馈：{critic_feedback or '无，这是首次生成'}\n"
         f"结构修复反馈：{repair_feedback or '无'}\n"
         "顶层必须符合 Agent2TaskOutput；result.status 必须与顶层 status 一致。"
@@ -136,7 +153,7 @@ def build_extension_agent3_prompt(
         f"Context Pack：\n{_json(context_pack.model_dump(mode='json'))}\n"
         f"Agent 1 输出：\n{_json(agent1_output.model_dump(mode='json'))}\n"
         f"Agent 2 输出：\n{_json(agent2_output.model_dump(mode='json'))}\n"
-        f"当前任务完成条件：{TASK_COMPLETION_RULES[agent1_output.task_type]}\n"
+        f"当前任务完成条件：{completion_rule_for(agent1_output)}\n"
         f"已通过的硬校验：\n{_json(hard_checks)}\n"
         f"输出 Schema：\n{_json(ExtensionReview.model_json_schema())}"
     )

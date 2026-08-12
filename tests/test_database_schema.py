@@ -71,6 +71,38 @@ def test_schema_contains_personal_wardrobe_import_tables(tmp_path) -> None:
     }.issubset(personal_item_columns)
 
 
+def test_schema_v10_contains_chat_and_memory_tables(tmp_path) -> None:
+    database_path = tmp_path / "styleforge.db"
+    initialize_database(database_path)
+    connection = sqlite3.connect(database_path)
+    try:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+        message_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(chat_messages)")
+        }
+    finally:
+        connection.close()
+
+    assert SCHEMA_VERSION == 10
+    assert {"chat_sessions", "chat_messages", "user_memories"}.issubset(tables)
+    assert {"idx_chat_sessions_user_updated", "idx_chat_messages_session_created"}.issubset(
+        indexes
+    )
+    assert {"result_json", "task_type", "run_id"}.issubset(message_columns)
+
+
 def test_schema_v8_migrates_task_runs_status_without_losing_rows(tmp_path) -> None:
     database_path = tmp_path / "schema-v7.db"
     connection = sqlite3.connect(database_path)

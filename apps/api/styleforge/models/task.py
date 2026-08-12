@@ -31,6 +31,7 @@ class TaskExecutionInput(BaseModel):
     item_id: str = Field(default="", max_length=128)
     candidate_item: CandidateItem | None = None
     location_context: DeviceLocationContext | None = None
+    session_id: str = Field(default="", max_length=128)
 
     @model_validator(mode="after")
     def _deduplicate_item_ids(self) -> "TaskExecutionInput":

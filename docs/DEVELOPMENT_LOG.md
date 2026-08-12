@@ -282,3 +282,64 @@ D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app --app-dir apps\a
 - 识别结果宽容化校验（commit `48f6350`）：避免模型脏数据触发"other / 0%"降级。
 
 > 说明：批次存进程内存，后端重启丢失去运行中任务（README 已注明，本地优先工具的接受取舍）。批量 worker 的 `skip_embedding=True` 意味着新入库单品 `embedding_status=pending`，后续统一补嵌入（可复用订单导入的增量嵌入入口）。
+
+## 11. 会话持久化多轮对话 + 用户长期记忆系统（2026-08-12，已实现）
+
+### 11.1 需求与已确认决策
+
+按 NEXT_STEPS P1 开工两块能力，方向由用户确认：
+
+- **记忆系统**：品类/颜色/风格/正式度/场合/习惯偏好跨对话一致。决策：**自动提炼 + 可手动修正，手动优先**。
+- **多轮对话**：同一会话内连续追问自动携带上文。决策：**完整会话持久化**（跨刷新/跨设备可恢复）。
+- 本期新增 Web「偏好管理页」（MemoriesPage）。
+
+方案文档见 [会话持久化多轮对话 + 用户长期记忆系统](SESSION_CHAT_MEMORY.md)。
+
+### 11.2 实现清单
+
+Schema（`repositories/database.py`，v9→v10）：
+
+- 三张新表 + 索引：`chat_sessions`、`chat_messages`（FK ON DELETE CASCADE）、`user_memories`（UNIQUE(user_id, category, content) + CHECK 枚举）。
+
+新仓库与服务：
+
+- `repositories/chat_repository.py`：会话 CRUD、`append_message`（同时刷新 session.updated_at）、`list_messages`（ascending）、`active_outfit_messages`（取最近产生搭配的 assistant 消息）。
+- `repositories/memory_repository.py`：`list_memories` / `create_manual_memory`（upsert 强制 manual + 重置 occurrences）/ `update_memory` / `forget_memory`（软删除可复活）/ `active_memory_profile` / `upsert_auto_memories`（置信度累加、manual 优先、复活）。
+- `services/chat_service.py`：`outfit_context_from_payload` / `assistant_summary` / `trim_message_payload` / `get_session_outfit_context`。
+- `services/memory_extractor.py`：确定性规则提炼（复用 request_parser 词典），每类上限 2 条。
+
+引擎：
+
+- `models/task.py`：`TaskExecutionInput.session_id`（可选）。
+- `workflow/task_workflow.py`：两段式路由（`session_follow_up` 强制 modify / 修改链回填 current_*），成功路径末尾 `_extract_memories`（try/except，记忆失败不影响任务）。
+- `tools/extension_analysis.py`：`_analyze_modify` 增"整体调整"分支（`adjustment_mode="overall"`，无锁定/无替换，替换池 = 衣橱 − current）。
+- `llm/extension_prompts.py`：`completion_rule_for(agent1_output)` 按 adjustment_mode 分支整体/局部。
+- 记忆注入：`context/builder.py` → `preferences.memory_profile`；`llm/prompts.py` `build_agent1/2/3_prompt(..., memory_profile)`；三 Agent `run()` 透传；`workflow/graph.py` `_load_memory_profile` + state 透传。
+- **顺带修复** `graph.py` novelty 新颖惩罚传包装行导致重叠恒为 0 的 bug。
+
+API（`api.py`）：
+
+- 会话：`POST/GET /users/{user_id}/chat-sessions`、`GET/PATCH/DELETE /chat-sessions/{session_id}`。
+- 记忆：`GET/POST /preferences/{user_id}/memories`、`PATCH/DELETE .../{memory_id}`。
+- `execute_task` 会话化：`_resolve_session_turn`（归属校验 + user 消息落库 + outfit context）→ 执行 → `_append_chat_success` / `_append_chat_failure`（裁剪 result_json + outfit 快照），payload 附 `session_id/message_id`。
+
+前端（`apps/web/src`）：
+
+- `services/api.js`：新增 9 个会话/记忆方法。
+- `components/TaskResultView.vue`（新）：按 task_type 渲染复用载体，历史消息凭裁剪 result 恢复。
+- `stores/recommendation.js`：`sessionId` / `messages` / `loadSessionHistory` / `newConversation` / `run()` 透传 `session_id`。
+- `pages/RecommendPage.vue`：会话侧栏 + 历史恢复 + `localStorage {userId}:sf_session_id` + 首次发送自动建会话。
+- `pages/MemoriesPage.vue`（新）+ 路由 `/memories` + App.vue 导航「🧠 偏好记忆」。
+
+### 11.3 遇到的问题
+
+- **`test_manual_memory_wins_over_auto` 失败**：`create_manual_memory` 的 ON CONFLICT DO UPDATE 未重置 `occurrences`（=1 而非 0）。修复：DO UPDATE SET 增加 `occurrences = 0,`。
+- **`test_get_session_outfit_context_uses_most_recent_outfit` 失败**：`active_outfit_messages` 的 SQL 参数顺序与占位符错位（task_type IN 与 session_id 绑定颠倒），查询永远查不到——会破坏线上多轮会话上下文恢复的真实 bug。修复：参数元组改为 `(session_id, user_id, *OUTFIT_TASK_TYPES, limit)`。
+- **`test_chat_session_crud_and_cascade_delete` 失败**：同微秒 `created_at` 平局 + UUID `message_id` 非时间序导致取错最新消息。修复：三处 ORDER BY 用 SQLite 单调 `rowid` 作 tiebreaker。
+- **`test_database_schema.py` 编辑损坏**：误把个人衣柜断言并入 v10 测试。修复：恢复 `test_schema_contains_personal_wardrobe_import_tables`，从 v10 测试移除。
+
+### 11.4 验证证据
+
+- 新增 32 个测试：`test_follow_up_detection.py`、`test_memory_extractor.py`、`test_memory_repository.py`、`test_chat_repository.py`、`test_session_multiturn.py`（核心多轮）、`test_chat_api.py`、`test_memory_api.py`，扩展 `test_context_pack.py`（memory_profile 注入/省略）与 `test_database_schema.py`（v10）。
+- 全量回归：**364 passed**；`ruff check apps/api/styleforge tests` → All checks passed；`npm run build` 通过（新增 MemoriesPage / TaskResultView chunk 正常产出）。
+- 端到端人工复现见任务 9 验收记录（curl 建会话 → 三连追问 → GET 会话链；手动记忆 → 注入 → 遗忘）。

@@ -74,5 +74,27 @@ export const getEvaluationWeights = (userId) =>
 export const saveEvaluationWeights = (userId, weights) =>
   http.put(`/preferences/${userId}/evaluation`, { weights })
 
+// Chat sessions (multi-turn conversation persistence)
+export const createChatSession = (userId, title = '') =>
+  http.post(`/users/${userId}/chat-sessions`, { title })
+export const listChatSessions = (userId) =>
+  http.get(`/users/${userId}/chat-sessions`)
+export const getChatSession = (userId, sessionId) =>
+  http.get(`/chat-sessions/${sessionId}`, { params: { user_id: userId } })
+export const renameChatSession = (userId, sessionId, title) =>
+  http.patch(`/chat-sessions/${sessionId}`, { title }, { params: { user_id: userId } })
+export const deleteChatSession = (userId, sessionId) =>
+  http.delete(`/chat-sessions/${sessionId}`, { params: { user_id: userId } })
+
+// Long-term preference memories (自动提炼 + 手动修正)
+export const listMemories = (userId) =>
+  http.get(`/preferences/${userId}/memories`)
+export const createMemory = (userId, payload) =>
+  http.post(`/preferences/${userId}/memories`, payload)
+export const updateMemory = (userId, memoryId, fields) =>
+  http.patch(`/preferences/${userId}/memories/${memoryId}`, fields)
+export const forgetMemory = (userId, memoryId) =>
+  http.delete(`/preferences/${userId}/memories/${memoryId}`)
+
 // Item image URL helper
 export const imageUrl = (path) => `/api${path}`

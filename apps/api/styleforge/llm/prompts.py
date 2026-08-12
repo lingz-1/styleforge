@@ -281,6 +281,18 @@ def _json_example(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def _memory_profile_block(memory_profile: list[dict[str, Any]] | None) -> str:
+    """Render the user's long-term preferences as a compact prompt section."""
+    if not memory_profile:
+        return ""
+    lines = [
+        f"- [{item.get('category', 'general')}][{item.get('source', 'auto')}]"
+        f"[置信度 {float(item.get('confidence', 0.0)):.2f}] {item.get('content', '')}"
+        for item in memory_profile
+    ]
+    return "\n\n【用户长期偏好记忆】\n" + "\n".join(lines)
+
+
 _CONTEXT_CONTRACT = (
     "\n上下文需求规则：\n"
     "- 必须输出 context_requirements（temporal/location/weather）以及 implicit_context_signals、"
@@ -316,6 +328,7 @@ def build_agent1_prompt(
     recent_memories: list[dict[str, Any]],
     weights: dict[str, float] | None = None,
     environment_context: dict[str, Any] | None = None,
+    memory_profile: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str]:
     resolved = normalize_weights(weights)
     rubric_note = (
@@ -375,6 +388,7 @@ def build_agent1_prompt(
         + examples
         + "\n\n【输出 JSON 负例（纯风格知识，不触发天气）】\n"
         + _json_example(_FEW_SHOT_AGENT1_NEGATIVE)
+        + _memory_profile_block(memory_profile)
     )
     return system, user
 
@@ -387,6 +401,7 @@ def build_agent2_prompt(
     recent_structure_signatures: list[dict[str, Any]],
     weights: dict[str, float] | None = None,
     environment_context: dict[str, Any] | None = None,
+    memory_profile: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str]:
     resolved = normalize_weights(weights)
     system = (
@@ -430,6 +445,7 @@ def build_agent2_prompt(
         )
         + "\n\n【输出 JSON 示例】\n"
         + _json_example(_FEW_SHOT_AGENT2)
+        + _memory_profile_block(memory_profile)
     )
     return system, user
 
@@ -441,6 +457,7 @@ def build_agent3_prompt(
     outfits: list[dict[str, Any]],
     weights: dict[str, float] | None = None,
     environment_context: dict[str, Any] | None = None,
+    memory_profile: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str]:
     resolved = normalize_weights(weights)
     system = _AGENT3_SYSTEM + "\n" + rubric_text(resolved)
@@ -474,5 +491,6 @@ def build_agent3_prompt(
         + "\n\n"
         "【输出 JSON 示例】\n"
         + _json_example(_FEW_SHOT_AGENT3)
+        + _memory_profile_block(memory_profile)
     )
     return system, user

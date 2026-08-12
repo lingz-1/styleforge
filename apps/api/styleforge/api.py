@@ -42,7 +42,28 @@ from styleforge.repositories.user_preferences_repository import (
     get_evaluation_weights,
     save_evaluation_weights,
 )
+from styleforge.repositories.chat_repository import (
+    append_message,
+    create_chat_session,
+    delete_chat_session,
+    get_chat_session,
+    list_chat_sessions,
+    list_messages,
+    rename_chat_session,
+)
+from styleforge.repositories.memory_repository import (
+    create_manual_memory,
+    forget_memory,
+    list_memories,
+    update_memory,
+)
 from styleforge.repositories.task_run_repository import get_task_run
+from styleforge.services.chat_service import (
+    assistant_summary,
+    get_session_outfit_context,
+    outfit_context_from_payload,
+    trim_message_payload,
+)
 from styleforge.services.order_import import parse_order_workbook
 from styleforge.services.personal_embeddings import embed_personal_items
 from styleforge.services.recognition_batch import (
@@ -145,6 +166,26 @@ class UpdateItemRequest(BaseModel):
     gender: str | None = Field(default=None, max_length=16)
     size: str | None = Field(default=None, max_length=16)
     attributes: dict | None = None
+
+
+class ChatSessionCreate(BaseModel):
+    title: str = Field(default="", max_length=128)
+
+
+class ChatSessionRename(BaseModel):
+    title: str = Field(min_length=1, max_length=128)
+
+
+class MemoryCreate(BaseModel):
+    category: str = Field(min_length=1, max_length=32)
+    content: str = Field(min_length=1, max_length=64)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
+class MemoryUpdate(BaseModel):
+    category: str | None = Field(default=None, min_length=1, max_length=32)
+    content: str | None = Field(default=None, min_length=1, max_length=64)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 settings = Settings.from_env()
@@ -347,6 +388,120 @@ def put_user_evaluation_weights(
     return {"user_id": user_id, "weights": normalized}
 
 
+@app.get("/preferences/{user_id}/memories")
+def list_user_memories(user_id: str) -> dict[str, Any]:
+    with database_session(settings.database_path) as connection:
+        memories = list_memories(connection, user_id)
+    return {"user_id": user_id, "count": len(memories), "memories": memories}
+
+
+@app.post("/preferences/{user_id}/memories", status_code=201)
+def create_user_memory(user_id: str, request: MemoryCreate) -> dict[str, Any]:
+    try:
+        with database_session(settings.database_path) as connection:
+            return create_manual_memory(
+                connection,
+                user_id,
+                request.category,
+                request.content,
+                confidence=request.confidence,
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.patch("/preferences/{user_id}/memories/{memory_id}")
+def update_user_memory(
+    user_id: str,
+    memory_id: int,
+    request: MemoryUpdate,
+) -> dict[str, Any]:
+    try:
+        with database_session(settings.database_path) as connection:
+            memory = update_memory(
+                connection,
+                user_id,
+                memory_id,
+                category=request.category,
+                content=request.content,
+                confidence=request.confidence,
+            )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return memory
+
+
+@app.delete("/preferences/{user_id}/memories/{memory_id}")
+def forget_user_memory(user_id: str, memory_id: int) -> dict[str, Any]:
+    with database_session(settings.database_path) as connection:
+        if not forget_memory(connection, user_id, memory_id):
+            raise HTTPException(status_code=404, detail="Memory not found")
+    return {"memory_id": memory_id, "forgotten": True}
+
+
+@app.post("/users/{user_id}/chat-sessions", status_code=201)
+def create_user_chat_session(
+    user_id: str,
+    request: ChatSessionCreate,
+) -> dict[str, Any]:
+    with database_session(settings.database_path) as connection:
+        title = request.title.strip()
+        if not title:
+            session_count = connection.execute(
+                "SELECT COUNT(*) FROM chat_sessions WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0]
+            title = f"会话 {session_count + 1}"
+        session = create_chat_session(connection, user_id=user_id, title=title)
+    return session
+
+
+@app.get("/users/{user_id}/chat-sessions")
+def list_user_chat_sessions(user_id: str) -> dict[str, Any]:
+    with database_session(settings.database_path) as connection:
+        sessions = list_chat_sessions(connection, user_id)
+    return {"user_id": user_id, "count": len(sessions), "sessions": sessions}
+
+
+@app.get("/chat-sessions/{session_id}")
+def get_user_chat_session(
+    session_id: str,
+    user_id: str = Query(min_length=1, max_length=128),
+) -> dict[str, Any]:
+    with database_session(settings.database_path) as connection:
+        session = get_chat_session(connection, user_id, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        messages = list_messages(connection, session_id)
+    return {**session, "messages": messages}
+
+
+@app.patch("/chat-sessions/{session_id}")
+def rename_user_chat_session(
+    session_id: str,
+    request: ChatSessionRename,
+    user_id: str = Query(min_length=1, max_length=128),
+) -> dict[str, Any]:
+    with database_session(settings.database_path) as connection:
+        session = rename_chat_session(connection, user_id, session_id, request.title)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return session
+
+
+@app.delete("/chat-sessions/{session_id}")
+def delete_user_chat_session(
+    session_id: str,
+    user_id: str = Query(min_length=1, max_length=128),
+) -> dict[str, Any]:
+    with database_session(settings.database_path) as connection:
+        if not delete_chat_session(connection, user_id, session_id):
+            raise HTTPException(status_code=404, detail="Chat session not found")
+    return {"session_id": session_id, "deleted": True}
+
+
 @app.post("/recommendations")
 def recommend(request: RecommendationRequest) -> dict[str, Any]:
     try:
@@ -386,28 +541,112 @@ def route_task(request: TaskRoutingRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
+def _resolve_session_turn(request: TaskExecutionInput) -> dict[str, Any] | None:
+    """Verify session ownership and persist the user message up front.
+
+    Returns the session's current outfit context so a follow-up can reuse the
+    produced outfit; a missing session is a 404 before any task work starts.
+    """
+    if not request.session_id:
+        return None
+    with database_session(settings.database_path) as connection:
+        session = get_chat_session(connection, request.user_id, request.session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        context = get_session_outfit_context(
+            connection, request.user_id, request.session_id
+        )
+        append_message(
+            connection,
+            session_id=request.session_id,
+            user_id=request.user_id,
+            role="user",
+            content=request.request,
+        )
+    return context
+
+
+def _append_chat_success(
+    request: TaskExecutionInput,
+    payload: dict[str, Any],
+) -> str:
+    """Persist the assistant turn with a trimmed, re-renderable result snapshot."""
+    if not request.session_id:
+        return ""
+    with database_session(settings.database_path) as connection:
+        outfit_context = outfit_context_from_payload(payload)
+        return append_message(
+            connection,
+            session_id=request.session_id,
+            user_id=request.user_id,
+            role="assistant",
+            content=assistant_summary(payload),
+            task_type=str(payload.get("task_type", "")),
+            run_id=str(payload.get("run_id", "")),
+            result_json={
+                **trim_message_payload(payload),
+                "outfit_context": outfit_context,
+            },
+        )
+
+
+def _append_chat_failure(request: TaskExecutionInput, detail: str) -> None:
+    """Record the failure as an assistant message so the chain stays complete."""
+    if not request.session_id:
+        return
+    with database_session(settings.database_path) as connection:
+        append_message(
+            connection,
+            session_id=request.session_id,
+            user_id=request.user_id,
+            role="assistant",
+            content=detail,
+            result_json={
+                "request": request.request,
+                "task_type": (
+                    request.requested_task_type.value
+                    if request.requested_task_type is not None
+                    else ""
+                ),
+                "status": "failed",
+                "error": detail,
+            },
+        )
+
+
 @app.post("/tasks/execute")
 def execute_task(request: TaskExecutionInput) -> dict[str, Any]:
     """Route and execute one complete StyleForge task subgraph."""
+    session_context = _resolve_session_turn(request)
     try:
-        return get_multi_task_workflow().execute(request)
+        payload = get_multi_task_workflow().execute(
+            request, session_context=session_context
+        )
     except LlmUnavailable as error:
+        _append_chat_failure(request, str(error))
         raise HTTPException(
             status_code=503,
             detail=f"Three-agent task execution unavailable: {error}",
         ) from error
     except (LlmInvalidJson, LlmSchemaViolation) as error:
+        _append_chat_failure(request, str(error))
         raise HTTPException(
             status_code=502,
             detail=f"Three-agent task execution returned invalid output: {error}",
         ) from error
     except ValueError as error:
+        _append_chat_failure(request, str(error))
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
+        _append_chat_failure(request, str(error))
         raise HTTPException(
             status_code=500,
             detail=f"Task execution failed: {type(error).__name__}: {error}",
         ) from error
+    message_id = _append_chat_success(request, payload)
+    payload["session_id"] = request.session_id
+    payload["message_id"] = message_id
+    return payload
 
 
 @app.get("/tasks/{user_id}/{run_id}")

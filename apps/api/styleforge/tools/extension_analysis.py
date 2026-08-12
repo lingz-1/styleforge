@@ -140,8 +140,7 @@ def _analyze_modify(
     outfit_id, current_ids = _resolve_current_outfit(database_path, task_input)
     raw_slot = task_input.target_slot.strip().lower() or str(route.extracted.get("target_slot", ""))
     target_slot = SLOT_ALIASES.get(raw_slot, raw_slot)
-    if not current_ids or not target_slot:
-        missing = "当前搭配" if not current_ids else "要替换的单品位置"
+    if not current_ids:
         return Agent1TaskOutput(
             task_type=route.task_type,
             intent_summary="在保持其他单品不变的前提下修改当前搭配",
@@ -149,7 +148,36 @@ def _analyze_modify(
             constraints={"locked_non_target_items": True},
             facts={"current_outfit_id": outfit_id, "current_item_ids": current_ids},
             needs_clarification=True,
-            clarification_question=f"请补充{missing}。",
+            clarification_question="请补充当前搭配。",
+        )
+    if not target_slot:
+        # Overall adjustment (e.g. "更正式一点"): rebuild a complete outfit in
+        # the requested direction.  Nothing is locked and every replacement
+        # candidate comes from the wardrobe outside the current outfit, so the
+        # existing locked/replaced validation passes unchanged.
+        replacement_ids = [
+            item.item_id
+            for item in wardrobe
+            if item.item_id not in current_ids
+        ][:40]
+        return Agent1TaskOutput(
+            task_type=route.task_type,
+            intent_summary="整体调整当前搭配（正式度/颜色/风格方向）",
+            resolved_target={"target_slot": "", "current_outfit_id": outfit_id},
+            constraints={
+                "locked_item_ids": [],
+                "replaced_item_ids": [],
+                "adjustment_mode": "overall",
+            },
+            facts={
+                "current_outfit_id": outfit_id,
+                "current_item_ids": current_ids,
+                "locked_item_ids": [],
+                "replaced_item_ids": [],
+                "replacement_item_ids": replacement_ids,
+                "adjustment_mode": "overall",
+            },
+            candidate_item_ids=replacement_ids,
         )
     wardrobe_by_id = {item.item_id: item for item in wardrobe}
     missing_ids = sorted(set(current_ids) - set(wardrobe_by_id))

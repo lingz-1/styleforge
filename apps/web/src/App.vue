@@ -6,6 +6,7 @@
         <el-menu-item index="/recommend">✨ 穿搭推荐</el-menu-item>
         <el-menu-item index="/wardrobe">👕 我的衣柜</el-menu-item>
         <el-menu-item index="/import">📦 订单导入</el-menu-item>
+        <el-menu-item index="/memories">🧠 偏好记忆</el-menu-item>
         <el-menu-item index="/settings">⚙️ 我的偏好</el-menu-item>
       </el-menu>
     </el-aside>

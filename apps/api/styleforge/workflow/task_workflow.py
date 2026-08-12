@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TypedDict
@@ -19,14 +21,41 @@ from styleforge.models.context import ContextPack
 from styleforge.models.task import TaskExecutionInput
 from styleforge.orchestration.task_router import TaskRoute, TaskRouter, TaskType
 from styleforge.repositories.database import database_session, initialize_database
+from styleforge.repositories.memory_repository import upsert_auto_memories
 from styleforge.repositories.task_run_repository import (
     fail_task_run,
     finish_task_run,
     start_task_run,
 )
 from styleforge.repositories.wardrobe_repository import list_items
+from styleforge.services.memory_extractor import extract_memories
 from styleforge.services.presentation import present_result
 from styleforge.services.recommendation import recommend_for_user
+
+_FOLLOW_UP_ADJUST_WORDS = (
+    "更", "再", "别", "不", "一点", "太", "有点", "调整", "改变",
+    "换成", "换", "改", "替换", "色系", "风格", "正式", "休闲", "简约", "商务", "酷", "花",
+)
+_FRESH_SCENARIO_WORDS = (
+    "推荐", "面试", "聚会", "约会", "通勤", "上班", "旅行", "婚礼",
+    "出席", "晚宴", "周末", "今天", "明天", "穿什么", "搭配", "选一套",
+)
+
+
+def is_follow_up(request: str) -> bool:
+    """Whether a short request is a follow-up adjustment to the current outfit.
+
+    A follow-up must be short, express an adjustment direction, and contain no
+    fresh-brief scenario markers (e.g. ``更正式一点`` yes, ``明天穿什么`` no).
+    """
+    text = re.sub(r"\s+", " ", request.strip().lower())
+    if not text or len(text) > 20:
+        return False
+    if not any(word in text for word in _FOLLOW_UP_ADJUST_WORDS):
+        return False
+    if any(word in text for word in _FRESH_SCENARIO_WORDS):
+        return False
+    return True
 
 
 class TaskWorkflowState(TypedDict, total=False):
@@ -345,13 +374,69 @@ class MultiTaskWorkflow:
             "trace": trace,
         }
 
-    def execute(self, task_input: TaskExecutionInput) -> dict[str, Any]:
-        route = self.router.route(
+    def _route_with_session(
+        self,
+        task_input: TaskExecutionInput,
+        session_context: dict[str, Any] | None,
+    ) -> TaskRoute:
+        """Route a request, folding in the session's current outfit context.
+
+        Two passes: first route on the request alone; then, when the request is
+        a short follow-up adjustment, reuse the session outfit as the current
+        outfit and force a modification task.  A modification request without a
+        slot word (e.g. ``更正式一点``) falls through to OUTFIT_RECOMMEND on the
+        first pass and is re-routed here.
+        """
+        session_outfit_id = (session_context or {}).get("current_outfit_id") or ""
+        session_item_ids = (session_context or {}).get("current_item_ids") or []
+        has_explicit = bool(task_input.current_outfit_id or task_input.current_item_ids)
+        route0 = self.router.route(
             task_input.request,
             current_outfit_id=task_input.current_outfit_id,
             has_candidate_item=task_input.candidate_item is not None,
             requested_task_type=task_input.requested_task_type,
         )
+        if has_explicit or not session_item_ids:
+            return route0
+        with database_session(self.database_path) as connection:
+            active_ids = {item.item_id for item in list_items(connection, task_input.user_id)}
+        session_item_ids = [
+            item_id for item_id in session_item_ids if item_id in active_ids
+        ]
+        if not session_item_ids:
+            return route0
+        if route0.task_type is TaskType.OUTFIT_RECOMMEND and is_follow_up(task_input.request):
+            task_input.current_outfit_id = session_outfit_id
+            task_input.current_item_ids = session_item_ids
+            route = self.router.route(
+                task_input.request,
+                current_outfit_id=session_outfit_id,
+            )
+            return dataclass_replace(route, reason="session_follow_up", confidence=0.9)
+        if route0.task_type is TaskType.OUTFIT_MODIFY:
+            task_input.current_outfit_id = session_outfit_id
+            task_input.current_item_ids = session_item_ids
+        return route0
+
+    def _extract_memories(self, task_input: TaskExecutionInput) -> None:
+        """Distill preference memories from the request; failures are swallowed."""
+        try:
+            extracts = extract_memories(task_input.request)
+            if not extracts:
+                return
+            with database_session(self.database_path) as connection:
+                upsert_auto_memories(connection, task_input.user_id, extracts)
+        except Exception:
+            # Memory extraction is best-effort and must never fail a task run.
+            pass
+
+    def execute(
+        self,
+        task_input: TaskExecutionInput,
+        *,
+        session_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        route = self._route_with_session(task_input, session_context)
         with database_session(self.database_path) as connection:
             run_id = start_task_run(
                 connection,
@@ -383,6 +468,7 @@ class MultiTaskWorkflow:
                     context_pack=context_pack,
                     result=result,
                 )
+            self._extract_memories(task_input)
         except Exception as error:
             with database_session(self.database_path) as connection:
                 fail_task_run(

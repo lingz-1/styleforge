@@ -15,6 +15,7 @@ from styleforge.models.context import (
 from styleforge.models.task import TaskExecutionInput
 from styleforge.orchestration.task_router import TaskRoute
 from styleforge.repositories.database import database_session
+from styleforge.repositories.memory_repository import active_memory_profile
 from styleforge.repositories.request_memory_repository import recent_request_memories
 from styleforge.repositories.user_preferences_repository import get_evaluation_weights
 from styleforge.repositories.wardrobe_repository import list_items
@@ -38,6 +39,7 @@ class ContextPackBuilder:
             wardrobe = list_items(connection, task_input.user_id)
             weights = get_evaluation_weights(connection, task_input.user_id)
             recent = recent_request_memories(connection, task_input.user_id, limit=5)
+            memories = active_memory_profile(connection, task_input.user_id, limit=30)
         slot_counts = Counter(infer_slot(item.item_type) for item in wardrobe)
         type_counts = Counter(item.item_type for item in wardrobe)
         wardrobe_summary = {
@@ -45,6 +47,9 @@ class ContextPackBuilder:
             "slot_counts": dict(sorted(slot_counts.items())),
             "item_type_counts": dict(sorted(type_counts.items())),
         }
+        preferences = {"evaluation_profile": {"weights": weights}}
+        if memories:
+            preferences["memory_profile"] = memories
         return ContextPack(
             request_context=RequestContext(
                 original_request=task_input.request,
@@ -61,7 +66,7 @@ class ContextPackBuilder:
             user_context=UserContext(
                 user_id=task_input.user_id,
                 wardrobe_summary=wardrobe_summary,
-                preferences={"evaluation_profile": {"weights": weights}},
+                preferences=preferences,
                 recent_requests=recent,
             ),
             candidate_item=(

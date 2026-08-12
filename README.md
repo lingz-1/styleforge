@@ -25,6 +25,7 @@ StyleForge 是一个本地优先的个人衣柜多 Agent 穿搭系统。用户�
 - P5 天气上下文：Agent 1 按请求决定是否需要天气，Context Router 通过 typed Open-Meteo Tool 获取事实，再把同一事实交给三个主 Agent；Weather Tool 不生成穿搭建议，当前实现不是 MCP Server。契约见[天气上下文工具](docs/WEATHER_CONTEXT.md)。
 - P2.5 路由评估切片（已验证）：`evals/cases/task_routing.json` 固化 42 条中英文用例，六类各 7 条；基线准确率 100%，六类逐类准确率均为 100%，失败样本 0。该指标只评价固定集任务路由，不代表穿搭质量。
 - 衣柜照片识别与批量导入：单图识别（`POST /items/analyze` 预填 + `/items/photo` 入库）和批量识别（`POST /items/batch-recognize`，后台 3 张并发、前端轮询进度/预计剩余、失败项可编辑入库或删除、处理完确认删除批次记录）。识别走本地代理调 Vertex Gemini 多模态；批量入库 `embedding_status=pending` 待统一补嵌入。详见[开发过程记录](docs/DEVELOPMENT_LOG.md)第 10 节。
+- 会话持久化多轮对话 + 用户长期记忆：`POST /tasks/execute` 带 `session_id` 落库消息并恢复上文，同一会话内连续追问（"换件外套""更正式一点"）自动携带当前搭配；`user_memories` 从提问中确定性提炼长期偏好（置信度累加、手动优先）并注入三位 Agent；Web 推荐页聊天化 + 新增偏好管理页。契约见[会话与记忆](docs/SESSION_CHAT_MEMORY.md)。
 
 ## 职责边界
 
@@ -133,7 +134,7 @@ D:\anaconda\envs\style\python.exe -m styleforge.workflow.graph `
 
 配置了 `DEEPSEEK_API_KEY` 时上述命令自动走语义链路（输出含 `request_signature`、`retrieval_plans`、`pool`、`critic` 决策等字段）；可用 `--no-llm` 强制走确定性链路，或 `--llm-verbose` 输出每轮 LLM 的完整提示词与响应：
 
-Web 和小程序的主推荐输入统一调用 `POST /tasks/execute`。Task Router 会自动识别普通推荐、局部修改、风格知识、单品搭配、新品兼容性和衣橱缺口。五类扩展任务严格执行同一套 Agent 1/2/3；没有配置 LLM 或任一 Agent 输出非法时会明确失败，不提供确定性结果降级。标准穿搭推荐仍保留原有离线降级能力。
+Web 和小程序的主推荐输入统一调用 `POST /tasks/execute`。Task Router 会自动识别普通推荐、局部修改、风格知识、单品搭配、新品兼容性和衣橱缺口。五类扩展任务严格执行同一套 Agent 1/2/3；没有配置 LLM 或任一 Agent 输出非法时会明确失败，不提供确定性结果降级。标准穿搭推荐仍保留原有离线降级能力。带上 `session_id` 时请求会持久化为一个可恢复的多轮会话（Web 聊天化已接入；小程序暂只传 `user_id/request`，行为不变）。
 
 ## 关键产物
 

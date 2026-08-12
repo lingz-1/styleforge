@@ -10,6 +10,8 @@
 
 > 2026-08-10 P5 V2规划：已完成[天气与时空上下文 V2 详细方案](WEATHER_CONTEXT_V2_PLAN.md)，覆盖隐含天气需求、设备定位、近3天默认窗口、相对时间/节日、事件场次与场馆、小时级活动窗口、远期气候语义、环境调整说明和随身物品建议。该部分目前是规划，不属于189个已通过用例覆盖的实现。
 
+> 2026-08-12 P1进度：会话持久化多轮对话 + 用户长期记忆系统已完成。新增 `chat_sessions/chat_messages/user_memories` 三表（Schema v10）、会话/记忆 HTTP API、`POST /tasks/execute` 消息落库、两段式路由（"换件外套""更正式一点"自动带上文并走整体调整模式）、确定性记忆提炼与三 Agent 注入；前端聊天化（会话侧栏 + 历史恢复 + localStorage 记住当前会话）+ 新增偏好管理页 `/memories`。当批验证：全量 Pytest **364 passed**（新增 32 个）、Ruff clean、Vue 生产构建通过；方案与契约见[会话与记忆契约](SESSION_CHAT_MEMORY.md)。
+
 > 历史统计口径修正：2026-08-06真实API的8类请求全部`accept`且100%衣柜归属；其中7类无回退，“高考”请求的Critic发生一次瞬时API失败并按标准推荐策略降级。文中旧的“8请求0回退”摘要以本说明为准。
 
 ## 1. 当前结论
@@ -55,6 +57,7 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 | 中英分类结构 + 上传联动（2026-08-09） | 已验证 | `core/taxonomy.py` 单一数据源（27 大类 + 70 细分类中英标签，大类按常用度排序）；`GET /catalog/taxonomy`；`docs/category_taxonomy.md`；Web/小程序上传表单大类必选 + 细分类可选联动 |
 | 衣柜可折叠（2026-08-09） | 已验证 | Web 用 el-collapse、小程序用分组折叠，均默认收起 + 全部展开/收起；Web 推荐状态 Pinia store 跨页面持久化（路由切换不丢结果） |
 | 小程序真机图片（2026-08-09） | 已验证 | 微信真机 `<image>` 不支持 http 链接，改为 `wx.downloadFile` 下载成本地临时文件再渲染；衣柜分组惰性下载，推荐结果图同样处理 |
+| 会话持久化多轮对话 + 长期记忆（2026-08-12） | 已验证 | `chat_sessions/chat_messages/user_memories` 三表（Schema v10）；`/tasks/execute` 带 `session_id` 落库并可恢复上文；两段式路由 + 整体调整模式；确定性记忆提炼（置信度累加、手动优先）注入三 Agent；Web 聊天化 + 偏好管理页；全量 364 passed |
 
 ## 3. 已验证证据
 

@@ -588,6 +588,7 @@ class StyleForgeWorkflow:
                 llm=self._llm_client,
                 weights=state.get("evaluation_weights"),
                 environment_context=state.get("environment_context") or None,
+                memory_profile=state.get("memory_profile") or None,
             )
         except BaseException as error:
             output, info, _ = self.semantic_retriever.run(
@@ -598,6 +599,7 @@ class StyleForgeWorkflow:
                 llm=None,
                 weights=state.get("evaluation_weights"),
                 environment_context=state.get("environment_context") or None,
+                memory_profile=state.get("memory_profile") or None,
             )
             info["reason"] = f"{type(error).__name__}: {error}"
         output_dict = output.to_dict()
@@ -665,7 +667,12 @@ class StyleForgeWorkflow:
             wardrobe_items = list_items(connection, task.user_id)
         by_slot = _build_by_slot(wardrobe_items, task)
         preference = preference_scores(wardrobe_items, task)
-        novelty = novelty_scores(wardrobe_items, state.get("recent_memories", []))
+        recent_signatures = [
+            memory.get("structure_signature", {})
+            for memory in state.get("recent_memories", [])
+            if memory.get("structure_signature")
+        ]
+        novelty = novelty_scores(wardrobe_items, recent_signatures)
         try:
             with self._vision_lock:
                 encoder, vector_store = self._ensure_vision()
@@ -767,6 +774,7 @@ class StyleForgeWorkflow:
                 pool_scores=pool_scores,
                 weights=state.get("evaluation_weights"),
                 environment_context=state.get("environment_context") or None,
+                memory_profile=state.get("memory_profile") or None,
             )
         except BaseException as error:
             proposals, info, _ = self.composer.run(
@@ -781,6 +789,7 @@ class StyleForgeWorkflow:
                 pool_scores=pool_scores,
                 weights=state.get("evaluation_weights"),
                 environment_context=state.get("environment_context") or None,
+                memory_profile=state.get("memory_profile") or None,
             )
             info["reason"] = f"{type(error).__name__}: {error}"
         proposal_dicts = [proposal.to_dict() for proposal in proposals]
@@ -833,6 +842,7 @@ class StyleForgeWorkflow:
                 wardrobe_ids=set(state.get("wardrobe_item_ids", [])),
                 weights=state.get("evaluation_weights"),
                 environment_context=state.get("environment_context") or None,
+                memory_profile=state.get("memory_profile") or None,
             )
         except BaseException as error:
             critic_output = deterministic_critic(
@@ -1064,6 +1074,16 @@ class StyleForgeWorkflow:
         except BaseException:
             return []
 
+    def _load_memory_profile(self, user_id: str) -> list[dict[str, Any]]:
+        """Long-term preference profile; best-effort, empty when unavailable."""
+        try:
+            from styleforge.repositories.memory_repository import active_memory_profile
+
+            with database_session(self.database_path) as connection:
+                return active_memory_profile(connection, user_id, limit=30)
+        except BaseException:
+            return []
+
     def _load_evaluation_weights(self, user_id: str) -> dict[str, float]:
         try:
             from styleforge.repositories.user_preferences_repository import get_evaluation_weights
@@ -1103,6 +1123,7 @@ class StyleForgeWorkflow:
             "llm_attempts": 0,
             "fallback_count": 0,
             "recent_memories": self._load_recent_memories(user_id),
+            "memory_profile": self._load_memory_profile(user_id),
             "evaluation_weights": self._load_evaluation_weights(user_id),
             "retriever_degraded": False,
             "context_router_completed": False,
