@@ -6,7 +6,6 @@ import argparse
 import json
 from collections import Counter
 from datetime import datetime, timezone
-from pathlib import Path
 
 from styleforge.core.categories import infer_slot
 from styleforge.core.config import Settings
@@ -171,13 +170,13 @@ def _load_candidates(
 ) -> list[CatalogItem]:
     sql = (
         "SELECT * FROM catalog_items "
-        "WHERE item_type = ? "
+        "WHERE item_type = %s "
         "  AND image_status = 'available' "
         "  AND embedding_status = 'ready'"
     )
     parameters: list[str] = [item_type]
     if audience is not None:
-        sql += " AND gender = ?"
+        sql += " AND gender = %s"
         parameters.append(audience)
     sql += " ORDER BY item_id"
     rows = connection.execute(sql, parameters).fetchall()
@@ -213,7 +212,7 @@ def _select_mixed_items(
 
 
 def seed_balanced_wardrobe(
-    database_path: Path,
+    database_path: str,
     *,
     user_id: str,
     profile: str = "mixed-large",
@@ -239,7 +238,7 @@ def seed_balanced_wardrobe(
                 "audience is required when the catalog contains multiple audiences"
             )
         if replace:
-            connection.execute("DELETE FROM wardrobe_items WHERE user_id = ?", (user_id,))
+            connection.execute("DELETE FROM wardrobe_items WHERE user_id = %s", (user_id,))
         for item_type, quota in PROFILES[profile].items():
             candidates = _load_candidates(connection, item_type, audience)
             selected.extend(_select_mixed_items(candidates, quota))
@@ -247,7 +246,7 @@ def seed_balanced_wardrobe(
         connection.executemany(
             "INSERT INTO wardrobe_items("
             "  user_id, item_id, active, favorite, notes, added_at"
-            ") VALUES (?, ?, 1, 0, ?, ?) "
+            ") VALUES (%s, %s, 1, 0, %s, %s) "
             "ON CONFLICT(user_id, item_id) DO UPDATE SET active = 1",
             (
                 (
@@ -260,7 +259,7 @@ def seed_balanced_wardrobe(
             ),
         )
         active_total = connection.execute(
-            "SELECT COUNT(*) FROM wardrobe_items WHERE user_id = ? AND active = 1",
+            "SELECT COUNT(*) FROM wardrobe_items WHERE user_id = %s AND active = 1",
             (user_id,),
         ).fetchone()[0]
 
@@ -284,7 +283,7 @@ def seed_balanced_wardrobe(
 def _build_parser() -> argparse.ArgumentParser:
     settings = Settings.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument("--user-id", default="demo-user")
     parser.add_argument("--profile", choices=tuple(PROFILES), default="mixed-large")
     parser.add_argument(

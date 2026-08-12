@@ -43,11 +43,19 @@ class Settings:
     metadata_path: Path
     outfit_path: Path
     image_root: Path | None
-    database_path: Path
     artifact_root: Path
     embedding_dir: Path
     index_dir: Path
     dataset_revision: str
+    knowledge_root: Path
+    # PostgreSQL DSN (STYLEFORGE_DATABASE_DSN); the SQLite file path is retired.
+    database_dsn: str = ""
+    # Redis cache for session-level outfit context (optional external service).
+    redis_enabled: bool = False
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    redis_ttl: int = 86400
+    # Chroma RAG persistent directory (knowledge text embeddings).
+    chroma_dir: Path = Path("artifacts/chroma")
     llm_enabled: bool = False
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
@@ -124,9 +132,6 @@ class Settings:
                 )
             ).resolve(),
             image_root=_optional_path(os.getenv("GARMENTS2LOOK_IMAGE_ROOT")),
-            database_path=Path(
-                os.getenv("STYLEFORGE_DATABASE_PATH", WORKSPACE_ROOT / "data" / "styleforge.db")
-            ).resolve(),
             artifact_root=artifact_root,
             embedding_dir=Path(
                 os.getenv(
@@ -143,6 +148,18 @@ class Settings:
             dataset_revision=os.getenv(
                 "GARMENTS2LOOK_REVISION", "5324b92e86beefa27196116c6d3957fcc6242205"
             ),
+            knowledge_root=Path(
+                os.getenv("STYLEFORGE_KNOWLEDGE_ROOT", WORKSPACE_ROOT / "knowledge")
+            ).resolve(),
+            database_dsn=os.getenv("STYLEFORGE_DATABASE_DSN", "").strip(),
+            redis_enabled=_optional_bool(os.getenv("STYLEFORGE_REDIS_ENABLED")),
+            redis_url=os.getenv("STYLEFORGE_REDIS_URL", "redis://127.0.0.1:6379/0").strip(),
+            redis_ttl=int(os.getenv("STYLEFORGE_REDIS_TTL", "86400") or 86400),
+            chroma_dir=Path(
+                os.getenv(
+                    "STYLEFORGE_CHROMA_DIR", artifact_root / "chroma"
+                )
+            ).resolve(),
             llm_enabled=_optional_bool(os.getenv("STYLEFORGE_LLM_ENABLED"))
             or bool(api_key),
             deepseek_api_key=api_key,

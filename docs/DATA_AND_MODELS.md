@@ -7,7 +7,7 @@
 | 商品元数据 | `polyvore_image_v1.0_2512.json` | 商品名称、颜色、品类、描述和图片路径 |
 | 搭配数据 | `polyvore_outfit_v1.0_2512.json` | 严格搭配子集和离线兼容性评估 |
 | 商品图片 | `E:\image.tar\image\images\women\<type>\<id>.jpg` | FashionCLIP 图片编码和 UI 展示 |
-| SQLite | `data/styleforge.db` | 商品、搭配、衣柜和运行记录 |
+| PostgreSQL | `127.0.0.1:5432`（`STYLEFORGE_DATABASE_DSN` 指向的 `styleforge` 库） | 商品、搭配、衣柜和运行记录 |
 
 外部图片目录没有复制进项目仓库。数据库保存相对路径，通过 `GARMENTS2LOOK_IMAGE_ROOT` 在运行时绑定。
 
@@ -86,6 +86,6 @@ FashionCLIP 的职责是图片/文本语义对齐和候选排序，不直接生�
 - 数据集商品图片。
 - FashionCLIP 权重。
 - 全量向量和 FAISS 索引。
-- SQLite 数据库。
+- 数据库转储（`pg_dump` 产物）与 Chroma 持久化目录。
 
 公开作品集时应提供数据集和模型来源、下载说明、固定 revision 与本地重建命令，而不是重新分发未经确认许可的大文件。

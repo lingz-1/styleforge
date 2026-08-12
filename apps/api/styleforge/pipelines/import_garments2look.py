@@ -24,7 +24,7 @@ from styleforge.repositories.import_run_repository import (
 
 def import_metadata(
     metadata_path: Path,
-    database_path: Path,
+    database_path: str,
     image_root: Path | None,
     source_revision: str,
     batch_size: int = 1000,
@@ -78,7 +78,7 @@ def import_metadata(
         "source_revision": source_revision,
         "image_root": str(image_root.resolve()) if image_root is not None else None,
         "processed_count": processed_count,
-        "database_path": str(database_path.resolve()),
+        "database_path": str(database_path),
         "database_counts": counts,
     }
 
@@ -87,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     settings = Settings.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--metadata", type=Path, default=settings.metadata_path)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument("--image-root", type=Path, default=settings.image_root)
     parser.add_argument("--source-revision", default=settings.dataset_revision)
     parser.add_argument("--batch-size", type=int, default=1000)

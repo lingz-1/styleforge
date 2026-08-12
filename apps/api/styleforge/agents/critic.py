@@ -183,7 +183,7 @@ class CriticAgent:
         wardrobe_ids: set[str],
         weights: dict[str, float] | None = None,
         environment_context: dict[str, Any] | None = None,
-        memory_profile: list[dict[str, Any]] | None = None,
+        memory_profile: Any = None,
     ) -> tuple[CriticOutput, dict[str, Any], LlmCallDiagnostics | None]:
         if llm is None:
             output = deterministic_critic(outfits, task, wardrobe_ids)

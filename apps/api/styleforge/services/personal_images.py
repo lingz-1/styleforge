@@ -59,7 +59,7 @@ def save_personal_image(root: Path, item_id: str, image_bytes: bytes) -> str:
 
 def bind_personal_image(
     *,
-    database_path: Path,
+    database_path: str,
     artifact_root: Path,
     user_id: str,
     item_id: str,
@@ -78,7 +78,7 @@ def bind_personal_image(
             SELECT c.item_id, c.source
             FROM catalog_items AS c
             JOIN personal_wardrobe_items AS p ON p.item_id = c.item_id
-            WHERE c.item_id = ? AND p.user_id = ?
+            WHERE c.item_id = %s AND p.user_id = %s
             """,
             (item_id, user_id),
         ).fetchone()
@@ -92,9 +92,9 @@ def bind_personal_image(
         connection.execute(
             """
             UPDATE catalog_items
-            SET image_filename = ?, relative_image_path = ?, image_status = 'available',
+            SET image_filename = %s, relative_image_path = %s, image_status = 'available',
                 embedding_status = 'pending'
-            WHERE item_id = ?
+            WHERE item_id = %s
             """,
             (filename, filename, item_id),
         )
@@ -103,7 +103,7 @@ def bind_personal_image(
             INSERT INTO catalog_item_images(
                 item_id, position, image_role, image_filename,
                 relative_image_path, image_status, is_primary
-            ) VALUES (?, 0, 'primary', ?, ?, 'available', 1)
+            ) VALUES (%s, 0, 'primary', %s, %s, 'available', 1)
             ON CONFLICT(item_id, position) DO UPDATE SET
                 image_filename = excluded.image_filename,
                 relative_image_path = excluded.relative_image_path,

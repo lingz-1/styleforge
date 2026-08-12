@@ -1,53 +1,70 @@
-import sqlite3
+"""PostgreSQL schema tests backed by ``information_schema``.
+
+Each test gets its own isolated schema via the ``db_dsn`` fixture, so table
+existence is asserted against ``current_schema()`` rather than ``sqlite_master``.
+"""
+
+from __future__ import annotations
 
 import pytest
 
-from styleforge.repositories.database import SCHEMA_VERSION, initialize_database
+from styleforge.repositories.database import SCHEMA_VERSION, connect, initialize_database
 
 
-def test_initialize_rejects_a_database_from_a_newer_schema(tmp_path) -> None:
-    database_path = tmp_path / "future.db"
-    connection = sqlite3.connect(database_path)
-    connection.execute(
-        "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-    )
-    connection.execute(
-        "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)",
-        (str(SCHEMA_VERSION + 1),),
-    )
-    connection.commit()
-    connection.close()
-
-    with pytest.raises(RuntimeError, match="newer than this StyleForge build"):
-        initialize_database(database_path)
-
-
-def test_schema_contains_personal_wardrobe_import_tables(tmp_path) -> None:
-    database_path = tmp_path / "styleforge.db"
-    initialize_database(database_path)
-    connection = sqlite3.connect(database_path)
-    try:
-        tables = {
-            row[0]
+def _table_names(dsn: str) -> set[str]:
+    with connect(dsn) as connection:
+        return {
+            row["table_name"]
             for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema()"
             )
         }
-        version = connection.execute(
-            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-        ).fetchone()[0]
-        import_row_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(wardrobe_import_rows)")
-        }
-        personal_item_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(personal_wardrobe_items)")
-        }
-    finally:
-        connection.close()
 
-    assert version == str(SCHEMA_VERSION)
+
+def _column_names(dsn: str, table: str) -> set[str]:
+    with connect(dsn) as connection:
+        return {
+            row["column_name"]
+            for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = %s",
+                (table,),
+            )
+        }
+
+
+def _schema_version(dsn: str) -> str:
+    with connect(dsn) as connection:
+        row = connection.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+    assert row is not None
+    return row["value"]
+
+
+def test_initialize_rejects_a_database_from_a_newer_schema(db_dsn: str) -> None:
+    with connect(db_dsn) as connection:
+        connection.execute(
+            "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO schema_meta(key, value) VALUES('schema_version', %s)",
+            (str(SCHEMA_VERSION + 1),),
+        )
+        connection.commit()
+
+    with pytest.raises(RuntimeError, match="newer than this StyleForge build"):
+        initialize_database(db_dsn)
+
+
+def test_schema_contains_personal_wardrobe_import_tables(db_dsn: str) -> None:
+    initialize_database(db_dsn)
+    tables = _table_names(db_dsn)
+    import_row_columns = _column_names(db_dsn, "wardrobe_import_rows")
+    personal_item_columns = _column_names(db_dsn, "personal_wardrobe_items")
+
+    assert _schema_version(db_dsn) == str(SCHEMA_VERSION)
     assert {
         "wardrobe_import_batches",
         "wardrobe_import_rows",
@@ -71,87 +88,46 @@ def test_schema_contains_personal_wardrobe_import_tables(tmp_path) -> None:
     }.issubset(personal_item_columns)
 
 
-def test_schema_v10_contains_chat_and_memory_tables(tmp_path) -> None:
-    database_path = tmp_path / "styleforge.db"
-    initialize_database(database_path)
-    connection = sqlite3.connect(database_path)
-    try:
-        tables = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
+def test_schema_v11_contains_chat_and_preference_memory_tables(db_dsn: str) -> None:
+    initialize_database(db_dsn)
+    with connect(db_dsn) as connection:
+        tables = _table_names(db_dsn)
         indexes = {
-            row[0]
+            row["indexname"]
             for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'index'"
+                "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()"
             )
         }
-        message_columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(chat_messages)")
-        }
-    finally:
-        connection.close()
+        message_columns = _column_names(db_dsn, "chat_messages")
+        event_columns = _column_names(db_dsn, "interaction_events")
+        evidence_columns = _column_names(db_dsn, "preference_evidence")
+        preference_columns = _column_names(db_dsn, "preference_model")
 
-    assert SCHEMA_VERSION == 10
-    assert {"chat_sessions", "chat_messages", "user_memories"}.issubset(tables)
+    assert SCHEMA_VERSION == 11
+    assert {"chat_sessions", "chat_messages"}.issubset(tables)
+    # The retired user_memories table is gone, replaced by the evidence + model pair.
+    assert "user_memories" not in tables
+    assert {"interaction_events", "preference_evidence", "preference_model"}.issubset(
+        tables
+    )
     assert {"idx_chat_sessions_user_updated", "idx_chat_messages_session_created"}.issubset(
         indexes
     )
     assert {"result_json", "task_type", "run_id"}.issubset(message_columns)
+    assert {"event_type", "context_json", "features_json"}.issubset(event_columns)
+    assert {"polarity", "strength", "scope_json", "source"}.issubset(evidence_columns)
+    assert {
+        "dimension",
+        "attribute",
+        "value",
+        "lifecycle",
+        "support_count",
+        "contradiction_count",
+    }.issubset(preference_columns)
 
 
-def test_schema_v8_migrates_task_runs_status_without_losing_rows(tmp_path) -> None:
-    database_path = tmp_path / "schema-v7.db"
-    connection = sqlite3.connect(database_path)
-    connection.executescript(
-        """
-        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        INSERT INTO schema_meta(key, value) VALUES('schema_version', '7');
-        CREATE TABLE task_runs (
-            run_id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            task_type TEXT NOT NULL,
-            request TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (
-                status IN ('running', 'completed', 'infeasible', 'failed')
-            ),
-            context_pack_json TEXT NOT NULL DEFAULT '{}',
-            result_json TEXT,
-            error_message TEXT,
-            created_at TEXT NOT NULL,
-            finished_at TEXT
-        );
-        INSERT INTO task_runs(
-            run_id, user_id, task_type, request, status, created_at
-        ) VALUES ('old-run', 'u', 'item_advice', '旧记录', 'completed', '2026-08-09');
-        """
-    )
-    connection.commit()
-    connection.close()
-
-    initialize_database(database_path)
-
-    connection = sqlite3.connect(database_path)
-    try:
-        old_row = connection.execute(
-            "SELECT user_id, status FROM task_runs WHERE run_id = 'old-run'"
-        ).fetchone()
-        connection.execute(
-            """
-            INSERT INTO task_runs(
-                run_id, user_id, task_type, request, status, created_at
-            ) VALUES ('clarify-run', 'u', 'item_advice', '待补充',
-                      'needs_clarification', '2026-08-10')
-            """
-        )
-        version = connection.execute(
-            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-        ).fetchone()[0]
-    finally:
-        connection.close()
-
-    assert old_row == ("u", "completed")
-    assert version == str(SCHEMA_VERSION)
+def test_initialize_database_is_idempotent(db_dsn: str) -> None:
+    initialize_database(db_dsn)
+    initialize_database(db_dsn)
+    assert _schema_version(db_dsn) == str(SCHEMA_VERSION)
+    assert {"catalog_items", "chat_messages", "task_runs"}.issubset(_table_names(db_dsn))

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 
 from styleforge.core.schemas import RecommendationResult, TaskSpec
 from styleforge.repositories.database import database_session, initialize_database
@@ -16,7 +15,7 @@ from styleforge.repositories.wardrobe_repository import list_items
 from styleforge.tools.candidate_generation import generate_candidates, select_diverse_candidates
 
 
-def recommend_for_user(database_path: Path, task: TaskSpec) -> RecommendationResult:
+def recommend_for_user(database_path: str, task: TaskSpec) -> RecommendationResult:
     initialize_database(database_path)
     with database_session(database_path) as connection:
         run_id = start_run(connection, task)

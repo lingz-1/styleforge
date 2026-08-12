@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import shutil
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -189,21 +188,6 @@ def _select_polyvore_ids(
     return selected_ids, stats, selected_outfit_ids
 
 
-def _backup_database(database_path: Path) -> Path | None:
-    if not database_path.is_file():
-        return None
-    stamp = datetime.now().strftime("%Y%m%d")
-    backup = database_path.with_name(f"{database_path.stem}.bak-{stamp}")
-    counter = 1
-    while backup.exists():
-        backup = database_path.with_name(
-            f"{database_path.stem}.bak-{stamp}-{counter}"
-        )
-        counter += 1
-    shutil.copy2(database_path, backup)
-    return backup
-
-
 def _insert_wardrobe_items(
     connection,
     user_id: str,
@@ -213,7 +197,7 @@ def _insert_wardrobe_items(
     connection.executemany(
         """
         INSERT INTO wardrobe_items(user_id, item_id, active, favorite, notes, added_at)
-        VALUES (?, ?, 1, 0, '', ?)
+        VALUES (%s, %s, 1, 0, '', %s)
         ON CONFLICT(user_id, item_id) DO UPDATE SET active = 1
         """,
         ((user_id, item_id, stamp) for item_id in item_ids),
@@ -228,7 +212,7 @@ def build_simulated_wardrobe(
     polyvore_metadata: Path,
     polyvore_outfits: Path,
     polyvore_image_root: Path,
-    database_path: Path,
+    database_path: str,
     seed: int,
     my_outfits: int,
     pv_outfits: int,
@@ -278,15 +262,8 @@ def build_simulated_wardrobe(
         flush=True,
     )
 
-    backup = _backup_database(database_path)
-    print("Removing old database file...", flush=True)
-    for sidecar in (
-        database_path,
-        Path(f"{database_path}-wal"),
-        Path(f"{database_path}-shm"),
-    ):
-        sidecar.unlink(missing_ok=True)
-    print("Initializing clean database...", flush=True)
+    # PostgreSQL-backed: the schema already lives on the server, so the old
+    # SQLite file-reset dance (backup, unlink .db/-wal/-shm, rebuild) is gone.
     initialize_database(database_path)
 
     my_imported = 0
@@ -397,8 +374,8 @@ def build_simulated_wardrobe(
     report: dict[str, object] = {
         "generated_at": _now(),
         "seed": seed,
-        "database_path": str(database_path.resolve()),
-        "backup_path": str(backup.resolve()) if backup is not None else None,
+        "database_path": str(database_path),
+        "backup_path": None,
         "selection": {"mytheresa": my_stats, "polyvore": pv_stats},
         "imported": {
             "mytheresa_items": my_imported,
@@ -425,7 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--polyvore-metadata", type=Path, required=True)
     parser.add_argument("--polyvore-outfits", type=Path, required=True)
     parser.add_argument("--polyvore-image-root", type=Path, required=True)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--my-outfits", type=int, default=150)
     parser.add_argument("--pv-outfits", type=int, default=50)

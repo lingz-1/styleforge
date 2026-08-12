@@ -1,73 +1,97 @@
+"""Tests for LLM-based structured preference-evidence extraction."""
+
 from __future__ import annotations
 
-from styleforge.services.memory_extractor import extract_memories
+from styleforge.services.memory_extractor import extract_language_evidence
 
 from tests.extension_llm import ScriptedExtensionLlm
 
 
-def _extract(responses: list[dict], request: str = "黑色衬衫 + 通勤正式"):
-    llm = ScriptedExtensionLlm(responses)
-    extracts = extract_memories(llm, request)
-    return extracts, llm
+def _evidence(*items) -> dict:
+    return {"evidence": list(items)}
 
 
-def test_extract_memories_with_llm_returns_extracts() -> None:
-    extracts, llm = _extract(
+def test_extract_returns_structured_evidence() -> None:
+    llm = ScriptedExtensionLlm(
         [
-            {
-                "memories": [
-                    {"category": "color", "content": "黑色", "meta": {"polarity": "positive"}},
-                    {"category": "category", "content": "衬衫", "meta": {}},
-                    {"category": "occasion", "content": "通勤", "meta": {}},
-                ]
-            }
+            _evidence(
+                {
+                    "dimension": "style",
+                    "attribute": "style",
+                    "value": "简约",
+                    "polarity": "positive",
+                    "strength": 0.8,
+                    "scope": {"type": "global"},
+                },
+                {
+                    "dimension": "garment",
+                    "attribute": "category",
+                    "value": "衬衫",
+                    "polarity": "positive",
+                    "strength": 0.5,
+                    "scope": {"type": "contextual", "occasions": ["通勤"]},
+                },
+            )
         ]
     )
-    categories = {(item["category"], item["content"]) for item in extracts}
-    assert categories == {
-        ("color", "黑色"),
-        ("category", "衬衫"),
-        ("occasion", "通勤"),
-    }
-    color = next(item for item in extracts if item["category"] == "color")
-    assert color["meta"]["polarity"] == "positive"
-    assert len(llm.calls) == 1
+    items = extract_language_evidence(llm, "通勤简约风")
+    assert len(items) == 2
+    assert items[0]["dimension"] == "style"
+    assert items[0]["attribute"] == "style"
+    assert items[0]["value"] == "简约"
+    assert items[0]["polarity"] == "positive"
+    assert items[0]["source"] == "llm_request"
+    assert items[1]["scope"]["occasions"] == ["通勤"]
 
 
-def test_extract_memories_returns_empty_without_llm() -> None:
-    assert extract_memories(None, "黑色衬衫 + 通勤正式") == []
-    # A blank request short-circuits before any LLM call.
-    assert extract_memories(ScriptedExtensionLlm([{"memories": []}]), "  ") == []
-
-
-def test_extract_memories_swallows_llm_failure() -> None:
-    assert extract_memories(ScriptedExtensionLlm([]), "黑色衬衫 + 通勤正式") == []
-
-
-def test_extract_memories_drops_invalid_entries() -> None:
-    extracts, _ = _extract(
+def test_extract_normalizes_and_dedupes() -> None:
+    llm = ScriptedExtensionLlm(
         [
-            {
-                "memories": [
-                    {"category": "not-a-category", "content": "黑色"},
-                    {"category": "color", "content": ""},
-                    {"category": "color", "content": "黑色"},
-                ]
-            }
+            _evidence(
+                {
+                    "dimension": "style",
+                    "attribute": "  Style ",
+                    "value": " 简约 ",
+                    "polarity": "positive",
+                    "strength": 0.5,
+                    "scope": {"type": "global"},
+                },
+                {
+                    "dimension": "style",
+                    "attribute": "style",
+                    "value": "简约",
+                    "polarity": "positive",
+                    "strength": 0.5,
+                    "scope": {"type": "global"},
+                },
+            )
         ]
     )
-    assert extracts == [{"category": "color", "content": "黑色", "meta": {}}]
+    items = extract_language_evidence(llm, "简约")
+    assert len(items) == 1
 
 
-def test_extract_memories_dedupes_and_normalizes() -> None:
-    extracts, _ = _extract(
+def test_extract_empty_without_llm_or_blank_request() -> None:
+    assert extract_language_evidence(None, "黑色衬衫") == []
+    assert extract_language_evidence(ScriptedExtensionLlm([{"evidence": []}]), "  ") == []
+
+
+def test_extract_swallows_llm_failure() -> None:
+    assert extract_language_evidence(ScriptedExtensionLlm([]), "黑色衬衫") == []
+
+
+def test_extract_drops_invalid_entries() -> None:
+    llm = ScriptedExtensionLlm(
         [
-            {
-                "memories": [
-                    {"category": "color", "content": "  黑色  ", "meta": {}},
-                    {"category": "color", "content": "黑色", "meta": {}},
-                ]
-            }
+            _evidence(
+                {"dimension": "nope", "attribute": "style", "value": "简约", "polarity": "positive", "strength": 0.5, "scope": {"type": "global"}},
+                {"dimension": "style", "attribute": "", "value": "简约", "polarity": "positive", "strength": 0.5, "scope": {"type": "global"}},
+                {"dimension": "style", "attribute": "style", "value": "", "polarity": "positive", "strength": 0.5, "scope": {"type": "global"}},
+                {"dimension": "style", "attribute": "style", "value": "简约", "polarity": "positive", "strength": 0.5, "scope": {"type": "global"}},
+            )
         ]
     )
-    assert extracts == [{"category": "color", "content": "黑色", "meta": {}}]
+    items = extract_language_evidence(llm, "简约")
+    assert len(items) == 1
+    assert items[0]["attribute"] == "style"
+    assert items[0]["value"] == "简约"

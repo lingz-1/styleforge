@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+from styleforge.repositories.database import Connection
 import uuid
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -11,12 +11,12 @@ from datetime import datetime, timezone
 from styleforge.core.schemas import OutfitCandidate, RecommendationResult, TaskSpec
 
 
-def start_run(connection: sqlite3.Connection, task: TaskSpec) -> str:
+def start_run(connection: Connection, task: TaskSpec) -> str:
     run_id = str(uuid.uuid4())
     connection.execute(
         """
         INSERT INTO styling_runs(run_id, user_id, status, task_spec_json, created_at)
-        VALUES (?, ?, 'running', ?, ?)
+        VALUES (%s, %s, 'running', %s, %s)
         """,
         (
             run_id,
@@ -29,7 +29,7 @@ def start_run(connection: sqlite3.Connection, task: TaskSpec) -> str:
 
 
 def save_candidates(
-    connection: sqlite3.Connection,
+    connection: Connection,
     run_id: str,
     candidates: Sequence[OutfitCandidate],
 ) -> None:
@@ -37,7 +37,7 @@ def save_candidates(
         """
         INSERT INTO candidate_outfits(
             run_id, outfit_id, rank, score, hard_valid, item_ids_json, score_details_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(run_id, outfit_id) DO UPDATE SET
             rank = excluded.rank,
             score = excluded.score,
@@ -60,12 +60,12 @@ def save_candidates(
     )
 
 
-def finish_run(connection: sqlite3.Connection, result: RecommendationResult) -> None:
+def finish_run(connection: Connection, result: RecommendationResult) -> None:
     connection.execute(
         """
         UPDATE styling_runs
-        SET status = ?, result_json = ?, finished_at = ?
-        WHERE run_id = ?
+        SET status = %s, result_json = %s, finished_at = %s
+        WHERE run_id = %s
         """,
         (
             result.status,
@@ -77,15 +77,15 @@ def finish_run(connection: sqlite3.Connection, result: RecommendationResult) -> 
 
 
 def save_semantic_detail(
-    connection: sqlite3.Connection,
+    connection: Connection,
     run_id: str,
     payload: dict[str, object],
 ) -> None:
     connection.execute(
         """
         UPDATE styling_runs
-        SET semantic_detail_json = ?
-        WHERE run_id = ?
+        SET semantic_detail_json = %s
+        WHERE run_id = %s
         """,
         (
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
@@ -94,12 +94,12 @@ def save_semantic_detail(
     )
 
 
-def fail_run(connection: sqlite3.Connection, run_id: str, error: BaseException) -> None:
+def fail_run(connection: Connection, run_id: str, error: BaseException) -> None:
     connection.execute(
         """
         UPDATE styling_runs
-        SET status = 'failed', error_message = ?, finished_at = ?
-        WHERE run_id = ?
+        SET status = 'failed', error_message = %s, finished_at = %s
+        WHERE run_id = %s
         """,
         (str(error)[:2000], datetime.now(timezone.utc).isoformat(), run_id),
     )

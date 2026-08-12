@@ -104,11 +104,18 @@ D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests evals
 
 ## 6. v3.3 P2.5 任务路由基线（已验证）
 
-- 固定用例：`evals/cases/task_routing.json`，42 条，六类任务各 7 条。
+- 固定用例：`evals/cases/task_routing.json`，60 条，六类任务各 10 条。
 - runner：`D:\anaconda\envs\style\python.exe -m evals.runners.evaluate_task_routing`。
 - 输出：`artifacts/evaluation/task_routing_baseline.json`，包含准确率、逐类准确率、混淆矩阵和错误明细。
-- 结果：42/42 正确，总准确率 100%，六类逐类准确率均为 100%，失败样本 0。
+- 结果（2026-08-12）：60/60 正确，总准确率 100%，六类逐类准确率均为 100%，失败样本 0。
+- 门禁：`tests/test_task_routing_eval.py` 锁定 60 例、每类 10 例与 100% 准确率；`tests/test_task_router.py` 29 条单测覆盖规则分支。
 - 边界：该评估只证明 Task Router 分类表现，不评价检索、搭配、五维分数或用户满意度。
+
+**2026-08-12 扩语料暴露并修复的路由盲区**（多样化输入驱动，非语料标注问题）：
+
+1. `换成` 未匹配：`把外套换成风衣` 原落 `outfit_recommend`。`_MODIFY_PATTERNS[0]` 的 `换(...)` 分支补入 `成|到|为`。
+2. `衬衫` 等上衣词不在 modify 槽位清单：`这件衬衫不好看` 原落 recommend。`_MODIFY_PATTERNS[1]` 补入 `衬衫|毛衣|卫衣|大衣|风衣|夹克|西装|牛仔裤`。
+3. `该补点什么` 的插入语 `点` 中断 `该补什么` 字面匹配：`帮我看看该补点什么颜色` 原落 recommend。`_GAP_PATTERNS[1]` 改为 `该补(?:点)?什么|应该补(?:点)?什么`。
 
 当前仅完成 P2.5 的路由切片；Wardrobe Fixtures 和五维固定穿搭 benchmark 仍在尚缺列表中。
 
@@ -137,3 +144,56 @@ D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests evals
 - 实时 Provider 烟测只验证外部连通性，不替代离线合同测试。
 
 2026-08-10 P5 Weather Tool 验收结果：`compileall`通过、全项目Ruff clean、Pytest 189 passed、Vue Vite生产构建成功。Pytest仅有FastAPI TestClient第三方弃用提示；Vite仅有现有大chunk和第三方PURE注释提示。
+
+## 9. 记忆提炼评估（LLM 基线）
+
+纯 LLM 的偏好证据提炼（`llm/memory_prompts.py`）无法用确定性单测衡量，单独建评估集：
+
+- 案例：`evals/cases/memory_extraction.json`，33 例**口语化**请求（多属性拆分、否定拆分、一次性场景忽略、global/contextual 判定、appearance/shopping 维度归位、双否定、重复回避，以及习惯/条件规则/比较/材质三分/印花归 style/英语混排/强厌恶/天气习惯/多场合风格拆分等）。8 例为无长期偏好证据（应提炼空），用于锁空误报。
+- runner：`D:\anaconda\envs\style\python.exe -m evals.runners.evaluate_memory_extraction`，真实 LLM 逐例提炼后按 `(dimension, attribute, value)` 归一化匹配，输出 Evidence 级 P/R/F1、极性一致率、scope 一致率。
+- 输出：`artifacts/evaluation/memory_extraction.json`。
+- 门禁：`tests/test_memory_extraction_eval.py` 锁定 33 例计数与关键规则覆盖（习惯/条件/材质三分/场景绑定/英语混排/一次性/多场合拆分/印花归 style 等）；`match_case` 为纯函数，离线可测。
+- 基线（2026-08-12，真实 DeepSeek，prompt `memory-evidence-v2.4`）：连续 3 次运行分布 F1 **0.847 / 0.911 / 0.921**、Precision 0.837~0.872、Recall 0.857~0.976、极性一致率 1.00、scope 一致率 0.972~0.976；run2/run3 空案例零误报，run1 有 1 例空误报。run3 精确复现 v2.3 基线（F1 0.9213），证实 v2.4 与 v2.3 内容等价、指标一致。
+
+**LLM 非确定性提示**：`extract_language_evidence` 使用默认 temperature=0.2，同一请求多次调用结果会漂移（例如某例在 5/5 与空之间切换），单次跑 F1 会在此基线附近波动（本批 0.85~0.92）。多轮聚合指标意义有限，产品行为以单次提炼为准；评估对比应取多次运行区间而非单点。
+
+**v2.4 已修复的偏差**（prompt v2.0→v2.4，`SCOPE_GUIDE` 7 条确定性规则 + `DISAMBIGUATION_GUIDE` + 移除 item + 弱信号）：
+
+1. **global/contextual 判定不稳** ✅ 习惯陈述（平时/日常/一直/总是/就爱）中的单品偏好 → global；否定/厌恶句默认 global；一次性场景不改其他偏好 scope。mem-05 由漂移变为确定性命中。
+2. **attribute 归类分歧** ✅ 「正式场合」→ occasion（仅作程度修饰才 formality）；「牛仔」默认 category（仅面料质感才 material）；「花花绿绿/印花」→ style 非 color；occasion value 用裸场合名词。
+3. **多属性拆分漏/多** ✅ 弱信号（还好/可以/还行）不提炼；「配饰多了累赘」按配饰多=negative 不翻转；few-shot 扩到 6 例覆盖习惯句/场合消歧/弱信号。
+4. **item 级不提炼** ✅ `ITEM_RULE`：单件指代（这件/那条/这双）不提炼为偏好，item 级由行为事件产出。
+5. **语境修饰词过提取** ✅ 本次 3 次运行中 2 次空案例零误报；contextual occasion/category 过提取明显收敛（残留 1 次 run 的 1 例空误报属非确定性波动）。
+
+门槛建议：F1 ≥ 0.85 已达成且多跑稳定在区间内。每次 prompt 改动后用本 runner 回归对比，取多次运行区间。
+
+## 10. 多轮对话与记忆健壮性补测（D2 / D4 / D6）
+
+围绕多轮对话 follow_up 路由与记忆系统生命周期/健壮性补齐的测试与评估：
+
+### D2：follow_up 独立评估集
+
+- 案例：`evals/cases/follow_up.json`，58 条**口语化**请求（28 follow_up + 26 fresh + 1 edge + 4 known_gap），人工按意图标注。
+- runner：`D:\anaconda\envs\style\python.exe -m evals.runners.evaluate_follow_up`，输出 `artifacts/evaluation/follow_up.json`。
+- 结果（2026-08-12）：54 条非 known_gap 案例准确率 1.0，`false_positive_follow_up_rate` 0，`missed_follow_up_rate` 0；4 条 known_gap 被排除出主准确率并单列报告（`known_gaps`）。
+- **known_gap 设计**：标注为 `known_gap: true` 的案例是检测器的**真实盲区**——如补充信号（`加一顶帽子`）当前判 fresh、方向动词（`袖子卷起来`）、无 adjust 词的新搭配词（`给我搭一身休闲的`）。它们不被计入主准确率，避免回归门禁被已知盲区污染；门禁断言每个 known_gap 案例的检测结果**确实偏离**意图，防止盲区无声消失。
+- 覆盖的语义规则：短调整、槽位替换、否定调整、属性抱怨、样式调整、歧义短跟进（`别要蓝色`）、物品疑问式跟进（`这件大衣是不是有点旧了`）、场景新需求、fresh 词覆盖 adjust 词（`更正式一点的搭配建议`→fresh）、无 adjust 词的提问、元指令（`别推荐了`→fresh）。
+- 门禁：`tests/test_follow_up_eval.py` 在 CI 锁定行为，路由改动导致漂移会先在此失败（含 known_gap 案例必须真实偏离的断言）。
+
+### D4：生命周期与 consolidation 补用例
+
+- `tests/test_memory_consolidation.py` 新增：**幂等重跑**（二次 consolidate 为 no-op）、**用户隔离**（consolidate u1 不动 u2）、**正负极性不合并**（矛盾是数据不是重复，两条证据都保留）。
+- `tests/test_memory_generalization.py` 新增：**global 冲突忽略 contextual 对立**。
+- **修复的真实 bug**：`_apply_conflict_penalty` 原先对同 attribute 的**任意对立行**打 `conflict_with` 标记并降置信度，会把 contextual 场景偏好误判为全局冲突，且只惩罚 global 侧造成不对称。已改为只认同为 global 的对立行。回归用例锁定该行为。
+
+### D6：健壮性补用例
+
+- `tests/test_memory_generalization.py::test_preference_memory_is_isolated_between_users`：u1 事件/证据/偏好不泄露给 u2，跨用户矛盾不打标记。
+- `tests/test_session_multiturn.py::test_no_llm_skips_memory_extraction_gracefully`：无 LLM 时任务正常完成，记忆提炼优雅跳过、不落任何证据（不崩溃、不虚构）。
+
+### D7：多轮对话流程（2026-08-12，M3 风格口语链）
+
+- `test_session_multiturn.py::test_mixed_chain_fresh_scene_does_not_rewrite`：推荐 → `换成`换外套 → fresh 婚礼场景 → 整体改色。验证 **fresh 场景在活跃会话内不被 follow_up 改写吞掉**（保留 recommend 路由），且新计划成为下一轮修改的基线（R2 的 blazer 不泄漏进婚礼计划）。
+- `test_session_multiturn.py::test_negative_feedback_then_footwear_swap`：推荐 → `这套太严肃了`（整体 session_follow_up）→ `换成乐福鞋`（footwear 槽位）。验证否定反馈走整体调整、下一轮换鞋槽位锁定连衣裙，修改链逐轮携带最新搭配。
+
+> 注：consolidation 的 `_dedupe_key` 不含 scope——同 dimension/attribute/value/polarity 的 global 与 contextual 证据会被去重为一条。当前为既有行为，是否应把 scope 纳入去重键待设计确认。

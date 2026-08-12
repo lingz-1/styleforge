@@ -18,7 +18,7 @@ from styleforge.data.json_stream import iter_json_object
 from styleforge.repositories.database import connect, initialize_database
 
 
-def _catalog_types(database_path: Path) -> dict[str, str]:
+def _catalog_types(database_path: str) -> dict[str, str]:
     connection = connect(database_path)
     try:
         return {
@@ -29,7 +29,7 @@ def _catalog_types(database_path: Path) -> dict[str, str]:
         connection.close()
 
 
-def audit_outfits(outfit_path: Path, database_path: Path) -> dict[str, Any]:
+def audit_outfits(outfit_path: Path, database_path: str) -> dict[str, Any]:
     initialize_database(database_path)
     item_types = _catalog_types(database_path)
     by_split: Counter[str] = Counter()
@@ -113,7 +113,7 @@ def audit_outfits(outfit_path: Path, database_path: Path) -> dict[str, Any]:
             "size_bytes": stat.st_size,
             "sha256": source_hash.hexdigest(),
         },
-        "catalog_path": str(database_path.resolve()),
+        "catalog_path": str(database_path),
         "counts": {
             "outfits_total": total,
             "invalid_records": invalid_record_count,
@@ -162,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     settings = Settings.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--outfits", type=Path, default=settings.outfit_path)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument(
         "--report",
         type=Path,

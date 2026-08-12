@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+from styleforge.repositories.database import Connection, Row
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 
@@ -15,7 +15,7 @@ INSERT INTO catalog_items (
     item_id, source, gender, item_type, main_category, name, color, description,
     features_json, image_filename, relative_image_path, image_status,
     embedding_status, raw_json_hash, source_revision, imported_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT(item_id) DO UPDATE SET
     source = excluded.source,
     gender = excluded.gender,
@@ -61,7 +61,7 @@ def _item_row(item: CatalogItem, source_revision: str, imported_at: str) -> tupl
 
 
 def upsert_items(
-    connection: sqlite3.Connection,
+    connection: Connection,
     items: Sequence[CatalogItem],
     source_revision: str,
 ) -> int:
@@ -75,7 +75,7 @@ def upsert_items(
     return len(items)
 
 
-def catalog_counts(connection: sqlite3.Connection) -> dict[str, object]:
+def catalog_counts(connection: Connection) -> dict[str, object]:
     total = connection.execute("SELECT COUNT(*) FROM catalog_items").fetchone()[0]
     by_type = {
         row["item_type"]: row["count"]
@@ -99,12 +99,12 @@ def catalog_counts(connection: sqlite3.Connection) -> dict[str, object]:
 
 
 def fetch_items_by_ids(
-    connection: sqlite3.Connection, item_ids: Iterable[str]
-) -> list[sqlite3.Row]:
+    connection: Connection, item_ids: Iterable[str]
+) -> list[Row]:
     ids = tuple(dict.fromkeys(item_ids))
     if not ids:
         return []
-    placeholders = ",".join("?" for _ in ids)
+    placeholders = ",".join("%s" for _ in ids)
     return list(
         connection.execute(
             f"SELECT * FROM catalog_items WHERE item_id IN ({placeholders})",  # noqa: S608

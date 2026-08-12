@@ -51,8 +51,8 @@ def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
-def _import_api(tmp_path, monkeypatch) -> Any:
-    monkeypatch.setenv("STYLEFORGE_DATABASE_PATH", str(tmp_path / "batch.db"))
+def _import_api(db_dsn, monkeypatch) -> Any:
+    monkeypatch.setenv("STYLEFORGE_DATABASE_DSN", db_dsn)
     monkeypatch.delenv("STYLEFORGE_DEFAULT_LOCATION", raising=False)
     sys.modules.pop("styleforge.api", None)
     return importlib.import_module("styleforge.api")
@@ -90,9 +90,9 @@ def _wait_completed(
 
 
 def test_batch_auto_adds_reliable_and_flags_low_confidence(
-    tmp_path, monkeypatch
+    db_dsn, monkeypatch
 ) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+    api = _import_api(db_dsn, monkeypatch)
     fake = ThreadSafeFakeVision(
         [_reliable_response(), _reliable_response(), {"type": "shirt", "confidence": 0.05}]
     )
@@ -134,8 +134,8 @@ def test_batch_auto_adds_reliable_and_flags_low_confidence(
     assert len(pending) == 2  # skip_embedding left them pending, none on GPU
 
 
-def test_batch_provider_failure_triggers_circuit_break(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_batch_provider_failure_triggers_circuit_break(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
     fake = ThreadSafeFakeVision([VisionUnavailable("proxy down")] * 5)
     monkeypatch.setattr(api, "vision_client_from_settings", lambda _settings: fake)
 
@@ -162,8 +162,8 @@ def test_batch_provider_failure_triggers_circuit_break(tmp_path, monkeypatch) ->
     assert reasons == {"vision_unavailable", "provider_unavailable"}
 
 
-def test_batch_create_failure_is_reported(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_batch_create_failure_is_reported(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
     fake = ThreadSafeFakeVision([_reliable_response()])
     monkeypatch.setattr(api, "vision_client_from_settings", lambda _settings: fake)
 
@@ -193,8 +193,8 @@ def test_batch_create_failure_is_reported(tmp_path, monkeypatch) -> None:
     assert final["results"][0]["reason"] == "create_failed"
 
 
-def test_batch_validation_rules(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_batch_validation_rules(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
     fake = ThreadSafeFakeVision([{}])
     monkeypatch.setattr(api, "vision_client_from_settings", lambda _settings: fake)
     one = {"filename": "t.png", "content_base64": _b64(_photo_bytes())}
@@ -230,8 +230,8 @@ def test_batch_validation_rules(tmp_path, monkeypatch) -> None:
     assert disabled.status_code == 503
 
 
-def test_batch_ownership_enforced(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_batch_ownership_enforced(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
     fake = ThreadSafeFakeVision([_reliable_response()])
     monkeypatch.setattr(api, "vision_client_from_settings", lambda _settings: fake)
 
@@ -255,12 +255,12 @@ def test_batch_ownership_enforced(tmp_path, monkeypatch) -> None:
     assert own.status_code == 200
 
 
-def test_create_photo_item_skip_embedding(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("STYLEFORGE_DATABASE_PATH", str(tmp_path / "skip.db"))
+def test_create_photo_item_skip_embedding(tmp_path, db_dsn, monkeypatch) -> None:
+    monkeypatch.setenv("STYLEFORGE_DATABASE_DSN", db_dsn)
     from styleforge.services.wardrobe_item_service import create_photo_item
 
     created = create_photo_item(
-        database_path=tmp_path / "skip.db",
+        database_path=db_dsn,
         artifact_root=tmp_path / "artifacts",
         user_id="u1",
         image_bytes=_photo_bytes(),

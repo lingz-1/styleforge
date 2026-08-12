@@ -17,13 +17,13 @@ flowchart TD
     P --> T["TaskSpec"]
     T --> R["按槽位检索"]
     W["用户衣柜白名单"] --> R
-    F["全局 NumPy 向量 + 个人 SQLite 增量向量"] --> R
+    F["全局 NumPy 向量 + 个人 PostgreSQL 增量向量"] --> R
     R --> C["约束过滤 + Beam Search"]
     C --> S["Stylist Agent"]
     S --> D["差异化结果集"]
     D --> V["Reviewer Agent"]
     V --> O["搭配、评分、理由、图片"]
-    O --> DB["SQLite 运行记录"]
+    O --> DB["PostgreSQL 运行记录"]
 ```
 
 v3.3 在主推荐链路之前新增独立 `Task Router`。它是系统能力，不是第四个 Agent。六类任务现在共享 `TaskExecutionInput`、`ContextPack` 和 `task_runs` 持久化契约；标准推荐复用原工作流，五类扩展任务也统一由 SemanticRetriever / Composer / Critic 三个主 Agent 执行。路由模式与执行模式分离：`/tasks/route` 只分类，`/tasks/execute` 才运行业务。
@@ -108,6 +108,8 @@ TaskSpec
 子类约束使用商品名称、描述和特征字段进行可审计匹配。FashionCLIP 负责排序，而不是决定硬约束是否满足。
 
 ## 5. 数据边界
+
+运行记录与业务表全部落在本地 **PostgreSQL**（`STYLEFORGE_DATABASE_DSN`）。会话级穿搭产出可选走 **Redis** 读穿缓存（`STYLEFORGE_REDIS_ENABLED`），知识检索在关键词之外叠加 **Chroma** 向量路径（`STYLEFORGE_CHROMA_DIR`）；两者均为可选外部服务，异常自动降级，不影响主链路。
 
 - `catalog_items`：数据集商品目录，不能自动等同于用户衣柜。
 - `wardrobe_items`：用户与商品的显式映射，是推荐白名单。

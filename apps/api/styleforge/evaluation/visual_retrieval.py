@@ -52,7 +52,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _metadata_by_id(database_path: Path) -> dict[str, tuple[str, str]]:
+def _metadata_by_id(database_path: str) -> dict[str, tuple[str, str]]:
     connection = connect(database_path)
     try:
         return {
@@ -75,7 +75,7 @@ def _chance_agreement(labels: list[str]) -> float:
 
 def evaluate_visual_retrieval(
     *,
-    database_path: Path,
+    database_path: str,
     embedding_dir: Path,
     index_dir: Path,
     model_dir: Path,
@@ -90,7 +90,6 @@ def evaluate_visual_retrieval(
 
     if sample_size <= 0 or top_k <= 0:
         raise ValueError("sample_size and top_k must be positive")
-    database_path = database_path.resolve()
     embedding_dir = embedding_dir.resolve()
     index_dir = index_dir.resolve()
     model_dir = model_dir.resolve()
@@ -215,7 +214,7 @@ def evaluate_visual_retrieval(
 def _build_parser() -> argparse.ArgumentParser:
     settings = Settings.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument(
         "--embedding-dir",
         type=Path,

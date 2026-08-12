@@ -10,7 +10,6 @@ from __future__ import annotations
 import importlib
 import sys
 from datetime import date
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -66,11 +65,11 @@ def _available_facts(tool_input: WeatherToolInput) -> WeatherFacts:
 
 def _import_api(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    db_dsn: str,
     *,
     default_location: str | None,
 ):
-    monkeypatch.setenv("STYLEFORGE_DATABASE_PATH", str(tmp_path / "weather-now.db"))
+    monkeypatch.setenv("STYLEFORGE_DATABASE_DSN", db_dsn)
     if default_location is None:
         monkeypatch.delenv("STYLEFORGE_DEFAULT_LOCATION", raising=False)
     else:
@@ -85,9 +84,9 @@ def _fake_workflow(tool) -> object:
     return types.SimpleNamespace(weather_tool=tool)
 
 
-def test_location_param_resolves_named_city(tmp_path, monkeypatch) -> None:
+def test_location_param_resolves_named_city(db_dsn, monkeypatch) -> None:
     tool = RecordingWeatherTool()
-    api = _import_api(monkeypatch, tmp_path, default_location="上海")
+    api = _import_api(monkeypatch, db_dsn, default_location="上海")
     api.get_workflow = lambda: _fake_workflow(tool)
     today = date.today().isoformat()
 
@@ -102,9 +101,9 @@ def test_location_param_resolves_named_city(tmp_path, monkeypatch) -> None:
     assert tool.calls[0].date == today
 
 
-def test_coordinates_bypass_city_name(tmp_path, monkeypatch) -> None:
+def test_coordinates_bypass_city_name(db_dsn, monkeypatch) -> None:
     tool = RecordingWeatherTool()
-    api = _import_api(monkeypatch, tmp_path, default_location="上海")
+    api = _import_api(monkeypatch, db_dsn, default_location="上海")
     api.get_workflow = lambda: _fake_workflow(tool)
 
     with TestClient(api.app) as client:
@@ -121,9 +120,9 @@ def test_coordinates_bypass_city_name(tmp_path, monkeypatch) -> None:
 
 
 def test_location_and_coordinates_are_mutually_exclusive(
-    tmp_path, monkeypatch
+    db_dsn, monkeypatch
 ) -> None:
-    api = _import_api(monkeypatch, tmp_path, default_location="上海")
+    api = _import_api(monkeypatch, db_dsn, default_location="上海")
     api.get_workflow = lambda: _fake_workflow(RecordingWeatherTool())
 
     with TestClient(api.app) as client:
@@ -137,9 +136,9 @@ def test_location_and_coordinates_are_mutually_exclusive(
     assert lone.status_code == 422
 
 
-def test_no_params_uses_configured_default_city(tmp_path, monkeypatch) -> None:
+def test_no_params_uses_configured_default_city(db_dsn, monkeypatch) -> None:
     tool = RecordingWeatherTool()
-    api = _import_api(monkeypatch, tmp_path, default_location="上海")
+    api = _import_api(monkeypatch, db_dsn, default_location="上海")
     api.get_workflow = lambda: _fake_workflow(tool)
     today = date.today().isoformat()
 
@@ -152,8 +151,8 @@ def test_no_params_uses_configured_default_city(tmp_path, monkeypatch) -> None:
     assert tool.calls[0].date == today
 
 
-def test_no_default_location_returns_honest_unavailable(tmp_path, monkeypatch) -> None:
-    api = _import_api(monkeypatch, tmp_path, default_location=None)
+def test_no_default_location_returns_honest_unavailable(db_dsn, monkeypatch) -> None:
+    api = _import_api(monkeypatch, db_dsn, default_location=None)
     api.get_workflow = lambda: _fake_workflow(RecordingWeatherTool())
 
     with TestClient(api.app) as client:
@@ -165,8 +164,8 @@ def test_no_default_location_returns_honest_unavailable(tmp_path, monkeypatch) -
     assert payload["error_code"] == "location_required"
 
 
-def test_disabled_weather_tool_returns_unavailable(tmp_path, monkeypatch) -> None:
-    api = _import_api(monkeypatch, tmp_path, default_location="上海")
+def test_disabled_weather_tool_returns_unavailable(db_dsn, monkeypatch) -> None:
+    api = _import_api(monkeypatch, db_dsn, default_location="上海")
     api.get_workflow = lambda: _fake_workflow(None)
 
     with TestClient(api.app) as client:

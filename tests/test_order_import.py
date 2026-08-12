@@ -204,9 +204,9 @@ def test_successful_order_with_refund_signal_is_excluded() -> None:
     assert parsed.rows[0].decision_reason == "refund_status:退款成功"
 
 
-def test_preview_commit_and_personal_embedding_are_idempotent(tmp_path) -> None:
+def test_preview_commit_and_personal_embedding_are_idempotent(tmp_path, db_dsn) -> None:
     np = pytest.importorskip("numpy")
-    database_path = tmp_path / "styleforge.db"
+    database_path = db_dsn
     image_root = tmp_path / "personal-images"
     image_root.mkdir()
     parsed = parse_order_workbook(_workbook_bytes(), default_audience="women")
@@ -231,7 +231,7 @@ def test_preview_commit_and_personal_embedding_are_idempotent(tmp_path) -> None:
         )
         candidate = connection.execute(
             "SELECT row_id FROM wardrobe_import_rows "
-            "WHERE batch_id = ? AND decision = 'candidate' ORDER BY source_row_number LIMIT 1",
+            "WHERE batch_id = %s AND decision = 'candidate' ORDER BY source_row_number LIMIT 1",
             (batch_id,),
         ).fetchone()
         item_ids = commit_import_rows(
@@ -264,7 +264,7 @@ def test_preview_commit_and_personal_embedding_are_idempotent(tmp_path) -> None:
             "external_order_id_hash FROM personal_wardrobe_items"
         ).fetchone()
         catalog = connection.execute(
-            "SELECT source, embedding_status FROM catalog_items WHERE item_id = ?",
+            "SELECT source, embedding_status FROM catalog_items WHERE item_id = %s",
             (item_ids[0],),
         ).fetchone()
 
@@ -277,8 +277,8 @@ def test_preview_commit_and_personal_embedding_are_idempotent(tmp_path) -> None:
     assert catalog["embedding_status"] == "ready"
 
 
-def test_commit_rejects_non_received_row_even_with_manual_attributes(tmp_path) -> None:
-    database_path = tmp_path / "styleforge.db"
+def test_commit_rejects_non_received_row_even_with_manual_attributes(tmp_path, db_dsn) -> None:
+    database_path = db_dsn
     image_root = tmp_path / "personal-images"
     image_root.mkdir()
     parsed = parse_order_workbook(_workbook_bytes(), default_audience="women")
@@ -293,7 +293,7 @@ def test_commit_rejects_non_received_row_even_with_manual_attributes(tmp_path) -
         )
         closed_row = connection.execute(
             "SELECT row_id FROM wardrobe_import_rows "
-            "WHERE batch_id = ? AND order_status = '交易关闭'",
+            "WHERE batch_id = %s AND order_status = '交易关闭'",
             (batch_id,),
         ).fetchone()
         with pytest.raises(ValueError, match="Only received orders"):

@@ -55,7 +55,66 @@ $env:STYLEFORGE_WEATHER_TIMEOUT="10"
 $env:NO_PROXY="127.0.0.1,localhost,::1"
 ```
 
-## 4. 演示衣柜（最新实现尚待回归）
+数据库、Redis 与 Chroma 的凭据和开关放在仓库根目录 `.env`，由 `styleforge.core.config` 在启动时自动加载（无需逐窗口设置）：
+
+| 变量 | 含义 |
+|---|---|
+| `STYLEFORGE_DATABASE_DSN` | PostgreSQL 主库连接串 |
+| `STYLEFORGE_TEST_DATABASE_DSN` | PostgreSQL 测试库连接串（pytest 用） |
+| `STYLEFORGE_REDIS_ENABLED` | 会话状态缓存开关（`0`/`1`，默认 `0`） |
+| `STYLEFORGE_REDIS_URL` | Redis 连接串（如 `redis://127.0.0.1:6379/0`） |
+| `STYLEFORGE_CHROMA_DIR` | Chroma 持久化目录（默认 `artifacts/chroma/`） |
+
+`.env` 中的真实连接串和凭据不提交到 Git。
+
+## 4. 外部依赖服务
+
+### 4.1 PostgreSQL（主库与测试库）
+
+- 安装目录：`E:\PostgreSQL\`（PG 17.10，trust 认证，监听 `127.0.0.1:5432`）。
+- 应用角色：`styleforge`；数据库：`styleforge`（主库）、`styleforge_test`（测试库）。
+- 启动：
+
+```powershell
+E:\PostgreSQL\bin\pg_ctl.exe -D E:\PostgreSQL\data -l E:\PostgreSQL\pg.log start
+```
+
+- 停止：
+
+```powershell
+E:\PostgreSQL\bin\pg_ctl.exe -D E:\PostgreSQL\data stop
+```
+
+- 建库（首次）：
+
+```powershell
+E:\PostgreSQL\bin\psql.exe -U postgres -h 127.0.0.1 -c "CREATE ROLE styleforge LOGIN;"
+E:\PostgreSQL\bin\psql.exe -U postgres -h 127.0.0.1 -c "CREATE DATABASE styleforge OWNER styleforge ENCODING 'UTF8';"
+E:\PostgreSQL\bin\psql.exe -U postgres -h 127.0.0.1 -c "CREATE DATABASE styleforge_test OWNER styleforge ENCODING 'UTF8';"
+```
+
+`STYLEFORGE_DATABASE_DSN` 形如 `postgresql://styleforge@127.0.0.1:5432/styleforge`。API 首次启动会自动建表（`initialize_database`，SCHEMA_VERSION=10）。
+
+### 4.2 Redis（会话状态缓存，可选）
+
+- 目录：`E:\Redis\Redis-8.4.0-Windows-x64-msys2-with-Service\`，默认端口 `6379`。
+- 启动：运行目录内 `start.bat`，或安装为 Windows 服务后启动服务。
+- 启用：`.env` 设置 `STYLEFORGE_REDIS_ENABLED=1` 与 `STYLEFORGE_REDIS_URL=redis://127.0.0.1:6379/0`。
+- 作用：同一会话两次请求的穿搭产出走读穿缓存（TTL 默认 24h）。Redis 不可用时自动回落数据库，不影响功能。
+
+### 4.3 Chroma RAG（知识检索，可选）
+
+- 持久化目录默认 `artifacts/chroma/`（`.env` 的 `STYLEFORGE_CHROMA_DIR` 可覆盖）。
+- 首次需要构建索引：
+
+```powershell
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
+D:\anaconda\envs\style\python.exe -m styleforge.knowledge.indexer
+```
+
+- 作用：知识检索在关键词命中之外叠加向量路径（FashionCLIP 512 维文本嵌入，cosine 相似度）。Chroma 未初始化或异常时自动降级纯关键词，不影响功能。
+
+## 5. 演示衣柜（最新实现尚待回归）
 
 重建约 204 件的混合风格演示衣柜：
 
@@ -68,7 +127,7 @@ D:\anaconda\envs\style\python.exe -m styleforge.pipelines.seed_balanced_wardrobe
 
 `--replace` 只删除并重建 `demo-user` 的衣柜映射，不删除商品、图片、向量或索引。
 
-## 5. 启动 API
+## 6. 启动 API
 
 窗口 1：
 
@@ -102,7 +161,7 @@ HTTP 200 之外，还应检查：
 
 索引缺失不会阻断小衣柜 NumPy 检索，但意味着全目录检索评估产物不完整；嵌入或图片根目录缺失会导致视觉降级或图片不可用。
 
-## 6. 启动 Streamlit
+## 7. 启动 Streamlit
 
 窗口 2：
 
@@ -116,7 +175,7 @@ D:\anaconda\envs\style\python.exe -m streamlit run apps\api\styleforge\ui.py
 
 首次启动如出现 `Email:`，直接留空并按 Enter。随后访问 `http://localhost:8501`。
 
-## 7. CLI 验证
+## 8. CLI 验证
 
 ```powershell
 $env:PYTHONPATH=(Resolve-Path ".\apps\api")
@@ -125,7 +184,7 @@ D:\anaconda\envs\style\python.exe -m styleforge.workflow.graph `
   --request "明天参加互联网公司面试，衬衫配半身裙和乐福鞋，不要红色，不要高跟鞋。"
 ```
 
-## 8. 常见问题
+## 9. 常见问题
 
 ### `ModuleNotFoundError: No module named 'styleforge'`
 

@@ -14,7 +14,7 @@
 | 移动端 | 微信小程序（接口见 `docs/WARDROBE_MOBILE_API.md`） |
 | 知识库 | 引入 RAG（`knowledge/styles|items|brands|palettes` + Chroma，文本 embedding） |
 | 评估体系 | `evals/`（离线 benchmark）与后端 `scoring/`（运行时五维）**严格区分** |
-| 数据库 | 当前 SQLite；**Repository Protocol 现在就建**，PostgreSQL 后期只换实现 |
+| 数据库 | 已落地 **PostgreSQL**（`STYLEFORGE_DATABASE_DSN`，SCHEMA_VERSION=10）；**Repository Protocol 已建** |
 | 任务路由 | **TaskType 只由 Task Router 负责**；Agent 1 不做任务分类 |
 | 衣橱检索 | 走 `WardrobeRetriever`（Orchestrator 执行），**不设 wardrobe_search Tool** |
 | Tool Registry | 只管理真正的外部调用（Weather 等）；"LLM 决策、程序执行" |
@@ -89,12 +89,11 @@ styleforge/
 │   │       │   ├── modification_service.py
 │   │       │   └── compatibility_service.py
 │   │       │
-│   │       ├── repositories/            # 数据访问（Protocol 现在建，SQLite→PG 后期换实现）
-│   │       │   ├── protocols.py
-│   │       │   └── sqlite/
-│   │       │       ├── wardrobe_repository.py / outfit_repository.py
-│   │       │       ├── feedback_repository.py / preference_repository.py
-│   │       │       └── ...
+│   │       ├── repositories/            # 数据访问（已落地 PostgreSQL，psycopg3 + database.py）
+│   │       │   ├── database.py          #   PgConnection / database_session / initialize_database
+│   │       │   ├── wardrobe_repository.py / outfit_repository.py
+│   │       │   ├── feedback_repository.py / preference_repository.py
+│   │       │   └── ...
 │   │       │
 │   │       ├── integrations/            # 第三方适配
 │   │       │   ├── llm/                 #   deepseek（OpenAI 兼容）
@@ -184,7 +183,7 @@ User Request → Task Router → TaskType → 选择子图
 | `styleforge/core/scoring.py` | `scoring/scoring.py` | 移动 |
 | `styleforge/services/semantic_retrieval.py` | `retrieval/` | 移动 |
 | `styleforge/tools/candidate_*.py` | `retrieval/` + `services/` | 移动 |
-| `styleforge/repositories/` | `repositories/protocols.py` + `repositories/sqlite/` | 移动 + 抽象 |
+| `styleforge/repositories/` | `repositories/`（`database.py` 提供 `PgConnection`/`database_session`） | 移动 + PG 移植 |
 | `styleforge/ui.py` | `apps/web/` | **重写为 Vue** |
 | `styleforge/pipelines/` | `scripts/data/` | 移动 |
 
@@ -195,7 +194,7 @@ User Request → Task Router → TaskType → 选择子图
 | 层 | 技术 |
 |---|---|
 | 后端 | Python 3.10+ · FastAPI · LangGraph · Pydantic v2 |
-| 数据库 | SQLite（当前）→ PostgreSQL（后期，Repository Protocol 已隔离） |
+| 数据库 | **PostgreSQL（已落地，SCHEMA_VERSION=10）**；可选 Redis 会话缓存 + Chroma RAG |
 | LLM | DeepSeek（OpenAI 兼容，`.env`） |
 | 衣柜检索 | FashionCLIP + FAISS |
 | **RAG 检索** | 文本 Embedding Model + **Chroma**（与 FAISS 边界明确） |

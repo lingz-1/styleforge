@@ -21,14 +21,14 @@ from styleforge.repositories.import_run_repository import (
 from styleforge.repositories.outfit_repository import outfit_counts, upsert_outfits
 
 
-def _catalog_item_ids(database_path: Path) -> set[str]:
+def _catalog_item_ids(database_path: str) -> set[str]:
     with database_session(database_path) as connection:
         return {row[0] for row in connection.execute("SELECT item_id FROM catalog_items")}
 
 
 def import_outfits(
     outfit_path: Path,
-    database_path: Path,
+    database_path: str,
     source_revision: str,
     batch_size: int = 500,
 ) -> dict[str, object]:
@@ -96,7 +96,7 @@ def import_outfits(
         "skipped_incomplete_outfits": skipped_incomplete_outfits,
         "skipped_orphan_relations": skipped_orphan_relations,
         "coverage_policy": "strict_all_items_must_exist_in_catalog",
-        "database_path": str(database_path.resolve()),
+        "database_path": str(database_path),
         "database_counts": counts,
     }
 
@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     settings = Settings.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--outfits", type=Path, default=settings.outfit_path)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument("--source-revision", default=settings.dataset_revision)
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument(

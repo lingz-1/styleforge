@@ -102,7 +102,7 @@ def _knowledge_matches(wardrobe, entries: list[dict[str, Any]], limit: int = 12)
 
 
 def _resolve_current_outfit(
-    database_path: Path,
+    database_path: str,
     task_input: TaskExecutionInput,
 ) -> tuple[str, list[str]]:
     if task_input.current_item_ids:
@@ -111,7 +111,7 @@ def _resolve_current_outfit(
         parameters: tuple[object, ...]
         outfit_filter = ""
         if task_input.current_outfit_id:
-            outfit_filter = "AND co.outfit_id = ?"
+            outfit_filter = "AND co.outfit_id = %s"
             parameters = (task_input.user_id, task_input.current_outfit_id)
         else:
             parameters = (task_input.user_id,)
@@ -120,7 +120,7 @@ def _resolve_current_outfit(
             SELECT co.outfit_id, co.item_ids_json
             FROM candidate_outfits AS co
             JOIN styling_runs AS sr ON sr.run_id = co.run_id
-            WHERE sr.user_id = ? AND sr.status = 'completed' {outfit_filter}
+            WHERE sr.user_id = %s AND sr.status = 'completed' {outfit_filter}
             ORDER BY sr.created_at DESC, co.rank ASC
             LIMIT 1
             """,  # noqa: S608
@@ -132,7 +132,7 @@ def _resolve_current_outfit(
 
 
 def _analyze_modify(
-    database_path: Path,
+    database_path: str,
     task_input: TaskExecutionInput,
     route: TaskRoute,
     wardrobe,
@@ -469,17 +469,22 @@ def _analyze_gap(
 
 def analyze_extension_task(
     *,
-    database_path: Path,
+    database_path: str,
     knowledge_root: Path,
     task_input: TaskExecutionInput,
     route: TaskRoute,
     context_pack: ContextPack,
+    knowledge_retriever: KnowledgeRetriever | None = None,
 ) -> Agent1TaskOutput:
     """Retrieve facts for one extension task without producing its final answer."""
     del context_pack  # The typed snapshot is supplied to the Agent/LLM prompt separately.
     with database_session(database_path) as connection:
         wardrobe = list_items(connection, task_input.user_id)
-    retriever = KnowledgeRetriever(knowledge_root)
+    retriever = (
+        knowledge_retriever
+        if knowledge_retriever is not None
+        else KnowledgeRetriever(knowledge_root)
+    )
     if route.task_type is TaskType.OUTFIT_MODIFY:
         return _analyze_modify(database_path, task_input, route, wardrobe)
     if route.task_type in {TaskType.STYLE_ADVICE, TaskType.ITEM_ADVICE}:

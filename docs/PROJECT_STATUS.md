@@ -10,7 +10,9 @@
 
 > 2026-08-10 P5 V2规划：已完成[天气与时空上下文 V2 详细方案](WEATHER_CONTEXT_V2_PLAN.md)，覆盖隐含天气需求、设备定位、近3天默认窗口、相对时间/节日、事件场次与场馆、小时级活动窗口、远期气候语义、环境调整说明和随身物品建议。该部分目前是规划，不属于189个已通过用例覆盖的实现。
 
-> 2026-08-12 P1进度：会话持久化多轮对话 + 用户长期记忆系统已完成。新增 `chat_sessions/chat_messages/user_memories` 三表（Schema v10）、会话/记忆 HTTP API、`POST /tasks/execute` 消息落库、两段式路由（"换件外套""更正式一点"自动带上文并走整体调整模式）、LLM 记忆提炼与三 Agent 注入；前端聊天化（会话侧栏 + 历史恢复 + localStorage 记住当前会话）+ 新增偏好管理页 `/memories`。当批验证：全量 Pytest **364 passed**（新增 32 个）、Ruff clean、Vue 生产构建通过；方案与契约见[会话与记忆契约](SESSION_CHAT_MEMORY.md)。
+> 2026-08-12 P1进度：会话持久化多轮对话 + **Context-Aware 自适应偏好记忆**已完成。会话层新增 `chat_sessions/chat_messages` 两表、会话 HTTP API、`POST /tasks/execute` 消息落库、两段式路由（"换件外套""更正式一点"自动带上文并走整体调整模式）、前端聊天化（会话侧栏 + 历史恢复 + localStorage 记住当前会话）。记忆层按《StyleForge 记忆系统实现方案.md》落地完整闭环：`interaction_events → preference_evidence → preference_model` 三表（Schema v11，取代 v10 `user_memories`）+ Memory Resolver 五桶拆分 + 三 Agent 差异化注入 + 生命周期/衰减 + consolidation；行为事件采集（`POST /users/{user_id}/events` + 现有端点埋点 + 前端推荐结果行为按钮）+ LLM 结构化证据提炼。**v2.1 泛化改造**：行为证据改为 item 级 + color 归因 + category 归纳（≥3 件不同单品才归纳），弱证据 scope 修正为 contextual+场景词；全局偏好跨 value 冲突降权（×0.9 + `conflict_with` 互标）；Resolver contextual 先做上下文门控（不匹配不泄漏）。当批验证：全量 Pytest **422 passed**、`compileall`、Ruff clean、Vue 生产构建通过；契约见[会话与记忆契约](SESSION_CHAT_MEMORY.md)，过程见[开发过程记录](DEVELOPMENT_LOG.md)。
+
+> 2026-08-12 部署环境升级批次：数据层全量迁移到本地 **PostgreSQL 17.10**（`STYLEFORGE_DATABASE_DSN`，`styleforge`/`styleforge_test` 双库，SCHEMA_VERSION=10），SQLite 退役；**Redis** 会话状态缓存（读穿，`STYLEFORGE_REDIS_ENABLED`，默认关，异常自动回落 DB）；**Chroma RAG** 知识向量检索（FashionCLIP 512 维过渡，`styleforge-knowledge-index` 构建，失败降级关键词）。20 张表 15,271 行一次性迁移零差异；pytest 测试改为连 PG 每测试独立 schema 隔离。当批验证：全量 Pytest **382 passed**、`compileall`、Ruff clean。详见[本地部署](LOCAL_DEPLOYMENT.md)与[开发过程记录](DEVELOPMENT_LOG.md)。
 
 > 历史统计口径修正：2026-08-06真实API的8类请求全部`accept`且100%衣柜归属；其中7类无回退，“高考”请求的Critic发生一次瞬时API失败并按标准推荐策略降级。文中旧的“8请求0回退”摘要以本说明为准。
 
@@ -57,7 +59,10 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 | 中英分类结构 + 上传联动（2026-08-09） | 已验证 | `core/taxonomy.py` 单一数据源（27 大类 + 70 细分类中英标签，大类按常用度排序）；`GET /catalog/taxonomy`；`docs/category_taxonomy.md`；Web/小程序上传表单大类必选 + 细分类可选联动 |
 | 衣柜可折叠（2026-08-09） | 已验证 | Web 用 el-collapse、小程序用分组折叠，均默认收起 + 全部展开/收起；Web 推荐状态 Pinia store 跨页面持久化（路由切换不丢结果） |
 | 小程序真机图片（2026-08-09） | 已验证 | 微信真机 `<image>` 不支持 http 链接，改为 `wx.downloadFile` 下载成本地临时文件再渲染；衣柜分组惰性下载，推荐结果图同样处理 |
-| 会话持久化多轮对话 + 长期记忆（2026-08-12） | 已验证 | `chat_sessions/chat_messages/user_memories` 三表（Schema v10）；`/tasks/execute` 带 `session_id` 落库并可恢复上文；两段式路由 + 整体调整模式；LLM 记忆提炼（置信度累加、手动优先）注入三 Agent；Web 聊天化 + 偏好管理页；全量 364 passed |
+| 会话持久化多轮对话（2026-08-12） | 已验证 | `chat_sessions/chat_messages` 两表（Schema v10）；`/tasks/execute` 带 `session_id` 落库并可恢复上文；两段式路由 + 整体调整模式；Web 聊天化 + 偏好管理页 |
+| Context-Aware 自适应偏好记忆（2026-08-12） | 已验证 | 行为事件 → 证据 → 维度化偏好模型完整闭环：`interaction_events / preference_evidence / preference_model` 三表（Schema v11，取代 `user_memories`）；`POST /users/{user_id}/events` 行为采集 + 前端推荐结果行为按钮；确定性聚合（幂等全量重算）+ 生命周期/衰减 + Memory Resolver 五桶 + 三 Agent 差异化注入；LLM 结构化证据提炼；consolidation 去重重算。v2.1：行为证据 item 级 + color 归因 + category 归纳（≥3 件）、弱证据 scope 改 contextual+场景词、全局偏好跨 value 冲突降权 + Resolver 上下文门控；全量 **422 passed** |
+| PostgreSQL 全量迁移（2026-08-12） | 已验证 | SQLite 退役，20 表 15,271 行迁移到 PG 17.10（`STYLEFORGE_DATABASE_DSN`）；pytest 连 PG 每测试独立 schema 隔离；全量 382 passed |
+| Redis 会话缓存 + Chroma RAG（2026-08-12） | 已验证（可选） | Redis 读穿缓存默认关，异常回落 DB；Chroma 知识向量检索失败降级关键词；注入式测试覆盖 |
 
 ## 3. 已验证证据
 
@@ -86,7 +91,7 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 - 图片引用：328,754，存在 328,754，缺失 0。
 - 受众：women 44,125、men 11,029、girls 3,761、boys 2,327、baby 1,176、life 39。
 - 类别映射：`unmapped_item_count = 0`。
-- 数据仍保留在 `E:\style-dataset`，项目没有移动或复制 170GB+ 原图。
+- 数据位于 `E:\01-style-dataset`（2026-08-12 由 `E:\style-dataset` 迁移，旧目录已删除）。
 
 这里的“全部存在”只表示文件路径存在，不等于全部图片已经通过 Pillow 像素解码。
 
@@ -258,13 +263,13 @@ P0 回归与订单表预览已于 2026-08-04 通过：`compileall` 退出码 0�
 
 ### P1：Mytheresa 安全接入（尚未执行）
 
-1. 对当前主 SQLite 建立基线备份。
+1. 对当前主库建立基线备份（`pg_dump -Fc styleforge`）。
 2. 补充适配 Mytheresa 多图片结构的像素解码审计 CLI；现有`audit_images`只适配 Garments2Look 单图路径。
 3. 新 CLI 完成后重新执行 `compileall → Pytest → Ruff`，再检查 328,754 张图片。
-4. 一次性数据库的故障注入、断点重跑、幂等和备份恢复演练。
-5. 导入 62,457 件 Mytheresa 商品到同一一次性数据库并验收计数。
+4. 一次性库（独立 PG 库，见 [MYTHERESA_INTEGRATION.md](MYTHERESA_INTEGRATION.md)）的故障注入、断点重跑、幂等和备份恢复演练。
+5. 导入 62,457 件 Mytheresa 商品到同一一次性库并验收计数。
 6. API 验收 women、men、girls、boys、baby、life 多受众查询及多图片接口。
-7. 紧邻正式导入前再次备份主 SQLite，然后导入主库。
+7. 紧邻正式导入前再次备份主库，然后导入主库。
 8. 在新目录构建 189,385 件 Polyvore + Mytheresa 合并嵌入和 FAISS 索引。
 
 ### P2：语义三 Agent 真实 API 验收（✅ 2026-08-06 已完成）

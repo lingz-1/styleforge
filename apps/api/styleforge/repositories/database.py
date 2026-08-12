@@ -1,16 +1,93 @@
-"""SQLite connection and schema management."""
+"""PostgreSQL connection and schema management (StyleForge backend).
+
+The SQLite backend has been retired. Connection helpers now talk to
+PostgreSQL via psycopg3. Rows are returned as :class:`SqliteLikeRow`, a dict
+subclass that also supports positional indexing (``row[0]``), mirroring the
+old ``sqlite3.Row`` semantics so callers and repositories work unchanged.
+"""
 
 from __future__ import annotations
 
-import sqlite3
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
+
+import psycopg
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
-SCHEMA_SQL = """
+
+class SqliteLikeRow(dict):
+    """A row dict that also supports positional access like ``sqlite3.Row``.
+
+    ``row["column"]`` and ``row[0]`` both work, matching the previous SQLite
+    row type so existing callers need no changes.
+    """
+
+    def __init__(self, *args: Any, _columns: list[str] | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._columns = _columns if _columns is not None else list(dict.__iter__(self))
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, int):
+            return dict.__getitem__(self, self._columns[key])
+        return dict.__getitem__(self, key)
+
+
+class PgConnection:
+    """Thin wrapper adding sqlite3-style ``executemany`` to a psycopg3 Connection.
+
+    psycopg3 puts ``executemany`` on the cursor, not the connection, while the
+    retired SQLite backend exposed it on ``sqlite3.Connection`` and many call
+    sites use ``connection.executemany(...)``. This proxy keeps those call
+    sites working unchanged; every other attribute is delegated to the wrapped
+    psycopg connection.
+    """
+
+    def __init__(self, raw: psycopg.Connection[Any]) -> None:
+        self._raw = raw
+
+    def executemany(self, sql: str, seq_of_params: Any) -> None:
+        self._raw.cursor().executemany(sql, seq_of_params)
+
+    def __enter__(self) -> PgConnection:
+        # psycopg3 Connection is a context manager; expose the same protocol
+        # on the proxy so ``with connect(dsn) as connection:`` works like the
+        # old sqlite3.Connection. Implicit special-method lookup bypasses
+        # ``__getattr__``, so these cannot be delegated.
+        self._raw.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> Any:
+        return self._raw.__exit__(exc_type, exc_value, traceback)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw, name)
+
+
+# Re-exported type aliases so repositories can annotate uniformly without
+# depending on psycopg details.
+Connection = PgConnection
+Row = SqliteLikeRow
+
+
+def sqlite_like_row_factory(cursor: psycopg.Cursor[Any]) -> Any:
+    """psycopg3 row factory producing :class:`SqliteLikeRow` instances."""
+    columns = [d.name for d in cursor.description] if cursor.description is not None else []
+
+    def make_row(values: list[Any]) -> SqliteLikeRow:
+        return SqliteLikeRow(zip(columns, values), _columns=columns)
+
+    return make_row
+
+
+# Keep in sync with artifacts/init_pg_schema.py. This is the PostgreSQL
+# translation of the retired SCHEMA_SQL (SQLite dialect). Dialect notes:
+#   - AUTOINCREMENT INTEGER PRIMARY KEY  -> BIGSERIAL PRIMARY KEY
+#   - BLOB                              -> BYTEA
+#   - chat_messages.message_seq BIGSERIAL replaces the implicit SQLite rowid
+#     as the creation-order tiebreaker (rowid does not exist in PostgreSQL)
+PG_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -189,6 +266,9 @@ CREATE TABLE IF NOT EXISTS wardrobe_import_rows (
 CREATE INDEX IF NOT EXISTS idx_wardrobe_import_rows_batch_decision
 ON wardrobe_import_rows (batch_id, decision, source_row_number);
 
+CREATE INDEX IF NOT EXISTS idx_wardrobe_import_rows_order_eligibility
+ON wardrobe_import_rows (batch_id, order_eligibility, source_row_number);
+
 CREATE TABLE IF NOT EXISTS personal_wardrobe_items (
     item_id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
@@ -225,7 +305,7 @@ CREATE TABLE IF NOT EXISTS personal_item_embeddings (
         embedding_kind IN ('image', 'text', 'text_fallback')
     ),
     dimension INTEGER NOT NULL CHECK (dimension > 0),
-    vector_blob BLOB NOT NULL,
+    vector_blob BYTEA NOT NULL,
     model_revision TEXT NOT NULL,
     embedded_at TEXT NOT NULL,
     FOREIGN KEY (item_id) REFERENCES personal_wardrobe_items(item_id) ON DELETE CASCADE
@@ -245,7 +325,8 @@ CREATE TABLE IF NOT EXISTS styling_runs (
     result_json TEXT,
     error_message TEXT,
     created_at TEXT NOT NULL,
-    finished_at TEXT
+    finished_at TEXT,
+    semantic_detail_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS candidate_outfits (
@@ -261,7 +342,7 @@ CREATE TABLE IF NOT EXISTS candidate_outfits (
 );
 
 CREATE TABLE IF NOT EXISTS request_memory (
-    memory_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id BIGSERIAL PRIMARY KEY,
     user_id TEXT NOT NULL,
     request_signature_json TEXT NOT NULL,
     structure_signature_json TEXT NOT NULL DEFAULT '{}',
@@ -315,49 +396,90 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     run_id TEXT NOT NULL DEFAULT '',
     result_json TEXT,
     created_at TEXT NOT NULL,
+    message_seq BIGSERIAL,
     FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created
-ON chat_messages (session_id, created_at, message_id);
+ON chat_messages (session_id, created_at, message_seq);
 
-CREATE TABLE IF NOT EXISTS user_memories (
-    memory_id INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS interaction_events (
+    event_id BIGSERIAL PRIMARY KEY,
     user_id TEXT NOT NULL,
-    source TEXT NOT NULL CHECK (source IN ('auto', 'manual')),
-    category TEXT NOT NULL CHECK (
-        category IN ('category', 'color', 'style', 'formality', 'occasion', 'habit', 'general')
+    event_type TEXT NOT NULL CHECK (
+        event_type IN (
+            'outfit_selected', 'outfit_rejected', 'item_replaced', 'item_rejected',
+            'feedback_submitted', 'style_requested', 'compatibility_checked',
+            'explicit_preference', 'wardrobe_adopted', 'wardrobe_removed'
+        )
     ),
-    content TEXT NOT NULL,
-    confidence REAL NOT NULL DEFAULT 0,
-    occurrences INTEGER NOT NULL DEFAULT 0,
-    meta_json TEXT NOT NULL DEFAULT '{}',
-    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    item_id TEXT NOT NULL DEFAULT '',
+    context_json TEXT NOT NULL DEFAULT '{}',
+    features_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_user_memories_user_active
-ON user_memories (user_id, active, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_interaction_events_user_created
+ON interaction_events (user_id, created_at DESC);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_user_memories_user_cat_content
-ON user_memories (user_id, category, content);
+CREATE TABLE IF NOT EXISTS preference_evidence (
+    evidence_id BIGSERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    dimension TEXT NOT NULL DEFAULT '',
+    attribute TEXT NOT NULL,
+    value TEXT NOT NULL,
+    polarity TEXT NOT NULL CHECK (polarity IN ('positive', 'negative')),
+    strength REAL NOT NULL DEFAULT 0.5 CHECK (strength >= 0 AND strength <= 1),
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    source TEXT NOT NULL,
+    event_id BIGINT REFERENCES interaction_events(event_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_preference_evidence_user_attr
+ON preference_evidence (user_id, attribute, value);
+
+CREATE TABLE IF NOT EXISTS preference_model (
+    preference_id BIGSERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    dimension TEXT NOT NULL DEFAULT '',
+    attribute TEXT NOT NULL,
+    value TEXT NOT NULL,
+    polarity TEXT NOT NULL CHECK (polarity IN ('positive', 'negative')),
+    lifecycle TEXT NOT NULL DEFAULT 'short_term' CHECK (
+        lifecycle IN ('short_term', 'long_term_candidate', 'long_term')
+    ),
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    confidence REAL NOT NULL DEFAULT 0,
+    support_score REAL NOT NULL DEFAULT 0,
+    contradiction_score REAL NOT NULL DEFAULT 0,
+    support_count INTEGER NOT NULL DEFAULT 0,
+    contradiction_count INTEGER NOT NULL DEFAULT 0,
+    source_summary_json TEXT NOT NULL DEFAULT '{}',
+    decay_policy TEXT NOT NULL DEFAULT 'normal' CHECK (
+        decay_policy IN ('none', 'slow', 'normal')
+    ),
+    last_observed_at TEXT NOT NULL DEFAULT '',
+    expires_at TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (user_id, dimension, attribute, value)
+);
+
+CREATE INDEX IF NOT EXISTS idx_preference_model_user_active
+ON preference_model (user_id, active, updated_at DESC);
 """
 
 
-def connect(database_path: Path) -> sqlite3.Connection:
-    database_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(database_path, timeout=30.0)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA synchronous = NORMAL")
-    connection.execute("PRAGMA busy_timeout = 30000")
-    return connection
+def connect(dsn: str) -> PgConnection:
+    """Open a PostgreSQL connection with sqlite3.Row-like rows."""
+    return PgConnection(psycopg.connect(dsn, row_factory=sqlite_like_row_factory))
 
 
-def initialize_database(database_path: Path) -> None:
-    connection = connect(database_path)
+def initialize_database(dsn: str) -> None:
+    """Create the PostgreSQL schema if needed and check the schema version."""
+    connection = connect(dsn)
     try:
         connection.execute(
             "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -370,70 +492,10 @@ def initialize_database(database_path: Path) -> None:
                 "Database schema is newer than this StyleForge build: "
                 f"database={version_row['value']}, supported={SCHEMA_VERSION}"
             )
-        connection.executescript(SCHEMA_SQL)
-        _migrate_task_runs_status(connection)
-        _ensure_column(connection, "dataset_outfits", "style", "TEXT NOT NULL DEFAULT ''")
-        _ensure_column(connection, "dataset_outfits", "season", "TEXT NOT NULL DEFAULT ''")
-        _ensure_column(connection, "dataset_outfits", "occasion", "TEXT NOT NULL DEFAULT ''")
-        _ensure_column(connection, "dataset_outfits", "theme", "TEXT NOT NULL DEFAULT ''")
-        _ensure_column(
-            connection, "dataset_outfits", "color_palette_json", "TEXT NOT NULL DEFAULT '[]'"
-        )
-        _ensure_column(
-            connection, "dataset_outfits", "is_official_outfit", "INTEGER NOT NULL DEFAULT 0"
-        )
-        _ensure_column(
-            connection, "dataset_outfits", "is_official_look", "INTEGER NOT NULL DEFAULT 0"
-        )
-        _ensure_column(
-            connection, "dataset_outfit_items", "item_description", "TEXT NOT NULL DEFAULT ''"
-        )
-        _ensure_column(
-            connection, "catalog_items", "attributes_json", "TEXT NOT NULL DEFAULT '{}'"
-        )
-        _ensure_column(
-            connection,
-            "wardrobe_import_batches",
-            "parser_revision",
-            "TEXT NOT NULL DEFAULT ''",
-        )
-        for column_name, definition in (
-            ("external_order_id_hash", "TEXT NOT NULL DEFAULT ''"),
-            ("order_submitted_at", "TEXT NOT NULL DEFAULT ''"),
-            ("order_status", "TEXT NOT NULL DEFAULT ''"),
-            ("shop_name", "TEXT NOT NULL DEFAULT ''"),
-            ("refund_status", "TEXT NOT NULL DEFAULT ''"),
-            ("after_sale_status", "TEXT NOT NULL DEFAULT ''"),
-            ("logistics_status", "TEXT NOT NULL DEFAULT ''"),
-            ("order_eligibility", "TEXT NOT NULL DEFAULT 'unknown'"),
-            ("order_eligibility_reason", "TEXT NOT NULL DEFAULT ''"),
-        ):
-            _ensure_column(
-                connection,
-                "wardrobe_import_rows",
-                column_name,
-                definition,
-            )
-        for column_name, definition in (
-            ("external_order_id_hash", "TEXT NOT NULL DEFAULT ''"),
-            ("order_submitted_at", "TEXT NOT NULL DEFAULT ''"),
-            ("order_status", "TEXT NOT NULL DEFAULT ''"),
-            ("shop_name", "TEXT NOT NULL DEFAULT ''"),
-        ):
-            _ensure_column(
-                connection,
-                "personal_wardrobe_items",
-                column_name,
-                definition,
-            )
-        _ensure_column(connection, "styling_runs", "semantic_detail_json", "TEXT")
+        connection.execute(PG_SCHEMA_SQL)
         connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_wardrobe_import_rows_order_eligibility "
-            "ON wardrobe_import_rows (batch_id, order_eligibility, source_row_number)"
-        )
-        connection.execute(
-            "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO schema_meta(key, value) VALUES('schema_version', %s) "
+            "ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value",
             (str(SCHEMA_VERSION),),
         )
         connection.commit()
@@ -444,75 +506,14 @@ def initialize_database(database_path: Path) -> None:
         connection.close()
 
 
-def _migrate_task_runs_status(connection: sqlite3.Connection) -> None:
-    """Add needs_clarification to the task_runs status constraint in schema v8."""
-    row = connection.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'task_runs'"
-    ).fetchone()
-    if row is None or "needs_clarification" in str(row["sql"]):
-        return
-    connection.execute(
-        """
-        CREATE TABLE task_runs_v8 (
-            run_id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            task_type TEXT NOT NULL CHECK (
-                task_type IN (
-                    'outfit_recommend', 'outfit_modify', 'style_advice',
-                    'item_advice', 'wardrobe_compatibility', 'wardrobe_gap'
-                )
-            ),
-            request TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (
-                status IN (
-                    'running', 'completed', 'infeasible',
-                    'needs_clarification', 'failed'
-                )
-            ),
-            context_pack_json TEXT NOT NULL DEFAULT '{}',
-            result_json TEXT,
-            error_message TEXT,
-            created_at TEXT NOT NULL,
-            finished_at TEXT
-        )
-        """
-    )
-    connection.execute(
-        """
-        INSERT INTO task_runs_v8(
-            run_id, user_id, task_type, request, status,
-            context_pack_json, result_json, error_message, created_at, finished_at
-        )
-        SELECT
-            run_id, user_id, task_type, request, status,
-            context_pack_json, result_json, error_message, created_at, finished_at
-        FROM task_runs
-        """
-    )
-    connection.execute("DROP TABLE task_runs")
-    connection.execute("ALTER TABLE task_runs_v8 RENAME TO task_runs")
-    connection.execute(
-        "CREATE INDEX idx_task_runs_user_created "
-        "ON task_runs (user_id, created_at DESC)"
-    )
-
-
-def _ensure_column(
-    connection: sqlite3.Connection,
-    table_name: str,
-    column_name: str,
-    definition: str,
-) -> None:
-    columns = {
-        row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})")
-    }
-    if column_name not in columns:
-        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
-
-
 @contextmanager
-def database_session(database_path: Path) -> Iterator[sqlite3.Connection]:
-    connection = connect(database_path)
+def database_session(dsn: str) -> Iterator[PgConnection]:
+    """Context manager yielding a PostgreSQL connection with commit/rollback.
+
+    Mirrors the old SQLite ``database_session(path)`` contract; callers pass a
+    PostgreSQL DSN string instead of a file path.
+    """
+    connection = connect(dsn)
     try:
         yield connection
         connection.commit()

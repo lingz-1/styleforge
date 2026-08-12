@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from styleforge.core.schemas import RecommendationResult
 from styleforge.repositories.database import database_session
 
 
-def present_result(database_path: Path, result: RecommendationResult) -> dict[str, Any]:
+def present_result(database_path: str, result: RecommendationResult) -> dict[str, Any]:
     payload = result.to_dict()
     item_ids = {
         item_id
@@ -18,7 +17,7 @@ def present_result(database_path: Path, result: RecommendationResult) -> dict[st
     }
     if not item_ids:
         return payload
-    placeholders = ",".join("?" for _ in item_ids)
+    placeholders = ",".join("%s" for _ in item_ids)
     with database_session(database_path) as connection:
         summaries = {
             row["item_id"]: {

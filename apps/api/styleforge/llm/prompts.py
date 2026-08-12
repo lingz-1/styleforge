@@ -281,16 +281,60 @@ def _json_example(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _memory_profile_block(memory_profile: list[dict[str, Any]] | None) -> str:
-    """Render the user's long-term preferences as a compact prompt section."""
+_PACK_SECTIONS = (
+    ("会话实时信号", "session_signals"),
+    ("短期偏好", "short_term_preferences"),
+    ("稳定偏好", "stable_preferences"),
+    ("场景化偏好", "contextual_preferences"),
+    ("回避项", "avoidances"),
+)
+_PACK_KEYS = frozenset(key for _title, key in _PACK_SECTIONS)
+
+
+def _memory_profile_block(memory_profile: Any) -> str:
+    """Render the user's preferences as a compact prompt section.
+
+    Accepts either a Memory Pack (the resolver's five-bucket dict) or a legacy
+    flat list of preference rows; both render to the same prompt block shape.
+    """
     if not memory_profile:
         return ""
-    lines = [
-        f"- [{item.get('category', 'general')}][{item.get('source', 'auto')}]"
-        f"[置信度 {float(item.get('confidence', 0.0)):.2f}] {item.get('content', '')}"
-        for item in memory_profile
-    ]
+    if isinstance(memory_profile, dict) and _PACK_KEYS.issubset(memory_profile):
+        sections: list[str] = []
+        for title, key in _PACK_SECTIONS:
+            items = memory_profile.get(key)
+            if isinstance(items, dict):
+                # session_signals bucket is a flat dict of live signals.
+                rows = [
+                    {"value": f"{signal_key}: {signal_value}"}
+                    for signal_key, signal_value in items.items()
+                ]
+            else:
+                rows = items or []
+            if not rows:
+                continue
+            lines = [
+                _memory_line(item)
+                for item in rows
+            ]
+            sections.append(f"\n【{title}】\n" + "\n".join(lines))
+        return "\n".join(sections)
+    lines = [_memory_line(item) for item in memory_profile]
     return "\n\n【用户长期偏好记忆】\n" + "\n".join(lines)
+
+
+def _memory_line(item: dict[str, Any]) -> str:
+    """Render one preference row as ``- [dimension][极性][置信度] value``."""
+    dimension = item.get("dimension", "") or item.get("category", "general")
+    polarity = item.get("polarity", "")
+    value = item.get("value", "") or item.get("content", "") or item.get("attribute", "")
+    confidence = float(item.get("confidence", 0.0) or 0.0)
+    polarity_tag = f"[{polarity}]" if polarity else ""
+    prefix = "避免: " if polarity == "negative" else ""
+    return (
+        f"- [{dimension}]{polarity_tag}"
+        f"[置信度 {confidence:.2f}] {prefix}{value}"
+    )
 
 
 _CONTEXT_CONTRACT = (
@@ -328,7 +372,7 @@ def build_agent1_prompt(
     recent_memories: list[dict[str, Any]],
     weights: dict[str, float] | None = None,
     environment_context: dict[str, Any] | None = None,
-    memory_profile: list[dict[str, Any]] | None = None,
+    memory_profile: Any = None,
 ) -> tuple[str, str]:
     resolved = normalize_weights(weights)
     rubric_note = (
@@ -401,7 +445,7 @@ def build_agent2_prompt(
     recent_structure_signatures: list[dict[str, Any]],
     weights: dict[str, float] | None = None,
     environment_context: dict[str, Any] | None = None,
-    memory_profile: list[dict[str, Any]] | None = None,
+    memory_profile: Any = None,
 ) -> tuple[str, str]:
     resolved = normalize_weights(weights)
     system = (
@@ -457,7 +501,7 @@ def build_agent3_prompt(
     outfits: list[dict[str, Any]],
     weights: dict[str, float] | None = None,
     environment_context: dict[str, Any] | None = None,
-    memory_profile: list[dict[str, Any]] | None = None,
+    memory_profile: Any = None,
 ) -> tuple[str, str]:
     resolved = normalize_weights(weights)
     system = _AGENT3_SYSTEM + "\n" + rubric_text(resolved)

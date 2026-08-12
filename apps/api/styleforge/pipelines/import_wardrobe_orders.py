@@ -24,7 +24,7 @@ from styleforge.services.personal_embeddings import embed_personal_items
 def import_wardrobe_orders(
     *,
     excel_path: Path,
-    database_path: Path,
+    database_path: str,
     artifact_root: Path,
     user_id: str,
     default_audience: str,
@@ -132,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("", "women", "men", "girls", "boys", "baby", "life"),
         default="",
     )
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument("--artifact-root", type=Path, default=settings.artifact_root)
     parser.add_argument("--model-dir", type=Path, default=settings.artifact_root / "models")
     parser.add_argument("--device", default="cuda")

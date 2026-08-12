@@ -9,7 +9,7 @@ after a refresh or on another device.
 from __future__ import annotations
 
 import json
-import sqlite3
+from styleforge.repositories.database import Connection, Row
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -24,7 +24,7 @@ def _now() -> str:
 
 
 def create_chat_session(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     user_id: str,
     title: str = "",
@@ -36,7 +36,7 @@ def create_chat_session(
     connection.execute(
         """
         INSERT INTO chat_sessions(session_id, user_id, title, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s)
         """,
         (session_id, user_id, title.strip(), timestamp, timestamp),
     )
@@ -49,7 +49,7 @@ def create_chat_session(
     }
 
 
-def _row_to_session(row: sqlite3.Row) -> dict[str, Any]:
+def _row_to_session(row: Row) -> dict[str, Any]:
     return {
         "session_id": row["session_id"],
         "user_id": row["user_id"],
@@ -60,7 +60,7 @@ def _row_to_session(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def list_chat_sessions(
-    connection: sqlite3.Connection,
+    connection: Connection,
     user_id: str,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
@@ -75,12 +75,12 @@ def list_chat_sessions(
             SELECT cm.message_id
             FROM chat_messages AS cm
             WHERE cm.session_id = s.session_id
-            ORDER BY cm.created_at DESC, cm.rowid DESC
+            ORDER BY cm.created_at DESC, cm.message_seq DESC
             LIMIT 1
         )
-        WHERE s.user_id = ?
+        WHERE s.user_id = %s
         ORDER BY s.updated_at DESC
-        LIMIT ?
+        LIMIT %s
         """,
         (user_id, limit),
     ).fetchall()
@@ -98,7 +98,7 @@ def list_chat_sessions(
 
 
 def get_chat_session(
-    connection: sqlite3.Connection,
+    connection: Connection,
     user_id: str,
     session_id: str,
 ) -> dict[str, Any] | None:
@@ -106,7 +106,7 @@ def get_chat_session(
         """
         SELECT session_id, user_id, title, created_at, updated_at
         FROM chat_sessions
-        WHERE session_id = ? AND user_id = ?
+        WHERE session_id = %s AND user_id = %s
         """,
         (session_id, user_id),
     ).fetchone()
@@ -114,7 +114,7 @@ def get_chat_session(
 
 
 def rename_chat_session(
-    connection: sqlite3.Connection,
+    connection: Connection,
     user_id: str,
     session_id: str,
     title: str,
@@ -125,8 +125,8 @@ def rename_chat_session(
     row = connection.execute(
         """
         UPDATE chat_sessions
-        SET title = ?, updated_at = ?
-        WHERE session_id = ? AND user_id = ?
+        SET title = %s, updated_at = %s
+        WHERE session_id = %s AND user_id = %s
         RETURNING session_id, user_id, title, created_at, updated_at
         """,
         (title, _now(), session_id, user_id),
@@ -135,19 +135,19 @@ def rename_chat_session(
 
 
 def delete_chat_session(
-    connection: sqlite3.Connection,
+    connection: Connection,
     user_id: str,
     session_id: str,
 ) -> bool:
     cursor = connection.execute(
-        "DELETE FROM chat_sessions WHERE session_id = ? AND user_id = ?",
+        "DELETE FROM chat_sessions WHERE session_id = %s AND user_id = %s",
         (session_id, user_id),
     )
     return cursor.rowcount > 0
 
 
 def append_message(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     session_id: str,
     user_id: str,
@@ -166,7 +166,7 @@ def append_message(
         INSERT INTO chat_messages(
             message_id, session_id, user_id, role, content,
             task_type, run_id, result_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             message_id,
@@ -181,13 +181,13 @@ def append_message(
         ),
     )
     connection.execute(
-        "UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?",
+        "UPDATE chat_sessions SET updated_at = %s WHERE session_id = %s",
         (timestamp, session_id),
     )
     return message_id
 
 
-def _row_to_message(row: sqlite3.Row) -> dict[str, Any]:
+def _row_to_message(row: Row) -> dict[str, Any]:
     message = {
         "message_id": row["message_id"],
         "session_id": row["session_id"],
@@ -210,7 +210,7 @@ def _row_to_message(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def list_messages(
-    connection: sqlite3.Connection,
+    connection: Connection,
     session_id: str,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
@@ -219,9 +219,9 @@ def list_messages(
         SELECT message_id, session_id, user_id, role, content,
                task_type, run_id, result_json, created_at
         FROM chat_messages
-        WHERE session_id = ?
-        ORDER BY created_at ASC, rowid ASC
-        LIMIT ?
+        WHERE session_id = %s
+        ORDER BY created_at ASC, message_seq ASC
+        LIMIT %s
         """,
         (session_id, limit),
     ).fetchall()
@@ -229,22 +229,22 @@ def list_messages(
 
 
 def active_outfit_messages(
-    connection: sqlite3.Connection,
+    connection: Connection,
     user_id: str,
     session_id: str,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """Return assistant messages that produced an outfit, newest first."""
-    placeholders = ",".join("?" for _ in OUTFIT_TASK_TYPES)
+    placeholders = ",".join("%s" for _ in OUTFIT_TASK_TYPES)
     rows = connection.execute(
         f"""
         SELECT message_id, session_id, user_id, role, content,
                task_type, run_id, result_json, created_at
         FROM chat_messages
-        WHERE session_id = ? AND user_id = ? AND role = 'assistant'
+        WHERE session_id = %s AND user_id = %s AND role = 'assistant'
           AND task_type IN ({placeholders}) AND result_json IS NOT NULL
-        ORDER BY created_at DESC, rowid DESC
-        LIMIT ?
+        ORDER BY created_at DESC, message_seq DESC
+        LIMIT %s
         """,  # noqa: S608
         (session_id, user_id, *OUTFIT_TASK_TYPES, limit),
     ).fetchall()

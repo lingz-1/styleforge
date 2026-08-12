@@ -191,7 +191,7 @@ def _process_image(
     image_bytes: bytes,
     default_gender: str,
     vision_client: VisionClientLike,
-    database_path: Path,
+    database_path: str,
     artifact_root: Path,
     model_dir: Path,
 ) -> None:
@@ -257,7 +257,7 @@ def start_batch(
     images: list[tuple[str, bytes]],
     default_gender: str,
     vision_client: VisionClientLike,
-    database_path: Path,
+    database_path: str,
     artifact_root: Path,
     model_dir: Path,
 ) -> RecognitionBatch:

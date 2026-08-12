@@ -5,9 +5,9 @@
 
 ## P1：用户长期记忆系统与多轮对话（✅ 2026-08-12 已完成）
 
-- **记忆系统**：`user_memories` 表 + LLM 自动提炼 + 置信度累加 + 手动增删改查（手动优先）+ 注入三 Agent prompt。Web 新增 `/memories` 偏好管理页。
+- **记忆系统（Context-Aware 自适应偏好记忆）**：完整闭环落地——`interaction_events`（行为事实）→ `preference_evidence`（标准化证据）→ `preference_model`（维度化偏好，Schema v11 取代 `user_memories`）→ Memory Resolver 五桶 → 三 Agent 差异化注入。行为来自前端推荐结果按钮（采纳/换掉/好评差评/换掉这件）、后端埋点与 LLM 语言证据提炼；含确定性聚合（幂等全量重算）、生命周期/衰减与 consolidation。Web `/memories` 偏好管理页展示/编辑维度化偏好。
 - **多轮对话**：`chat_sessions` + `chat_messages` 表，`POST /tasks/execute` 带 `session_id` 落库，会话 outfit context 自动恢复；两段式路由让"换一件外套""更正式一点"自动带上文并路由到修改任务；"更正式一点"走整体调整模式（重建一套完整搭配）。前端聊天化：会话侧栏 + 历史恢复 + localStorage 记住当前会话。
-- 验证：全量 **364 passed**、Ruff clean、Web 构建通过；方案与契约见 [会话与记忆契约](SESSION_CHAT_MEMORY.md)。
+- 验证：全量 **414 passed**、Ruff clean、Vue 生产构建通过；方案见《项目文档/StyleForge 记忆系统实现方案.md》，契约见 [会话与记忆契约](SESSION_CHAT_MEMORY.md)。
 
 后续 P2 候选：
 
@@ -100,7 +100,7 @@ D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_wardrobe_orders
 - `unknown_order_rows = 0`
 - `交易关闭/买家已付款/卖家已发货/充值成功`均不能出现在候选列表
 - 多商品子行继承正确订单状态，但金额没有被错误继承
-- 原始订单号没有明文写入 SQLite 或报告
+- 原始订单号没有明文写入数据库或报告
 
 然后人工抽查至少 30 条：衬衫、半身裙、裤装、鞋、外套、配饰、汉服套装、内衣/背心、非服饰各至少 3 条。发现误分类后修改规则，并从`compileall → Pytest → Ruff → 新数据库预览`重新走完整回环，再决定是否提交。
 
@@ -121,13 +121,13 @@ D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_wardrobe_orders
 在修改主数据库前依次完成：
 
 1. 最新测试回归。
-2. 对当前主 SQLite 建立基线备份。
+2. 对当前主库建立基线备份（`pg_dump -Fc styleforge`）。
 3. 补充适配 Mytheresa 多图片结构的像素解码审计 CLI；现有`audit_images`只适配 Garments2Look 单图路径，不能直接用于该数据。
 4. 新 CLI 编写完成后重新执行`compileall → Pytest → Ruff`，通过后再检查 328,754 张图片。
-5. 一次性数据库的故障注入、断点重跑、幂等和备份恢复演练。
-6. 导入 62,457 件 Mytheresa 商品到同一一次性数据库并验收计数。
+5. 一次性库（独立 PG 库）的故障注入、断点重跑、幂等和备份恢复演练。
+6. 导入 62,457 件 Mytheresa 商品到同一一次性库并验收计数。
 7. API 验收 women、men、girls、boys、baby、life 多受众查询及多图片接口。
-8. 紧邻正式导入前再次备份主 SQLite，然后导入主库。
+8. 紧邻正式导入前再次备份主库，然后导入主库。
 9. 在新目录构建 189,385 件 Polyvore + Mytheresa 跨数据源主图合并嵌入和 FAISS 索引。
 
 详细命令见[Mytheresa 数据接入说明](MYTHERESA_INTEGRATION.md)。

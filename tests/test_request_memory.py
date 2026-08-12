@@ -6,14 +6,13 @@ from styleforge.repositories.request_memory_repository import (
 )
 
 
-def _db(tmp_path):
-    path = tmp_path / "memory.sqlite"
-    initialize_database(path)
-    return path
+def _db(db_dsn):
+    initialize_database(db_dsn)
+    return db_dsn
 
 
-def test_save_and_read_back_memory(tmp_path) -> None:
-    path = _db(tmp_path)
+def test_save_and_read_back_memory(db_dsn) -> None:
+    path = _db(db_dsn)
     signature = {"theme": "面试", "unique_mood": ["专业"]}
     with database_session(path) as connection:
         save_request_memory(connection, user_id="u", request_signature=signature)
@@ -24,8 +23,8 @@ def test_save_and_read_back_memory(tmp_path) -> None:
     assert memories[0]["request_signature"] == signature
 
 
-def test_keeps_only_max_recent_entries(tmp_path) -> None:
-    path = _db(tmp_path)
+def test_keeps_only_max_recent_entries(db_dsn) -> None:
+    path = _db(db_dsn)
     with database_session(path) as connection:
         for index in range(8):
             save_request_memory(
@@ -44,8 +43,8 @@ def test_keeps_only_max_recent_entries(tmp_path) -> None:
     assert "request-0" not in themes
 
 
-def test_memory_scoped_by_user(tmp_path) -> None:
-    path = _db(tmp_path)
+def test_memory_scoped_by_user(db_dsn) -> None:
+    path = _db(db_dsn)
     with database_session(path) as connection:
         save_request_memory(connection, user_id="a", request_signature={"theme": "x"})
         save_request_memory(connection, user_id="b", request_signature={"theme": "y"})
@@ -58,8 +57,8 @@ def test_memory_scoped_by_user(tmp_path) -> None:
     assert memories_b[0]["request_signature"]["theme"] == "y"
 
 
-def test_structure_signatures_round_trip(tmp_path) -> None:
-    path = _db(tmp_path)
+def test_structure_signatures_round_trip(db_dsn) -> None:
+    path = _db(db_dsn)
     structure = {
         "category_structure": ["top", "bottom"],
         "dominant_color_family": ["dark_neutral"],
@@ -86,8 +85,8 @@ def test_structure_signatures_round_trip(tmp_path) -> None:
     assert signatures[0]["dominant_color_family"] == ["dark_neutral"]
 
 
-def test_save_requires_user_id(tmp_path) -> None:
-    path = _db(tmp_path)
+def test_save_requires_user_id(db_dsn) -> None:
+    path = _db(db_dsn)
     with database_session(path) as connection:
         try:
             save_request_memory(connection, user_id="", request_signature={"theme": "x"})

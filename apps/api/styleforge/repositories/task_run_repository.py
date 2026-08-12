@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+from styleforge.repositories.database import Connection
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -16,7 +16,7 @@ def _now() -> str:
 
 
 def start_task_run(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     user_id: str,
     task_type: TaskType,
@@ -26,7 +26,7 @@ def start_task_run(
     connection.execute(
         """
         INSERT INTO task_runs(run_id, user_id, task_type, request, status, created_at)
-        VALUES (?, ?, ?, ?, 'running', ?)
+        VALUES (%s, %s, %s, %s, 'running', %s)
         """,
         (run_id, user_id, task_type.value, request, _now()),
     )
@@ -34,7 +34,7 @@ def start_task_run(
 
 
 def finish_task_run(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     run_id: str,
     status: str,
@@ -44,8 +44,8 @@ def finish_task_run(
     connection.execute(
         """
         UPDATE task_runs
-        SET status = ?, context_pack_json = ?, result_json = ?, finished_at = ?
-        WHERE run_id = ?
+        SET status = %s, context_pack_json = %s, result_json = %s, finished_at = %s
+        WHERE run_id = %s
         """,
         (
             status,
@@ -58,7 +58,7 @@ def finish_task_run(
 
 
 def fail_task_run(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     run_id: str,
     error: BaseException,
@@ -67,8 +67,8 @@ def fail_task_run(
     connection.execute(
         """
         UPDATE task_runs
-        SET status = 'failed', context_pack_json = ?, error_message = ?, finished_at = ?
-        WHERE run_id = ?
+        SET status = 'failed', context_pack_json = %s, error_message = %s, finished_at = %s
+        WHERE run_id = %s
         """,
         (
             json.dumps(context_pack or {}, ensure_ascii=False, sort_keys=True),
@@ -80,13 +80,13 @@ def fail_task_run(
 
 
 def get_task_run(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     user_id: str,
     run_id: str,
 ) -> dict[str, Any] | None:
     row = connection.execute(
-        "SELECT * FROM task_runs WHERE run_id = ? AND user_id = ?",
+        "SELECT * FROM task_runs WHERE run_id = %s AND user_id = %s",
         (run_id, user_id),
     ).fetchone()
     if row is None:

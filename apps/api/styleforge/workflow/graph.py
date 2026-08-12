@@ -258,7 +258,7 @@ class StyleForgeWorkflow:
     def __init__(
         self,
         *,
-        database_path: Path,
+        database_path: str,
         embedding_dir: Path,
         model_dir: Path,
         device: str = "cuda",
@@ -267,7 +267,7 @@ class StyleForgeWorkflow:
         llm_verbose: bool = False,
         weather_tool: Any | None = None,
     ) -> None:
-        self.database_path = database_path.resolve()
+        self.database_path = database_path
         self.embedding_dir = embedding_dir.resolve()
         self.model_dir = model_dir.resolve()
         self.device = device
@@ -588,7 +588,9 @@ class StyleForgeWorkflow:
                 llm=self._llm_client,
                 weights=state.get("evaluation_weights"),
                 environment_context=state.get("environment_context") or None,
-                memory_profile=state.get("memory_profile") or None,
+                memory_profile=self._resolve_memory_pack(
+                    state.get("memory_profile"), None, "retriever"
+                ),
             )
         except BaseException as error:
             output, info, _ = self.semantic_retriever.run(
@@ -599,7 +601,9 @@ class StyleForgeWorkflow:
                 llm=None,
                 weights=state.get("evaluation_weights"),
                 environment_context=state.get("environment_context") or None,
-                memory_profile=state.get("memory_profile") or None,
+                memory_profile=self._resolve_memory_pack(
+                    state.get("memory_profile"), None, "retriever"
+                ),
             )
             info["reason"] = f"{type(error).__name__}: {error}"
         output_dict = output.to_dict()
@@ -774,7 +778,11 @@ class StyleForgeWorkflow:
                 pool_scores=pool_scores,
                 weights=state.get("evaluation_weights"),
                 environment_context=state.get("environment_context") or None,
-                memory_profile=state.get("memory_profile") or None,
+                memory_profile=self._resolve_memory_pack(
+                    state.get("memory_profile"),
+                    state.get("request_signature", {}),
+                    "composer",
+                ),
             )
         except BaseException as error:
             proposals, info, _ = self.composer.run(
@@ -789,7 +797,11 @@ class StyleForgeWorkflow:
                 pool_scores=pool_scores,
                 weights=state.get("evaluation_weights"),
                 environment_context=state.get("environment_context") or None,
-                memory_profile=state.get("memory_profile") or None,
+                memory_profile=self._resolve_memory_pack(
+                    state.get("memory_profile"),
+                    state.get("request_signature", {}),
+                    "composer",
+                ),
             )
             info["reason"] = f"{type(error).__name__}: {error}"
         proposal_dicts = [proposal.to_dict() for proposal in proposals]
@@ -842,7 +854,11 @@ class StyleForgeWorkflow:
                 wardrobe_ids=set(state.get("wardrobe_item_ids", [])),
                 weights=state.get("evaluation_weights"),
                 environment_context=state.get("environment_context") or None,
-                memory_profile=state.get("memory_profile") or None,
+                memory_profile=self._resolve_memory_pack(
+                    state.get("memory_profile"),
+                    request_signature,
+                    "critic",
+                ),
             )
         except BaseException as error:
             critic_output = deterministic_critic(
@@ -971,6 +987,10 @@ class StyleForgeWorkflow:
             for sort_score, proposal, llm_score, rule_score in scored
         ]
         status = "completed" if candidates else "infeasible"
+        if len(candidates) > task.max_results:
+            # Cap the semantic path to the requested outfit count, matching the
+            # deterministic path's select_diverse_candidates limit.
+            candidates = candidates[: task.max_results]
         notes = list(state.get("validation_notes", []))
         if state.get("decision") != "accept" and state.get("best_effort", {}).get("feedback"):
             notes.append(state["best_effort"]["feedback"])
@@ -1075,14 +1095,27 @@ class StyleForgeWorkflow:
             return []
 
     def _load_memory_profile(self, user_id: str) -> list[dict[str, Any]]:
-        """Long-term preference profile; best-effort, empty when unavailable."""
+        """Raw preference-model rows; best-effort, empty when unavailable."""
         try:
-            from styleforge.repositories.memory_repository import active_memory_profile
+            from styleforge.repositories.preference_model_repository import list_preferences
 
             with database_session(self.database_path) as connection:
-                return active_memory_profile(connection, user_id, limit=30)
+                return list_preferences(connection, user_id)
         except BaseException:
             return []
+
+    def _resolve_memory_pack(
+        self,
+        raw: list[dict[str, Any]] | None,
+        request_signature: dict[str, Any] | None,
+        agent_role: str,
+    ) -> dict[str, Any] | None:
+        """Slice the raw preferences into one agent's differentiated Memory Pack."""
+        if not raw:
+            return None
+        from styleforge.services.memory_resolver import resolve
+
+        return resolve(raw, request_signature=request_signature or None, agent_role=agent_role)
 
     def _load_evaluation_weights(self, user_id: str) -> dict[str, float]:
         try:
@@ -1267,7 +1300,7 @@ class StyleForgeWorkflow:
 def _build_parser() -> argparse.ArgumentParser:
     settings = Settings.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument(
         "--embedding-dir",
         type=Path,

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import sqlite3
+from styleforge.repositories.database import Connection
 from datetime import datetime, timezone
 from typing import Sequence
 
 
 def upsert_personal_embedding(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     item_id: str,
     vector,
@@ -28,7 +28,7 @@ def upsert_personal_embedding(
         """
         INSERT INTO personal_item_embeddings(
             item_id, embedding_kind, dimension, vector_blob, model_revision, embedded_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT(item_id) DO UPDATE SET
             embedding_kind = excluded.embedding_kind,
             dimension = excluded.dimension,
@@ -46,17 +46,17 @@ def upsert_personal_embedding(
         ),
     )
     connection.execute(
-        "UPDATE catalog_items SET embedding_status = 'ready' WHERE item_id = ?",
+        "UPDATE catalog_items SET embedding_status = 'ready' WHERE item_id = %s",
         (item_id,),
     )
 
 
 def mark_personal_embedding_failed(
-    connection: sqlite3.Connection,
+    connection: Connection,
     item_ids: Sequence[str],
 ) -> None:
     connection.executemany(
-        "UPDATE catalog_items SET embedding_status = 'failed' WHERE item_id = ?",
+        "UPDATE catalog_items SET embedding_status = 'failed' WHERE item_id = %s",
         ((item_id,) for item_id in item_ids),
     )
 
@@ -64,7 +64,7 @@ def mark_personal_embedding_failed(
 class PersonalEmbeddingStore:
     """Score normalized personal vectors without rebuilding the global matrix."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: Connection) -> None:
         self.connection = connection
 
     def score_items(self, query_vector, allowed_item_ids: Sequence[str]) -> dict[str, float]:
@@ -78,7 +78,7 @@ class PersonalEmbeddingStore:
         if norm <= 1e-12:
             raise ValueError("Query vector must be non-zero")
         query = query / norm
-        placeholders = ",".join("?" for _ in item_ids)
+        placeholders = ",".join("%s" for _ in item_ids)
         rows = self.connection.execute(
             f"SELECT item_id, dimension, vector_blob FROM personal_item_embeddings "  # noqa: S608
             f"WHERE item_id IN ({placeholders})",

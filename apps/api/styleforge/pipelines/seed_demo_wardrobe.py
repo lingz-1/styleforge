@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 from styleforge.core.config import Settings
 from styleforge.repositories.database import database_session, initialize_database
@@ -20,7 +19,7 @@ DEFAULT_ITEM_TYPES = ("top", "pants", "skirt", "shoes", "outwear", "bag")
 
 
 def seed_demo_wardrobe(
-    database_path: Path,
+    database_path: str,
     user_id: str,
     per_type: int,
     outfit_count: int = 8,
@@ -51,7 +50,7 @@ def seed_demo_wardrobe(
 def build_parser() -> argparse.ArgumentParser:
     settings = Settings.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument("--user-id", default="demo-user")
     parser.add_argument("--per-type", type=int, default=6)
     parser.add_argument("--outfit-count", type=int, default=8)

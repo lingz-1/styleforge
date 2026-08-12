@@ -65,7 +65,7 @@ def _catalog_hash(rows: list[CatalogImage]) -> str:
 
 
 def _load_catalog(
-    database_path: Path,
+    database_path: str,
     fallback_image_root: Path | None,
     source: str | None,
     limit: int | None,
@@ -80,15 +80,15 @@ def _load_catalog(
         )
         parameters: list[object] = []
         if source is not None:
-            sql += " AND c.source = ?"
+            sql += " AND c.source = %s"
             parameters.append(source)
         else:
-            sql += " AND c.source NOT LIKE 'personal-%'"
+            sql += " AND c.source NOT ILIKE 'personal-%'"
         sql += " ORDER BY c.item_id"
         if limit is not None:
             if limit <= 0:
                 raise ValueError("limit must be positive")
-            sql += " LIMIT ?"
+            sql += " LIMIT %s"
             parameters.append(limit)
         rows = []
         roots: dict[str, str] = {}
@@ -154,11 +154,11 @@ def _validate_resume_state(state: dict[str, Any], signature: dict[str, Any]) -> 
     return next_index
 
 
-def _mark_database_ready(database_path: Path, item_ids: list[str]) -> None:
+def _mark_database_ready(database_path: str, item_ids: list[str]) -> None:
     connection = connect(database_path)
     try:
         connection.executemany(
-            "UPDATE catalog_items SET embedding_status = 'ready' WHERE item_id = ?",
+            "UPDATE catalog_items SET embedding_status = 'ready' WHERE item_id = %s",
             ((item_id,) for item_id in item_ids),
         )
         connection.commit()
@@ -168,7 +168,7 @@ def _mark_database_ready(database_path: Path, item_ids: list[str]) -> None:
 
 def build_embeddings(
     *,
-    database_path: Path,
+    database_path: str,
     image_root: Path | None,
     model_dir: Path,
     output_dir: Path,
@@ -188,12 +188,9 @@ def build_embeddings(
         raise ValueError("batch_size must be positive")
     if workers < 0:
         raise ValueError("workers must be non-negative")
-    database_path = database_path.resolve()
     image_root = image_root.resolve() if image_root is not None else None
     model_dir = model_dir.resolve()
     output_dir = output_dir.resolve()
-    if not database_path.is_file():
-        raise FileNotFoundError(f"Database not found: {database_path}")
     initialize_database(database_path)
     if image_root is not None and not image_root.is_dir():
         raise FileNotFoundError(f"Image root not found: {image_root}")
@@ -372,7 +369,7 @@ def build_embeddings(
 def _build_parser() -> argparse.ArgumentParser:
     settings = Settings.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument(
         "--image-root",
         type=Path,

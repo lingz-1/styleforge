@@ -25,7 +25,7 @@ StyleForge 是一个个人衣柜多 Agent 穿搭系统，默认配置 DeepSeek �
 - P5 天气上下文：Agent 1 按请求决定是否需要天气，Context Router 通过 typed Open-Meteo Tool 获取事实，再把同一事实交给三个主 Agent；Weather Tool 不生成穿搭建议，当前实现不是 MCP Server。契约见[天气上下文工具](docs/WEATHER_CONTEXT.md)。
 - P2.5 路由评估切片（已验证）：`evals/cases/task_routing.json` 固化 42 条中英文用例，六类各 7 条；基线准确率 100%，六类逐类准确率均为 100%，失败样本 0。该指标只评价固定集任务路由，不代表穿搭质量。
 - 衣柜照片识别与批量导入：单图识别（`POST /items/analyze` 预填 + `/items/photo` 入库）和批量识别（`POST /items/batch-recognize`，后台 3 张并发、前端轮询进度/预计剩余、失败项可编辑入库或删除、处理完确认删除批次记录）。识别走本地代理调 Vertex Gemini 多模态；批量入库 `embedding_status=pending` 待统一补嵌入。详见[开发过程记录](docs/DEVELOPMENT_LOG.md)第 10 节。
-- 会话持久化多轮对话 + 用户长期记忆：`POST /tasks/execute` 带 `session_id` 落库消息并恢复上文，同一会话内连续追问（"换件外套""更正式一点"）自动携带当前搭配；`user_memories` 由 LLM 从提问中提炼长期偏好（置信度累加、手动优先）并注入三位 Agent；Web 推荐页聊天化 + 新增偏好管理页。契约见[会话与记忆](docs/SESSION_CHAT_MEMORY.md)。
+- 会话持久化多轮对话 + Context-Aware 自适应偏好记忆：`POST /tasks/execute` 带 `session_id` 落库消息并恢复上文，同一会话内连续追问（"换件外套""更正式一点"）自动携带当前搭配；记忆走完整闭环（行为事件 → 偏好证据 → 维度化偏好模型 → Memory Resolver → 三 Agent 差异化注入），行为来自推荐结果上的「采纳/换掉/好评差评/换掉这件」按钮、后端埋点与 LLM 语言证据提炼，含生命周期、衰减与 consolidation；Web 推荐页聊天化 + 行为按钮 + 偏好管理页。契约见[会话与记忆](docs/SESSION_CHAT_MEMORY.md)。
 
 ## 职责边界
 

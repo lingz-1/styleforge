@@ -17,6 +17,9 @@ agents = ["langgraph>=1.2,<2", "pydantic>=2.10,<3"]
 llm-openai = ["openai>=1.0"]
 ui = ["requests>=2.31", "streamlit>=1.40,<2"]
 orders = ["openpyxl>=3.1,<4"]
+db = ["psycopg[binary]>=3.2", "psycopg_pool>=3.2"]
+cache = ["redis>=5.0"]
+rag = ["chromadb>=0.5"]
 vision = [
   "faiss-cpu>=1.8",
   "numpy>=1.26",
@@ -40,6 +43,7 @@ styleforge-workflow = "styleforge.workflow.graph:main"
 styleforge-api = "styleforge.api:main"
 styleforge-seed-wardrobe = "styleforge.pipelines.seed_balanced_wardrobe:main"
 styleforge-import-wardrobe = "styleforge.pipelines.import_wardrobe_orders:main"
+styleforge-knowledge-index = "styleforge.knowledge.indexer:main"
 
 [tool.setuptools.packages.find]
 where = ["apps/api"]

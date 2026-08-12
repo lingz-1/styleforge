@@ -86,15 +86,19 @@ export const renameChatSession = (userId, sessionId, title) =>
 export const deleteChatSession = (userId, sessionId) =>
   http.delete(`/chat-sessions/${sessionId}`, { params: { user_id: userId } })
 
-// Long-term preference memories (自动提炼 + 手动修正)
+// Long-term preference memories (dimensioned preference model: 手动修正)
 export const listMemories = (userId) =>
   http.get(`/preferences/${userId}/memories`)
 export const createMemory = (userId, payload) =>
   http.post(`/preferences/${userId}/memories`, payload)
-export const updateMemory = (userId, memoryId, fields) =>
-  http.patch(`/preferences/${userId}/memories/${memoryId}`, fields)
-export const forgetMemory = (userId, memoryId) =>
-  http.delete(`/preferences/${userId}/memories/${memoryId}`)
+export const updateMemory = (userId, preferenceId, fields) =>
+  http.patch(`/preferences/${userId}/memories/${preferenceId}`, fields)
+export const forgetMemory = (userId, preferenceId) =>
+  http.delete(`/preferences/${userId}/memories/${preferenceId}`)
+
+// User behavior events (行为埋点：采纳/换掉/反馈 → preference evidence)
+export const recordBehaviorEvent = (userId, payload) =>
+  http.post(`/users/${userId}/events`, payload)
 
 // Item image URL helper
 export const imageUrl = (path) => `/api${path}`

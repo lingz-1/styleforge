@@ -182,7 +182,7 @@ class ComposerAgent:
         pool_scores: dict[str, float] | None = None,
         weights: dict[str, float] | None = None,
         environment_context: dict[str, Any] | None = None,
-        memory_profile: list[dict[str, Any]] | None = None,
+        memory_profile: Any = None,
     ) -> tuple[list[OutfitProposal], dict[str, Any], LlmCallDiagnostics | None]:
         if llm is None:
             return self._fallback(

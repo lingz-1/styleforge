@@ -47,7 +47,7 @@ def _catalog_item(row: object) -> CatalogItem:
     )
 
 
-def _load_evaluation_outfits(database_path: Path, split: str) -> list[EvaluationOutfit]:
+def _load_evaluation_outfits(database_path: str, split: str) -> list[EvaluationOutfit]:
     connection = connect(database_path)
     try:
         rows = connection.execute(
@@ -56,7 +56,7 @@ def _load_evaluation_outfits(database_path: Path, split: str) -> list[Evaluation
             FROM dataset_outfits AS o
             JOIN dataset_outfit_items AS oi ON oi.outfit_id = o.outfit_id
             JOIN catalog_items AS c ON c.item_id = oi.item_id
-            WHERE o.split = ?
+            WHERE o.split = %s
             ORDER BY o.outfit_id, oi.position
             """,
             (split,),
@@ -91,7 +91,7 @@ def _load_evaluation_outfits(database_path: Path, split: str) -> list[Evaluation
 
 
 def evaluate_rule_baseline(
-    database_path: Path,
+    database_path: str,
     split: str = "test",
     negatives_per_positive: int = 4,
     seed: int = 42,
@@ -146,7 +146,7 @@ def evaluate_rule_baseline(
         "schema_version": "styleforge.rule-eval.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "scorer_version": "rule-v1",
-        "database_path": str(database_path.resolve()),
+        "database_path": str(database_path),
         "split": split,
         "seed": seed,
         "negative_sampling": "same_slot_replacement",
@@ -178,7 +178,7 @@ def evaluate_rule_baseline(
 def build_parser() -> argparse.ArgumentParser:
     settings = Settings.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument("--split", default="test")
     parser.add_argument("--negatives-per-positive", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import sqlite3
+from styleforge.repositories.database import Connection, Row
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 def register_dataset_source(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     source: str,
     image_root: Path,
@@ -20,7 +20,7 @@ def register_dataset_source(
         """
         INSERT INTO dataset_sources(
             source, image_root, metadata_path, source_revision, registered_at
-        ) VALUES (?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT(source) DO UPDATE SET
             image_root = excluded.image_root,
             metadata_path = excluded.metadata_path,
@@ -38,15 +38,15 @@ def register_dataset_source(
 
 
 def get_source_image_root(
-    connection: sqlite3.Connection,
+    connection: Connection,
     source: str,
 ) -> Path | None:
     row = connection.execute(
-        "SELECT image_root FROM dataset_sources WHERE source = ?",
+        "SELECT image_root FROM dataset_sources WHERE source = %s",
         (source,),
     ).fetchone()
     return Path(row["image_root"]).resolve() if row is not None else None
 
 
-def list_dataset_sources(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+def list_dataset_sources(connection: Connection) -> list[Row]:
     return list(connection.execute("SELECT * FROM dataset_sources ORDER BY source"))

@@ -34,6 +34,43 @@
           </div>
         </section>
 
+        <WeatherCard />
+
+        <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="block" />
+
+        <section v-if="store.messages.length" class="chat-history" aria-label="会话记录">
+          <div
+            v-for="(message, index) in store.messages"
+            :key="index"
+            class="chat-turn"
+            :class="message.role"
+          >
+            <div v-if="message.role === 'user'" class="chat-bubble user">{{ message.content }}</div>
+            <template v-else>
+              <div class="chat-bubble assistant" :class="{ failed: message.failed }">
+                <span v-if="message.failed" class="failed-tag">执行失败</span>{{ message.content }}
+              </div>
+              <template v-if="message.payload && !message.failed">
+                <section
+                  v-if="index === store.messages.length - 1 && hasTrace(message.payload)"
+                  class="agent-rail block"
+                  aria-label="三 Agent 执行轨迹"
+                >
+                  <div v-for="(agent, i) in agentRail(message.payload)" :key="agent.node" class="agent-step">
+                    <span class="step-index">0{{ i + 1 }}</span>
+                    <div><strong>{{ agent.name }}</strong><small>{{ agent.detail }}</small></div>
+                    <span class="step-status">{{ agent.done ? '完成' : '未执行' }}</span>
+                  </div>
+                </section>
+                <TaskResultView :payload="message.payload" :user-id="userId" />
+              </template>
+            </template>
+          </div>
+          <div v-if="loading" class="chat-turn assistant">
+            <div class="chat-bubble assistant typing">三位 Agent 正在处理…</div>
+          </div>
+        </section>
+
         <section class="prompt-card">
           <el-input
             v-model="request"
@@ -66,43 +103,6 @@
             </el-button>
           </div>
           <p class="shortcut">Ctrl / ⌘ + Enter 提交</p>
-        </section>
-
-        <WeatherCard />
-
-        <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="block" />
-
-        <section v-if="store.messages.length" class="chat-history" aria-label="会话记录">
-          <div
-            v-for="(message, index) in store.messages"
-            :key="index"
-            class="chat-turn"
-            :class="message.role"
-          >
-            <div v-if="message.role === 'user'" class="chat-bubble user">{{ message.content }}</div>
-            <template v-else>
-              <div class="chat-bubble assistant" :class="{ failed: message.failed }">
-                <span v-if="message.failed" class="failed-tag">执行失败</span>{{ message.content }}
-              </div>
-              <template v-if="message.payload && !message.failed">
-                <section
-                  v-if="index === store.messages.length - 1 && hasTrace(message.payload)"
-                  class="agent-rail block"
-                  aria-label="三 Agent 执行轨迹"
-                >
-                  <div v-for="(agent, i) in agentRail(message.payload)" :key="agent.node" class="agent-step">
-                    <span class="step-index">0{{ i + 1 }}</span>
-                    <div><strong>{{ agent.name }}</strong><small>{{ agent.detail }}</small></div>
-                    <span class="step-status">{{ agent.done ? '完成' : '未执行' }}</span>
-                  </div>
-                </section>
-                <TaskResultView :payload="message.payload" />
-              </template>
-            </template>
-          </div>
-          <div v-if="loading" class="chat-turn assistant">
-            <div class="chat-bubble assistant typing">三位 Agent 正在处理…</div>
-          </div>
         </section>
       </div>
     </div>
@@ -375,7 +375,7 @@ h1 { margin: 0; max-width: 720px; font-family: Georgia, 'Noto Serif SC', serif; 
 .lead { max-width: 660px; margin: 16px 0 0; color: #65706b; font-size: 16px; }
 .user-box { width: 190px; align-self: flex-start; }
 .user-box span { display: block; margin-bottom: 8px; color: #77817c; font-size: 12px; }
-.prompt-card { margin-top: 24px; padding: 20px; background: #f3f1ea; border: 1px solid #d9d3c5; border-radius: 4px; box-shadow: 8px 8px 0 #e1e5df; }
+.prompt-card { position: sticky; bottom: 16px; margin-top: 24px; padding: 20px; background: #f3f1ea; border: 1px solid #d9d3c5; border-radius: 4px; box-shadow: 8px 8px 0 #e1e5df; z-index: 5; }
 .prompt-card :deep(textarea) { background: transparent; border: 0; box-shadow: none; font-size: 18px; line-height: 1.7; }
 .prompt-footer { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-top: 12px; }
 .examples { display: flex; flex-wrap: wrap; gap: 8px; }

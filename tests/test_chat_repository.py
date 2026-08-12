@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from styleforge.repositories.chat_repository import (
     append_message,
     create_chat_session,
@@ -15,8 +13,8 @@ from styleforge.repositories.database import database_session, initialize_databa
 from styleforge.services.chat_service import get_session_outfit_context
 
 
-def test_chat_session_crud_and_cascade_delete(tmp_path: Path) -> None:
-    database_path = tmp_path / "chat.db"
+def test_chat_session_crud_and_cascade_delete(db_dsn: str) -> None:
+    database_path = db_dsn
     initialize_database(database_path)
     with database_session(database_path) as connection:
         session = create_chat_session(connection, user_id="u", title="通勤讨论")
@@ -56,8 +54,8 @@ def test_chat_session_crud_and_cascade_delete(tmp_path: Path) -> None:
         assert list_messages(connection, session_id) == []
 
 
-def test_get_session_outfit_context_uses_most_recent_outfit(tmp_path: Path) -> None:
-    database_path = tmp_path / "chat.db"
+def test_get_session_outfit_context_uses_most_recent_outfit(db_dsn: str) -> None:
+    database_path = db_dsn
     initialize_database(database_path)
     with database_session(database_path) as connection:
         session = create_chat_session(connection, user_id="u")
@@ -109,8 +107,8 @@ def test_get_session_outfit_context_uses_most_recent_outfit(tmp_path: Path) -> N
     assert context["current_item_ids"] == ["c", "d", "e"]
 
 
-def test_get_session_outfit_context_ignores_empty_turns(tmp_path: Path) -> None:
-    database_path = tmp_path / "chat.db"
+def test_get_session_outfit_context_ignores_empty_turns(db_dsn: str) -> None:
+    database_path = db_dsn
     initialize_database(database_path)
     with database_session(database_path) as connection:
         session = create_chat_session(connection, user_id="u")

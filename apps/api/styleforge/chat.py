@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 from styleforge.common.console import configure_utf8_console
 from styleforge.core.config import Settings
@@ -16,7 +15,7 @@ from styleforge.services.recommendation import recommend_for_user
 def build_parser() -> argparse.ArgumentParser:
     settings = Settings.from_env()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument("--user-id", default="demo-user")
     parser.add_argument("--request", required=True)
     parser.add_argument("--max-results", type=int, default=3)

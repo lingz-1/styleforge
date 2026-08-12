@@ -7,13 +7,13 @@ mirroring the idempotent batch pattern used elsewhere in the project.
 from __future__ import annotations
 
 import json
-import sqlite3
+from styleforge.repositories.database import Connection, Row
 from datetime import datetime, timezone
 from typing import Any
 
 
 def save_request_memory(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     user_id: str,
     request_signature: dict[str, Any],
@@ -29,7 +29,7 @@ def save_request_memory(
         """
         INSERT INTO request_memory(
             user_id, request_signature_json, structure_signature_json, created_at
-        ) VALUES (?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s)
         """,
         (
             user_id,
@@ -45,12 +45,12 @@ def save_request_memory(
     cursor = connection.execute(
         """
         DELETE FROM request_memory
-        WHERE user_id = ?
+        WHERE user_id = %s
           AND memory_id NOT IN (
               SELECT memory_id FROM request_memory
-              WHERE user_id = ?
+              WHERE user_id = %s
               ORDER BY created_at DESC, memory_id DESC
-              LIMIT ?
+              LIMIT %s
           )
         """,
         (user_id, user_id, max_recent),
@@ -58,7 +58,7 @@ def save_request_memory(
     return cursor.rowcount
 
 
-def _row_to_memory(row: sqlite3.Row) -> dict[str, Any]:
+def _row_to_memory(row: Row) -> dict[str, Any]:
     return {
         "memory_id": row["memory_id"],
         "user_id": row["user_id"],
@@ -69,7 +69,7 @@ def _row_to_memory(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def recent_request_memories(
-    connection: sqlite3.Connection,
+    connection: Connection,
     user_id: str,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
@@ -77,9 +77,9 @@ def recent_request_memories(
         """
         SELECT memory_id, user_id, request_signature_json, structure_signature_json, created_at
         FROM request_memory
-        WHERE user_id = ?
+        WHERE user_id = %s
         ORDER BY created_at DESC, memory_id DESC
-        LIMIT ?
+        LIMIT %s
         """,
         (user_id, limit),
     ).fetchall()
@@ -87,7 +87,7 @@ def recent_request_memories(
 
 
 def list_structure_signatures(
-    connection: sqlite3.Connection,
+    connection: Connection,
     user_id: str,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
@@ -95,9 +95,9 @@ def list_structure_signatures(
         """
         SELECT structure_signature_json
         FROM request_memory
-        WHERE user_id = ? AND structure_signature_json <> '{}'
+        WHERE user_id = %s AND structure_signature_json <> '{}'
         ORDER BY created_at DESC, memory_id DESC
-        LIMIT ?
+        LIMIT %s
         """,
         (user_id, limit),
     ).fetchall()

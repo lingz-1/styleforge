@@ -43,11 +43,11 @@ TYPE_PROMPTS = {
 DEFAULT_MODEL_REVISION = "7e3ba62ce16b379a1ab479346b66f192e76f51b7"
 
 
-def _personal_rows(database_path: Path, item_ids: Sequence[str]):
+def _personal_rows(database_path: str, item_ids: Sequence[str]):
     ids = tuple(dict.fromkeys(item_ids))
     if not ids:
         return []
-    placeholders = ",".join("?" for _ in ids)
+    placeholders = ",".join("%s" for _ in ids)
     with database_session(database_path) as connection:
         return connection.execute(
             f"""
@@ -89,7 +89,7 @@ def _text_prompt(row) -> str:
 
 def embed_personal_items(
     *,
-    database_path: Path,
+    database_path: str,
     item_ids: Sequence[str],
     model_dir: Path,
     device: str = "cuda",

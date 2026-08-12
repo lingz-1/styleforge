@@ -41,7 +41,7 @@ def _reject_write_path_inside_image_root(
 def _reject_cross_source_collisions(connection, item_ids: list[str]) -> None:
     if not item_ids:
         return
-    placeholders = ",".join("?" for _ in item_ids)
+    placeholders = ",".join("%s" for _ in item_ids)
     rows = connection.execute(
         f"SELECT item_id, source FROM catalog_items WHERE item_id IN ({placeholders})",  # noqa: S608
         item_ids,
@@ -55,7 +55,7 @@ def _reject_cross_source_collisions(connection, item_ids: list[str]) -> None:
 def import_mytheresa(
     *,
     metadata_path: Path,
-    database_path: Path,
+    database_path: str,
     image_root: Path,
     source_revision: str,
     batch_size: int = 500,
@@ -69,7 +69,6 @@ def import_mytheresa(
         raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
     if not image_root.is_dir():
         raise FileNotFoundError(f"Image root not found: {image_root}")
-    _reject_write_path_inside_image_root(database_path, image_root, "database path")
 
     initialize_database(database_path)
     resolver = MytheresaImagePathResolver(image_root)
@@ -163,7 +162,7 @@ def import_mytheresa(
         "processed_count": processed_count,
         "stored_image_records": image_count,
         "mytheresa_catalog_items": source_count,
-        "database_path": str(database_path.resolve()),
+        "database_path": str(database_path),
         "database_counts": counts,
     }
 
@@ -173,7 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--image-root", type=Path, required=True)
-    parser.add_argument("--database", type=Path, default=settings.database_path)
+    parser.add_argument("--database", type=str, default=settings.database_dsn)
     parser.add_argument("--source-revision", default=settings.dataset_revision)
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument(

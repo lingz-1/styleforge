@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
+from styleforge.repositories.database import Connection, Row
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +35,7 @@ def personal_image_root(artifact_root: Path, user_id: str) -> Path:
 
 
 def _insert_preview_rows(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     batch_id: str,
     workbook: ParsedOrderWorkbook,
@@ -52,8 +52,8 @@ def _insert_preview_rows(
             predicted_color, predicted_size, predicted_audience, confidence,
             decision, decision_reason
         ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?, ?, ?
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         """,
         (
@@ -94,7 +94,7 @@ def _insert_preview_rows(
 
 
 def create_import_preview(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     user_id: str,
     source_filename: str,
@@ -103,7 +103,7 @@ def create_import_preview(
     """Persist privacy-safe parsed rows and make same-file uploads idempotent."""
     existing = connection.execute(
         "SELECT batch_id, status, parser_revision FROM wardrobe_import_batches "
-        "WHERE user_id = ? AND platform = ? AND file_sha256 = ?",
+        "WHERE user_id = %s AND platform = %s AND file_sha256 = %s",
         (user_id, workbook.platform, workbook.file_sha256),
     ).fetchone()
     if existing is not None:
@@ -111,15 +111,15 @@ def create_import_preview(
         if existing["status"] == "previewed" and existing["parser_revision"] != PARSER_REVISION:
             statistics = {**workbook.statistics(), "sheet_name": workbook.sheet_name}
             connection.execute(
-                "DELETE FROM wardrobe_import_rows WHERE batch_id = ?",
+                "DELETE FROM wardrobe_import_rows WHERE batch_id = %s",
                 (batch_id,),
             )
             connection.execute(
                 """
                 UPDATE wardrobe_import_batches
-                SET source_filename = ?, parser_revision = ?, statistics_json = ?,
+                SET source_filename = %s, parser_revision = %s, statistics_json = %s,
                     error_message = NULL
-                WHERE batch_id = ?
+                WHERE batch_id = %s
                 """,
                 (
                     Path(source_filename).name,
@@ -139,7 +139,7 @@ def create_import_preview(
         INSERT INTO wardrobe_import_batches(
             batch_id, user_id, platform, source_filename, file_sha256,
             parser_revision, status, statistics_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'previewed', ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, 'previewed', %s, %s)
         """,
         (
             batch_id,
@@ -157,13 +157,13 @@ def create_import_preview(
 
 
 def get_import_batch(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     user_id: str,
     batch_id: str,
 ) -> dict[str, Any] | None:
     row = connection.execute(
-        "SELECT * FROM wardrobe_import_batches WHERE batch_id = ? AND user_id = ?",
+        "SELECT * FROM wardrobe_import_batches WHERE batch_id = %s AND user_id = %s",
         (batch_id, user_id),
     ).fetchone()
     if row is None:
@@ -174,7 +174,7 @@ def get_import_batch(
 
 
 def list_import_rows(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     user_id: str,
     batch_id: str,
@@ -189,16 +189,16 @@ def list_import_rows(
             """
             SELECT r.* FROM wardrobe_import_rows AS r
             JOIN wardrobe_import_batches AS b ON b.batch_id = r.batch_id
-            WHERE r.batch_id = ? AND b.user_id = ?
+            WHERE r.batch_id = %s AND b.user_id = %s
             ORDER BY r.source_row_number
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
             """,
             (batch_id, user_id, limit, offset),
         )
     ]
 
 
-def _selected_attributes(row: sqlite3.Row, override: dict[str, Any]) -> dict[str, str]:
+def _selected_attributes(row: Row, override: dict[str, Any]) -> dict[str, str]:
     item_type = str(override.get("item_type") or row["predicted_item_type"]).strip().lower()
     if item_type not in TYPE_TO_SLOT:
         raise ValueError(f"Unsupported item type for row {row['row_id']}: {item_type!r}")
@@ -215,7 +215,7 @@ def _selected_attributes(row: sqlite3.Row, override: dict[str, Any]) -> dict[str
 
 
 def commit_import_rows(
-    connection: sqlite3.Connection,
+    connection: Connection,
     *,
     user_id: str,
     batch_id: str,
@@ -224,7 +224,7 @@ def commit_import_rows(
 ) -> list[str]:
     """Create confirmed personal catalog records from explicit row selections."""
     batch = connection.execute(
-        "SELECT * FROM wardrobe_import_batches WHERE batch_id = ? AND user_id = ?",
+        "SELECT * FROM wardrobe_import_batches WHERE batch_id = %s AND user_id = %s",
         (batch_id, user_id),
     ).fetchone()
     if batch is None:
@@ -234,10 +234,10 @@ def commit_import_rows(
 
     row_ids = tuple(dict.fromkeys(str(item["row_id"]) for item in selections))
     override_by_row = {str(item["row_id"]): dict(item) for item in selections}
-    placeholders = ",".join("?" for _ in row_ids)
+    placeholders = ",".join("%s" for _ in row_ids)
     rows = connection.execute(
         f"SELECT * FROM wardrobe_import_rows "  # noqa: S608
-        f"WHERE batch_id = ? AND row_id IN ({placeholders})",
+        f"WHERE batch_id = %s AND row_id IN ({placeholders})",
         (batch_id, *row_ids),
     ).fetchall()
     if len(rows) != len(row_ids):
@@ -272,7 +272,7 @@ def commit_import_rows(
         item_id = str(existing_item_id or f"personal:{row['row_id']}")
         existing_catalog = connection.execute(
             "SELECT image_filename, relative_image_path, image_status, embedding_status "
-            "FROM catalog_items WHERE item_id = ?",
+            "FROM catalog_items WHERE item_id = %s",
             (item_id,),
         ).fetchone()
         features = tuple(
@@ -333,7 +333,7 @@ def commit_import_rows(
         connection.execute(
             """
             INSERT INTO wardrobe_items(user_id, item_id, active, favorite, notes, added_at)
-            VALUES (?, ?, 1, 0, '', ?)
+            VALUES (%s, %s, 1, 0, '', %s)
             ON CONFLICT(user_id, item_id) DO UPDATE SET active = 1
             """,
             (user_id, item_id, created_at),
@@ -346,8 +346,8 @@ def commit_import_rows(
                 variant_text, quantity_owned, listed_amount, paid_amount, currency,
                 canonical_url, ownership_status, review_status, created_at, updated_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                'owned', 'confirmed', ?, ?
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                'owned', 'confirmed', %s, %s
             )
             ON CONFLICT(item_id) DO UPDATE SET
                 quantity_owned = excluded.quantity_owned,
@@ -377,20 +377,20 @@ def commit_import_rows(
             ),
         )
         connection.execute(
-            "UPDATE wardrobe_import_rows SET decision = 'committed', catalog_item_id = ? "
-            "WHERE row_id = ?",
+            "UPDATE wardrobe_import_rows SET decision = 'committed', catalog_item_id = %s "
+            "WHERE row_id = %s",
             (item_id, row["row_id"]),
         )
 
     connection.execute(
         f"UPDATE wardrobe_import_rows SET decision = 'rejected' "  # noqa: S608
-        f"WHERE batch_id = ? AND decision = 'candidate' "
+        f"WHERE batch_id = %s AND decision = 'candidate' "
         f"AND row_id NOT IN ({placeholders})",
         (batch_id, *row_ids),
     )
     connection.execute(
-        "UPDATE wardrobe_import_batches SET status = 'committed', committed_at = ?, "
-        "error_message = NULL WHERE batch_id = ?",
+        "UPDATE wardrobe_import_batches SET status = 'committed', committed_at = %s, "
+        "error_message = NULL WHERE batch_id = %s",
         (created_at, batch_id),
     )
     return item_ids

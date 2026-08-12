@@ -127,7 +127,7 @@ def test_normalizer_preserves_all_views_and_uses_product_main_image(tmp_path) ->
     }
 
 
-def test_small_import_registers_external_root_and_multi_view_images(tmp_path) -> None:
+def test_small_import_registers_external_root_and_multi_view_images(tmp_path, db_dsn) -> None:
     image_root = tmp_path / "images"
     item_root = image_root / "P00000001"
     item_root.mkdir(parents=True)
@@ -138,7 +138,7 @@ def test_small_import_registers_external_root_and_multi_view_images(tmp_path) ->
         json.dumps({"P00000001": _record()}),
         encoding="utf-8",
     )
-    database_path = tmp_path / "styleforge.db"
+    database_path = db_dsn
 
     report = import_mytheresa(
         metadata_path=metadata_path,
@@ -175,22 +175,7 @@ def test_metadata_audit_reports_mapping_coverage(tmp_path) -> None:
     assert report["unmapped_item_count"] == 0
 
 
-def test_import_rejects_database_inside_external_image_root(tmp_path) -> None:
-    image_root = tmp_path / "images"
-    image_root.mkdir()
-    metadata_path = tmp_path / "mytheresa.json"
-    metadata_path.write_text("{}", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="must not be inside"):
-        import_mytheresa(
-            metadata_path=metadata_path,
-            database_path=image_root / "styleforge.db",
-            image_root=image_root,
-            source_revision="test",
-        )
-
-
-def test_interrupted_import_replay_converges_on_a_disposable_database(tmp_path) -> None:
+def test_interrupted_import_replay_converges_on_a_disposable_database(tmp_path, db_dsn) -> None:
     image_root = tmp_path / "images"
     records = {}
     for item_id in ("P00000001", "P00000002"):
@@ -201,7 +186,7 @@ def test_interrupted_import_replay_converges_on_a_disposable_database(tmp_path) 
         records[item_id] = _record(item_id=item_id)
     metadata_path = tmp_path / "mytheresa.json"
     metadata_path.write_text(json.dumps(records), encoding="utf-8")
-    database_path = tmp_path / "styleforge.db"
+    database_path = db_dsn
 
     with pytest.raises(RuntimeError, match="Simulated import failure"):
         import_mytheresa(

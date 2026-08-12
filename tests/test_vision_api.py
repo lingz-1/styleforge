@@ -12,7 +12,6 @@ import base64
 import importlib
 import io
 import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -55,15 +54,15 @@ def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
-def _import_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    monkeypatch.setenv("STYLEFORGE_DATABASE_PATH", str(tmp_path / "vision-api.db"))
+def _import_api(db_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setenv("STYLEFORGE_DATABASE_DSN", db_dsn)
     monkeypatch.delenv("STYLEFORGE_DEFAULT_LOCATION", raising=False)
     sys.modules.pop("styleforge.api", None)
     return importlib.import_module("styleforge.api")
 
 
-def test_analyze_returns_mapped_fields(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_analyze_returns_mapped_fields(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
     fake = FakeVisionClient(
         {
             "type": "t-shirt",
@@ -112,8 +111,8 @@ def test_analyze_returns_mapped_fields(tmp_path, monkeypatch) -> None:
     assert fake.calls[0] == _photo_bytes()
 
 
-def test_analyze_flags_low_confidence_as_not_recognized(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_analyze_flags_low_confidence_as_not_recognized(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
     fake = FakeVisionClient({"type": "shirt", "confidence": 0.05})
     monkeypatch.setattr(api, "vision_client_from_settings", lambda _settings: fake)
 
@@ -127,8 +126,8 @@ def test_analyze_flags_low_confidence_as_not_recognized(tmp_path, monkeypatch) -
     assert response.json()["recognized"] is False
 
 
-def test_analyze_returns_503_when_vision_disabled(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_analyze_returns_503_when_vision_disabled(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
     monkeypatch.setattr(api, "vision_client_from_settings", lambda _settings: None)
 
     with TestClient(api.app) as client:
@@ -140,8 +139,8 @@ def test_analyze_returns_503_when_vision_disabled(tmp_path, monkeypatch) -> None
     assert response.status_code == 503
 
 
-def test_analyze_returns_503_on_provider_failure(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_analyze_returns_503_on_provider_failure(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
     fake = FakeVisionClient({}, error=VisionUnavailable("proxy down"))
     monkeypatch.setattr(api, "vision_client_from_settings", lambda _settings: fake)
 
@@ -155,8 +154,8 @@ def test_analyze_returns_503_on_provider_failure(tmp_path, monkeypatch) -> None:
     assert "proxy down" in response.json()["detail"]
 
 
-def test_analyze_returns_502_on_invalid_json(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_analyze_returns_502_on_invalid_json(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
     fake = FakeVisionClient({}, error=VisionInvalidJson("no json"))
     monkeypatch.setattr(api, "vision_client_from_settings", lambda _settings: fake)
 
@@ -169,8 +168,8 @@ def test_analyze_returns_502_on_invalid_json(tmp_path, monkeypatch) -> None:
     assert response.status_code == 502
 
 
-def test_analyze_returns_422_on_invalid_base64(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_analyze_returns_422_on_invalid_base64(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
     fake = FakeVisionClient({"type": "shirt"})
     monkeypatch.setattr(api, "vision_client_from_settings", lambda _settings: fake)
 
@@ -183,8 +182,8 @@ def test_analyze_returns_422_on_invalid_base64(tmp_path, monkeypatch) -> None:
     assert response.status_code == 422
 
 
-def test_create_photo_item_persists_attributes(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_create_photo_item_persists_attributes(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
     attributes = {
         "item_type": "dress",
         "subtype": "qipao",
@@ -223,8 +222,8 @@ def test_create_photo_item_persists_attributes(tmp_path, monkeypatch) -> None:
     assert item["description"] == "一件红色旗袍"
 
 
-def test_create_photo_item_defaults_attributes_to_empty(tmp_path, monkeypatch) -> None:
-    api = _import_api(tmp_path, monkeypatch)
+def test_create_photo_item_defaults_attributes_to_empty(db_dsn, monkeypatch) -> None:
+    api = _import_api(db_dsn, monkeypatch)
 
     with TestClient(api.app) as client:
         created = client.post(
@@ -247,14 +246,14 @@ def test_create_photo_item_defaults_attributes_to_empty(tmp_path, monkeypatch) -
     assert item["attributes"] == {}
 
 
-def test_vision_client_factory_respects_enabled_flag(tmp_path, monkeypatch) -> None:
+def test_vision_client_factory_respects_enabled_flag(db_dsn, monkeypatch) -> None:
     monkeypatch.setenv("STYLEFORGE_VISION_ENABLED", "false")
     assert vision_client_from_settings(Settings.from_env()) is None
     monkeypatch.setenv("STYLEFORGE_VISION_ENABLED", "true")
     assert vision_client_from_settings(Settings.from_env()) is not None
 
 
-def test_order_import_flow_still_works(tmp_path, monkeypatch) -> None:
+def test_order_import_flow_still_works(db_dsn, monkeypatch) -> None:
     openpyxl = pytest.importorskip("openpyxl")
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -275,7 +274,7 @@ def test_order_import_flow_still_works(tmp_path, monkeypatch) -> None:
     buffer = io.BytesIO()
     workbook.save(buffer)
     workbook.close()
-    api = _import_api(tmp_path, monkeypatch)
+    api = _import_api(db_dsn, monkeypatch)
 
     with TestClient(api.app) as client:
         preview = client.post(

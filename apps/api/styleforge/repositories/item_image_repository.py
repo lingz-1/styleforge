@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sqlite3
+from styleforge.repositories.database import Connection
 from collections.abc import Sequence
 
 from styleforge.core.schemas import CatalogItemImage
@@ -12,7 +12,7 @@ UPSERT_IMAGE_SQL = """
 INSERT INTO catalog_item_images (
     item_id, position, image_role, image_filename, relative_image_path,
     image_status, is_primary
-) VALUES (?, ?, ?, ?, ?, ?, ?)
+) VALUES (%s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT(item_id, position) DO UPDATE SET
     image_role = excluded.image_role,
     image_filename = excluded.image_filename,
@@ -23,14 +23,14 @@ ON CONFLICT(item_id, position) DO UPDATE SET
 
 
 def replace_item_images(
-    connection: sqlite3.Connection,
+    connection: Connection,
     images: Sequence[CatalogItemImage],
 ) -> int:
     item_ids = tuple(dict.fromkeys(image.item_id for image in images))
     if not item_ids:
         return 0
     connection.executemany(
-        "DELETE FROM catalog_item_images WHERE item_id = ?",
+        "DELETE FROM catalog_item_images WHERE item_id = %s",
         ((item_id,) for item_id in item_ids),
     )
     connection.executemany(

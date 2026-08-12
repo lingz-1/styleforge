@@ -16,11 +16,11 @@ from tests.helpers import make_item
 
 
 def test_execute_and_read_extended_task_over_http(
-    tmp_path: Path,
+    db_dsn: str,
     monkeypatch,
 ) -> None:
-    database_path = tmp_path / "styleforge-api.db"
-    monkeypatch.setenv("STYLEFORGE_DATABASE_PATH", str(database_path))
+    database_path = db_dsn
+    monkeypatch.setenv("STYLEFORGE_DATABASE_DSN", database_path)
     sys.modules.pop("styleforge.api", None)
     api = importlib.import_module("styleforge.api")
 
@@ -58,7 +58,7 @@ def test_execute_and_read_extended_task_over_http(
             },
             approved_review(),
             # Successful execute also runs one memory-extraction call.
-            {"memories": []},
+            {"evidence": []},
         ]
     )
     workflow = MultiTaskWorkflow(

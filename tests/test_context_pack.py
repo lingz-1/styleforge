@@ -1,20 +1,18 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from styleforge.context.builder import ContextPackBuilder
 from styleforge.models.task import TaskExecutionInput
 from styleforge.orchestration.task_router import TaskRouter
 from styleforge.repositories.catalog_repository import upsert_items
 from styleforge.repositories.database import database_session, initialize_database
-from styleforge.repositories.memory_repository import create_manual_memory
+from styleforge.repositories.preference_model_repository import upsert_preference
 from styleforge.repositories.wardrobe_repository import add_items
 
 from tests.helpers import make_item
 
 
-def test_context_pack_contains_request_wardrobe_and_user_context(tmp_path: Path) -> None:
-    database_path = tmp_path / "styleforge.db"
+def test_context_pack_contains_request_wardrobe_and_user_context(db_dsn: str) -> None:
+    database_path = db_dsn
     initialize_database(database_path)
     items = [
         make_item("top-1", "top", "White shirt", "white"),
@@ -37,11 +35,20 @@ def test_context_pack_contains_request_wardrobe_and_user_context(tmp_path: Path)
     assert len(pack.user_context.preferences["evaluation_profile"]["weights"]) == 5
 
 
-def test_context_pack_injects_memory_profile(tmp_path: Path) -> None:
-    database_path = tmp_path / "mem-ctx.db"
+def test_context_pack_injects_memory_profile(db_dsn: str) -> None:
+    database_path = db_dsn
     initialize_database(database_path)
     with database_session(database_path) as connection:
-        create_manual_memory(connection, "u", "formality", "正式", confidence=0.9)
+        upsert_preference(
+            connection,
+            "u",
+            dimension="style",
+            attribute="formality",
+            value="正式",
+            polarity="positive",
+            lifecycle="long_term",
+            confidence=0.9,
+        )
     task_input = TaskExecutionInput(user_id="u", request="美国复古风怎么穿？")
     route = TaskRouter().route(task_input.request)
 
@@ -49,12 +56,14 @@ def test_context_pack_injects_memory_profile(tmp_path: Path) -> None:
 
     profile = pack.user_context.preferences.get("memory_profile", [])
     assert len(profile) == 1
-    assert profile[0]["content"] == "正式"
-    assert profile[0]["source"] == "manual"
+    assert profile[0]["dimension"] == "style"
+    assert profile[0]["attribute"] == "formality"
+    assert profile[0]["value"] == "正式"
+    assert profile[0]["lifecycle"] == "long_term"
 
 
-def test_context_pack_omits_memory_profile_when_empty(tmp_path: Path) -> None:
-    database_path = tmp_path / "mem-ctx.db"
+def test_context_pack_omits_memory_profile_when_empty(db_dsn: str) -> None:
+    database_path = db_dsn
     initialize_database(database_path)
     task_input = TaskExecutionInput(user_id="u", request="美国复古风怎么穿？")
     route = TaskRouter().route(task_input.request)

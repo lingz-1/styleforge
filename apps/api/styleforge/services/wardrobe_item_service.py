@@ -27,7 +27,7 @@ def _now() -> str:
 
 def _item_to_dict(connection, item_id: str) -> dict[str, Any] | None:
     row = connection.execute(
-        "SELECT * FROM catalog_items WHERE item_id = ?", (item_id,)
+        "SELECT * FROM catalog_items WHERE item_id = %s", (item_id,)
     ).fetchone()
     if row is None:
         return None
@@ -49,7 +49,7 @@ def _item_to_dict(connection, item_id: str) -> dict[str, Any] | None:
 
 def create_photo_item(
     *,
-    database_path: Path,
+    database_path: str,
     artifact_root: Path,
     user_id: str,
     image_bytes: bytes,
@@ -118,13 +118,13 @@ def create_photo_item(
         upsert_items(connection, [item], "personal-photo-v1")
         if attributes:
             connection.execute(
-                "UPDATE catalog_items SET attributes_json = ? WHERE item_id = ?",
+                "UPDATE catalog_items SET attributes_json = %s WHERE item_id = %s",
                 (json.dumps(attributes, ensure_ascii=False), item_id),
             )
         connection.execute(
             """
             INSERT INTO wardrobe_items(user_id, item_id, active, favorite, notes, added_at)
-            VALUES (?, ?, 1, 0, '', ?)
+            VALUES (%s, %s, 1, 0, '', %s)
             ON CONFLICT(user_id, item_id) DO UPDATE SET active = 1
             """,
             (user_id, item_id, _now()),
@@ -134,7 +134,7 @@ def create_photo_item(
             INSERT INTO personal_wardrobe_items(
                 item_id, user_id, quantity_owned, ownership_status, review_status,
                 created_at, updated_at
-            ) VALUES (?, ?, 1, 'owned', 'confirmed', ?, ?)
+            ) VALUES (%s, %s, 1, 'owned', 'confirmed', %s, %s)
             ON CONFLICT(item_id) DO UPDATE SET
                 ownership_status = 'owned', review_status = 'confirmed',
                 updated_at = excluded.updated_at
@@ -146,7 +146,7 @@ def create_photo_item(
             INSERT INTO catalog_item_images(
                 item_id, position, image_role, image_filename,
                 relative_image_path, image_status, is_primary
-            ) VALUES (?, 0, 'primary', ?, ?, 'available', 1)
+            ) VALUES (%s, 0, 'primary', %s, %s, 'available', 1)
             """,
             (item_id, filename, filename),
         )
@@ -176,7 +176,7 @@ def create_photo_item(
 
 def update_personal_item(
     *,
-    database_path: Path,
+    database_path: str,
     user_id: str,
     item_id: str,
     model_dir: Path,
@@ -196,7 +196,7 @@ def update_personal_item(
             """
             SELECT c.* FROM catalog_items AS c
             JOIN wardrobe_items AS w ON w.item_id = c.item_id
-            WHERE w.user_id = ? AND w.active = 1 AND c.item_id = ?
+            WHERE w.user_id = %s AND w.active = 1 AND c.item_id = %s
             """,
             (user_id, item_id),
         ).fetchone()
@@ -241,10 +241,10 @@ def update_personal_item(
                 features.append(f"size:{new_size}")
             updates["features_json"] = json.dumps(features, ensure_ascii=False)
 
-        assignments = ", ".join(f"{column} = ?" for column in updates)
+        assignments = ", ".join(f"{column} = %s" for column in updates)
         connection.execute(
             f"UPDATE catalog_items SET {assignments}, embedding_status = 'pending' "  # noqa: S608
-            f"WHERE item_id = ?",
+            f"WHERE item_id = %s",
             (*updates.values(), item_id),
         )
 

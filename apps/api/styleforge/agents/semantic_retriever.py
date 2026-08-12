@@ -46,12 +46,13 @@ class SemanticRetrieverAgent:
     def run_extension(
         self,
         *,
-        database_path: Path,
+        database_path: str,
         knowledge_root: Path,
         task_input: TaskExecutionInput,
         route: TaskRoute,
         context_pack: ContextPack,
         llm: Any,
+        knowledge_retriever: Any | None = None,
     ) -> tuple[Agent1TaskOutput, dict[str, Any], LlmCallDiagnostics]:
         """Run Agent 1 strictly for an extension task, without fallback."""
         if llm is None:
@@ -62,6 +63,7 @@ class SemanticRetrieverAgent:
             task_input=task_input,
             route=route,
             context_pack=context_pack,
+            knowledge_retriever=knowledge_retriever,
         )
         system, user = build_extension_agent1_prompt(
             request=task_input.request,
@@ -114,7 +116,7 @@ class SemanticRetrieverAgent:
         llm: Any,
         weights: dict[str, float] | None = None,
         environment_context: dict[str, Any] | None = None,
-        memory_profile: list[dict[str, Any]] | None = None,
+        memory_profile: Any = None,
     ) -> tuple[Agent1Output, dict[str, Any], LlmCallDiagnostics | None]:
         if llm is None:
             output = deterministic_signature(task, user_query)

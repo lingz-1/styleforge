@@ -21,14 +21,14 @@ def test_fixed_routing_cases_are_balanced_and_cover_every_task() -> None:
         for task_type in TaskType
     }
 
-    assert len(cases) == 42
-    assert set(counts.values()) == {7}
+    assert len(cases) == 60
+    assert set(counts.values()) == {10}
 
 
 def test_task_routing_baseline_has_no_known_case_failures() -> None:
     report = evaluate_task_routing(CASES_PATH)
 
-    assert report["case_count"] == 42
+    assert report["case_count"] == 60
     assert report["metrics"]["accuracy"] == 1.0
     assert report["failures"] == []
 

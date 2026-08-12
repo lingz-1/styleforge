@@ -15,20 +15,27 @@ from styleforge.agents.critic import CriticAgent
 from styleforge.agents.semantic_retriever import SemanticRetrieverAgent
 from styleforge.context.builder import ContextPackBuilder
 from styleforge.core.request_parser import parse_request
+from styleforge.knowledge.retriever import KnowledgeRetriever
 from styleforge.llm.client import LlmSchemaViolation
 from styleforge.models.agent_tasks import Agent1TaskOutput, Agent2TaskOutput, Agent3TaskOutput
 from styleforge.models.context import ContextPack
 from styleforge.models.task import TaskExecutionInput
 from styleforge.orchestration.task_router import TaskRoute, TaskRouter, TaskType
 from styleforge.repositories.database import database_session, initialize_database
-from styleforge.repositories.memory_repository import upsert_auto_memories
 from styleforge.repositories.task_run_repository import (
     fail_task_run,
     finish_task_run,
     start_task_run,
 )
 from styleforge.repositories.wardrobe_repository import list_items
-from styleforge.services.memory_extractor import extract_memories
+from styleforge.services.memory_aggregator import apply_evidence
+from styleforge.services.memory_evidence import extract_language_evidence, record_and_fold
+from styleforge.services.memory_resolver import (
+    AGENT_COMPOSER,
+    AGENT_CRITIC,
+    AGENT_RETRIEVER,
+    resolve,
+)
 from styleforge.services.presentation import present_result
 from styleforge.services.recommendation import recommend_for_user
 
@@ -70,6 +77,7 @@ class TaskWorkflowState(TypedDict, total=False):
     trace: list[dict[str, Any]]
     diagnostics: dict[str, Any]
     llm_call_count: int
+    session_signals: dict[str, Any]
 
 
 def _now() -> str:
@@ -89,12 +97,14 @@ class MultiTaskWorkflow:
     def __init__(
         self,
         *,
-        database_path: Path,
+        database_path: str,
         knowledge_root: Path,
         llm_client: Any | None,
         recommendation_runner: Callable[..., dict[str, Any]] | None = None,
+        chroma_store: Any | None = None,
+        text_embedder: Any | None = None,
     ) -> None:
-        self.database_path = database_path.resolve()
+        self.database_path = database_path
         self.knowledge_root = knowledge_root.resolve()
         self.llm_client = llm_client
         self.recommendation_runner = recommendation_runner
@@ -103,6 +113,13 @@ class MultiTaskWorkflow:
         self.semantic_retriever = SemanticRetrieverAgent()
         self.composer = ComposerAgent()
         self.critic = CriticAgent()
+        # Shared retriever; vector retrieval is additive and degrades to
+        # keyword-only when Chroma/model loading fails.
+        self.knowledge_retriever = KnowledgeRetriever(
+            self.knowledge_root,
+            chroma_store=chroma_store,
+            text_embedder=text_embedder,
+        )
         initialize_database(self.database_path)
         self.graph = self._build_graph()
 
@@ -233,15 +250,19 @@ class MultiTaskWorkflow:
         return context_pack
 
     def _agent1_node(self, state: TaskWorkflowState) -> dict[str, Any]:
+        agent_context = state["context_pack"].model_copy(deep=True)
+        self._apply_memory_pack(agent_context, AGENT_RETRIEVER, state["task_input"].request, state.get("session_signals"))
         output, info, _ = self.semantic_retriever.run_extension(
             database_path=self.database_path,
             knowledge_root=self.knowledge_root,
             task_input=state["task_input"],
             route=state["route"],
-            context_pack=state["context_pack"],
+            context_pack=agent_context,
             llm=self.llm_client,
+            knowledge_retriever=self.knowledge_retriever,
         )
         context_pack = self._enrich_context(state["context_pack"], output)
+        self._record_item_replaced(state["task_input"], output)
         return {
             "agent1_output": output,
             "context_pack": context_pack,
@@ -260,9 +281,11 @@ class MultiTaskWorkflow:
         }
 
     def _agent2_node(self, state: TaskWorkflowState) -> dict[str, Any]:
+        agent_context = state["context_pack"].model_copy(deep=True)
+        self._apply_memory_pack(agent_context, AGENT_COMPOSER, state["task_input"].request, state.get("session_signals"))
         output, info, _ = self.composer.run_extension(
             user_query=state["task_input"].request,
-            context_pack=state["context_pack"],
+            context_pack=agent_context,
             agent1_output=state["agent1_output"],
             llm=self.llm_client,
         )
@@ -288,9 +311,17 @@ class MultiTaskWorkflow:
             wardrobe_ids = {
                 item.item_id for item in list_items(connection, task_input.user_id)
             }
+        critic_context = state["context_pack"].model_copy(deep=True)
+        self._apply_memory_pack(
+            critic_context, AGENT_CRITIC, task_input.request, state.get("session_signals")
+        )
+        composer_context = state["context_pack"].model_copy(deep=True)
+        self._apply_memory_pack(
+            composer_context, AGENT_COMPOSER, task_input.request, state.get("session_signals")
+        )
         output, info, _ = self.critic.run_extension(
             user_query=task_input.request,
-            context_pack=state["context_pack"],
+            context_pack=critic_context,
             agent1_output=state["agent1_output"],
             agent2_output=state["agent2_output"],
             wardrobe_ids=wardrobe_ids,
@@ -313,7 +344,7 @@ class MultiTaskWorkflow:
             feedback = "；".join(output.issues) or output.summary or "草稿未通过语义审校"
             final_agent2, composer_info, _ = self.composer.run_extension(
                 user_query=task_input.request,
-                context_pack=state["context_pack"],
+                context_pack=composer_context,
                 agent1_output=state["agent1_output"],
                 llm=self.llm_client,
                 critic_feedback=feedback,
@@ -335,7 +366,7 @@ class MultiTaskWorkflow:
             )
             output, retry_info, _ = self.critic.run_extension(
                 user_query=task_input.request,
-                context_pack=state["context_pack"],
+                context_pack=critic_context,
                 agent1_output=state["agent1_output"],
                 agent2_output=final_agent2,
                 wardrobe_ids=wardrobe_ids,
@@ -419,15 +450,73 @@ class MultiTaskWorkflow:
         return route0
 
     def _extract_memories(self, task_input: TaskExecutionInput) -> None:
-        """Distill preference memories via LLM; failures are swallowed."""
+        """Distill preference evidence via LLM and aggregate it; failures swallowed."""
         try:
-            extracts = extract_memories(self.llm_client, task_input.request)
-            if not extracts:
+            evidence = extract_language_evidence(self.llm_client, task_input.request)
+            if not evidence:
                 return
             with database_session(self.database_path) as connection:
-                upsert_auto_memories(connection, task_input.user_id, extracts)
+                apply_evidence(connection, task_input.user_id, evidence)
         except Exception:
             # Memory extraction is best-effort and must never fail a task run.
+            pass
+
+    def _apply_memory_pack(
+        self,
+        context_pack: ContextPack,
+        agent_role: str,
+        request_text: str,
+        session_signals: dict[str, Any] | None = None,
+    ) -> None:
+        """Swap ``preferences.memory_profile`` for the agent's differentiated pack.
+
+        The raw preference list stays in the stored context pack so each node
+        re-derives its own slice; the copy passed to the agent carries only the
+        buckets that agent role may see.
+        """
+        preferences = context_pack.user_context.preferences or {}
+        if not preferences.get("memory_profile"):
+            return
+        pack = resolve(
+            preferences["memory_profile"],
+            request_signature=(
+                {"practical_context": request_text} if request_text.strip() else None
+            ),
+            agent_role=agent_role,
+            session_signals=session_signals,
+        )
+        context_pack.user_context.preferences = {
+            **preferences,
+            "memory_profile": pack,
+        }
+
+    def _record_item_replaced(
+        self,
+        task_input: TaskExecutionInput,
+        output: Agent1TaskOutput,
+    ) -> None:
+        """Record an ``item_replaced`` behavior event from modification facts."""
+        facts = output.facts if output.task_type is TaskType.OUTFIT_MODIFY else {}
+        replaced = list(facts.get("replaced_item_ids", []) or [])
+        replacement = list(facts.get("replacement_item_ids", []) or [])
+        if not replaced and not replacement:
+            return
+        try:
+            with database_session(self.database_path) as connection:
+                record_and_fold(
+                    connection,
+                    task_input.user_id,
+                    "item_replaced",
+                    context={
+                        "request": task_input.request,
+                        "outfit_id": str(facts.get("current_outfit_id", "")),
+                    },
+                    features={
+                        "replaced_item_ids": replaced,
+                        "replacement_item_ids": replacement,
+                    },
+                )
+        except BaseException:
             pass
 
     def execute(
@@ -455,6 +544,7 @@ class MultiTaskWorkflow:
                     "trace": [],
                     "diagnostics": {},
                     "llm_call_count": 0,
+                    "session_signals": (session_context or {}).get("session_signals") or {},
                 }
             )
             context_pack = final["context_pack"].model_dump(mode="json")

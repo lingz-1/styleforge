@@ -14,10 +14,12 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from styleforge.core.config import WORKSPACE_ROOT, Settings
+from styleforge.core.config import Settings
 from styleforge.core.taxonomy import build_taxonomy
 from styleforge.llm.client import LlmInvalidJson, LlmSchemaViolation, LlmUnavailable
 from styleforge.llm.extension_prompts import EXTENSION_PROMPT_VERSION
+from styleforge.integrations.embeddings.text_embedder import TextEmbedder
+from styleforge.integrations.vectorstores.chroma_store import ChromaStore
 from styleforge.models.task import TaskExecutionInput
 from styleforge.orchestration.graph import MultiTaskGraph
 from styleforge.orchestration.task_router import TaskType
@@ -51,15 +53,22 @@ from styleforge.repositories.chat_repository import (
     list_messages,
     rename_chat_session,
 )
-from styleforge.repositories.memory_repository import (
-    create_manual_memory,
-    forget_memory,
-    list_memories,
-    update_memory,
+from styleforge.repositories.interaction_event_repository import record_event
+from styleforge.repositories.preference_model_repository import (
+    get_preference,
+    get_preference_by_key,
+    list_preferences,
+    soft_forget,
+    upsert_preference,
 )
+from styleforge.services.memory_aggregator import apply_evidence
+from styleforge.services.memory_consolidation import consolidate_session
+from styleforge.services.memory_evidence import behavior_evidence_from_event
 from styleforge.repositories.task_run_repository import get_task_run
+from styleforge.core.redis import delete_session_outfit_cache, redis_client_from_settings
 from styleforge.services.chat_service import (
     assistant_summary,
+    cache_session_outfit,
     get_session_outfit_context,
     outfit_context_from_payload,
     trim_message_payload,
@@ -177,20 +186,46 @@ class ChatSessionRename(BaseModel):
 
 
 class MemoryCreate(BaseModel):
-    category: str = Field(min_length=1, max_length=32)
-    content: str = Field(min_length=1, max_length=64)
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    """An explicit preference statement: a dimensioned claim the user confirms.
+
+    Persisted as strong explicit evidence (source=explicit_statement) and
+    aggregated into the preference model, which promotes it to long-term.
+    """
+
+    dimension: str = Field(default="shopping", max_length=32)
+    attribute: str = Field(min_length=1, max_length=32)
+    value: str = Field(min_length=1, max_length=64)
+    polarity: str = Field(default="positive", pattern="^(positive|negative)$")
+    strength: float = Field(default=0.9, ge=0.0, le=1.0)
 
 
 class MemoryUpdate(BaseModel):
-    category: str | None = Field(default=None, min_length=1, max_length=32)
-    content: str | None = Field(default=None, min_length=1, max_length=64)
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Direct edit of a preference row (the model is the current hypothesis)."""
+
+    dimension: str | None = Field(default=None, min_length=1, max_length=32)
+    attribute: str | None = Field(default=None, min_length=1, max_length=32)
+    value: str | None = Field(default=None, min_length=1, max_length=64)
+    polarity: str | None = Field(default=None, pattern="^(positive|negative)$")
+    lifecycle: str | None = Field(
+        default=None,
+        pattern="^(short_term|long_term_candidate|long_term)$",
+    )
+
+
+class BehaviorEventCreate(BaseModel):
+    """A raw user behavior event reported by the front end / instrumentation."""
+
+    event_type: str = Field(min_length=1, max_length=40)
+    item_id: str = Field(default="", max_length=128)
+    context: dict[str, Any] = Field(default_factory=dict)
+    features: dict[str, Any] = Field(default_factory=dict)
 
 
 settings = Settings.from_env()
 API_STARTED_AT = datetime.now(timezone.utc).isoformat()
-initialize_database(settings.database_path)
+initialize_database(settings.database_dsn)
+# Optional Redis session-outfit cache (disabled/unreachable -> None, degraded).
+_redis_client = redis_client_from_settings(settings)
 app = FastAPI(
     title="StyleForge API",
     version="0.3.0",
@@ -201,7 +236,7 @@ app = FastAPI(
 @lru_cache(maxsize=1)
 def get_workflow() -> StyleForgeWorkflow:
     return StyleForgeWorkflow(
-        database_path=settings.database_path,
+        database_path=settings.database_dsn,
         embedding_dir=settings.embedding_dir,
         model_dir=settings.artifact_root / "models",
         device="cuda",
@@ -213,14 +248,47 @@ def get_task_graph() -> MultiTaskGraph:
     return MultiTaskGraph()
 
 
+_knowledge_chroma: dict[str, Any] = {}
+
+
+def _ensure_knowledge_chroma() -> tuple[Any, Any] | None:
+    """Lazily build the Chroma store + text embedder; ``None`` on any failure.
+
+    Mirrors ``_ensure_vision``: a missing/empty index or a model-load failure
+    degrades knowledge retrieval to keyword matching rather than failing the
+    request. Text embedding prefers CUDA and falls back to CPU.
+    """
+    if _knowledge_chroma.get("attempted"):
+        return _knowledge_chroma.get("value")
+    _knowledge_chroma["attempted"] = True
+    try:
+        store = ChromaStore(settings.chroma_dir)
+        try:
+            embedder = TextEmbedder(
+                settings.artifact_root / "models", device="cuda", precision="float16"
+            )
+        except BaseException:
+            embedder = TextEmbedder(
+                settings.artifact_root / "models", device="cpu", precision="float32"
+            )
+        value: tuple[Any, Any] | None = (store, embedder)
+    except BaseException:
+        value = None
+    _knowledge_chroma["value"] = value
+    return value
+
+
 @lru_cache(maxsize=1)
 def get_multi_task_workflow() -> MultiTaskWorkflow:
     workflow = get_workflow()
+    chroma = _ensure_knowledge_chroma()
     return MultiTaskWorkflow(
-        database_path=settings.database_path,
-        knowledge_root=WORKSPACE_ROOT / "knowledge",
+        database_path=settings.database_dsn,
+        knowledge_root=settings.knowledge_root,
         llm_client=workflow.llm_client,
         recommendation_runner=lambda **kwargs: workflow.recommend_payload(**kwargs),
+        chroma_store=chroma[0] if chroma else None,
+        text_embedder=chroma[1] if chroma else None,
     )
 
 
@@ -256,7 +324,7 @@ def _decode_base64(content: str, *, maximum_bytes: int) -> bytes:
 def health() -> dict[str, Any]:
     embedding_manifest = settings.embedding_dir / "manifest.json"
     index_manifest = settings.index_dir / "manifest.json"
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         catalog_count = connection.execute("SELECT COUNT(*) FROM catalog_items").fetchone()[0]
         ready_count = connection.execute(
             "SELECT COUNT(*) FROM catalog_items WHERE embedding_status = 'ready'"
@@ -299,7 +367,7 @@ def health() -> dict[str, Any]:
                 settings.reverse_geocode_endpoint
             ),
         },
-        "database": str(settings.database_path),
+        "database": str(settings.database_dsn),
         "catalog_items": catalog_count,
         "embedding_ready_items": ready_count,
         "personal_embedding_items": personal_embedding_count,
@@ -373,7 +441,7 @@ def weather_now(
 
 @app.get("/preferences/{user_id}/evaluation")
 def get_user_evaluation_weights(user_id: str) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         weights = get_evaluation_weights(connection, user_id)
     return {"user_id": user_id, "weights": weights}
 
@@ -383,62 +451,182 @@ def put_user_evaluation_weights(
     user_id: str,
     request: EvaluationWeightsRequest,
 ) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         normalized = save_evaluation_weights(connection, user_id, request.weights)
+    # Weak explicit signal: which dimensions the user emphasizes.
+    _try_behavior_event(
+        user_id=user_id,
+        event_type="explicit_preference",
+        features={
+            "dimension": "shopping",
+            "attribute": "evaluation_weight",
+            "value": ",".join(sorted(request.weights)),
+            "polarity": "positive",
+            "strength": 0.3,
+        },
+    )
     return {"user_id": user_id, "weights": normalized}
 
 
+def _fold_behavior_event(
+    connection,
+    user_id: str,
+    event_type: str,
+    *,
+    item_id: str = "",
+    context: dict[str, Any] | None = None,
+    features: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Record one raw behavior event, then fold its evidence into the model."""
+    event = record_event(
+        connection,
+        user_id,
+        event_type,
+        item_id=item_id,
+        context=context,
+        features=features,
+    )
+    evidence = behavior_evidence_from_event(connection, event)
+    apply_evidence(connection, user_id, evidence)
+    return event
+
+
+def _try_behavior_event(
+    *,
+    user_id: str,
+    event_type: str,
+    item_id: str = "",
+    context: dict[str, Any] | None = None,
+    features: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort instrumentation: memory recording never breaks the request."""
+    try:
+        with database_session(settings.database_dsn) as connection:
+            _fold_behavior_event(
+                connection,
+                user_id,
+                event_type,
+                item_id=item_id,
+                context=context,
+                features=features,
+            )
+    except BaseException:
+        pass
+
+
 @app.get("/preferences/{user_id}/memories")
-def list_user_memories(user_id: str) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
-        memories = list_memories(connection, user_id)
-    return {"user_id": user_id, "count": len(memories), "memories": memories}
+def list_user_memories(
+    user_id: str,
+    lifecycle: str | None = Query(default=None, max_length=32),
+) -> dict[str, Any]:
+    with database_session(settings.database_dsn) as connection:
+        preferences = list_preferences(connection, user_id, lifecycle=lifecycle)
+    return {"user_id": user_id, "count": len(preferences), "memories": preferences}
 
 
 @app.post("/preferences/{user_id}/memories", status_code=201)
 def create_user_memory(user_id: str, request: MemoryCreate) -> dict[str, Any]:
+    """Create an explicit preference: strong evidence promoted to long-term."""
     try:
-        with database_session(settings.database_path) as connection:
-            return create_manual_memory(
+        with database_session(settings.database_dsn) as connection:
+            event = _fold_behavior_event(
                 connection,
                 user_id,
-                request.category,
-                request.content,
-                confidence=request.confidence,
+                "explicit_preference",
+                features={
+                    "dimension": request.dimension,
+                    "attribute": request.attribute,
+                    "value": request.value,
+                    "polarity": request.polarity,
+                    "strength": request.strength,
+                },
+            )
+            preference = get_preference_by_key(
+                connection,
+                user_id,
+                request.dimension.lower(),
+                request.attribute.lower(),
+                request.value.lower(),
             )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"event_id": event["event_id"], "preference": preference}
 
 
-@app.patch("/preferences/{user_id}/memories/{memory_id}")
+@app.patch("/preferences/{user_id}/memories/{preference_id}")
 def update_user_memory(
     user_id: str,
-    memory_id: int,
+    preference_id: int,
     request: MemoryUpdate,
 ) -> dict[str, Any]:
+    """Directly edit one preference row (the model is the current hypothesis)."""
     try:
-        with database_session(settings.database_path) as connection:
-            memory = update_memory(
+        with database_session(settings.database_dsn) as connection:
+            preference = get_preference(connection, user_id, preference_id)
+            if preference is None:
+                raise HTTPException(status_code=404, detail="Memory not found")
+            dimension = (request.dimension or preference["dimension"]).lower()
+            attribute = (request.attribute or preference["attribute"]).lower()
+            value = (request.value or preference["value"]).lower()
+            updated = upsert_preference(
                 connection,
                 user_id,
-                memory_id,
-                category=request.category,
-                content=request.content,
-                confidence=request.confidence,
+                dimension=dimension,
+                attribute=attribute,
+                value=value,
+                polarity=request.polarity or preference["polarity"],
+                lifecycle=request.lifecycle or preference["lifecycle"],
+                scope=preference.get("scope"),
+                confidence=preference.get("confidence", 0),
+                support_score=preference.get("support_score", 0),
+                contradiction_score=preference.get("contradiction_score", 0),
+                support_count=preference.get("support_count", 0),
+                contradiction_count=preference.get("contradiction_count", 0),
+                source_summary=preference.get("source_summary"),
+                decay_policy=preference.get("decay_policy", "normal"),
+                last_observed_at=preference.get("last_observed_at"),
+                expires_at=preference.get("expires_at", ""),
+            )
+            if (dimension, attribute, value) != (
+                preference["dimension"],
+                preference["attribute"],
+                preference["value"],
+            ):
+                soft_forget(connection, user_id, preference_id)
+    except HTTPException:
+        raise
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return updated
+
+
+@app.delete("/preferences/{user_id}/memories/{preference_id}")
+def forget_user_memory(user_id: str, preference_id: int) -> dict[str, Any]:
+    with database_session(settings.database_dsn) as connection:
+        if not soft_forget(connection, user_id, preference_id):
+            raise HTTPException(status_code=404, detail="Memory not found")
+    return {"preference_id": preference_id, "forgotten": True}
+
+
+@app.post("/users/{user_id}/events", status_code=201)
+def record_user_event(user_id: str, request: BehaviorEventCreate) -> dict[str, Any]:
+    """Record one raw behavior event and fold its deterministic evidence in.
+
+    Front-end interaction buttons (adopt / replace / reject / feedback) and the
+    existing endpoints' instrumentation both go through this path.
+    """
+    try:
+        with database_session(settings.database_dsn) as connection:
+            return _fold_behavior_event(
+                connection,
+                user_id,
+                request.event_type,
+                item_id=request.item_id,
+                context=request.context,
+                features=request.features,
             )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    if memory is None:
-        raise HTTPException(status_code=404, detail="Memory not found")
-    return memory
-
-
-@app.delete("/preferences/{user_id}/memories/{memory_id}")
-def forget_user_memory(user_id: str, memory_id: int) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
-        if not forget_memory(connection, user_id, memory_id):
-            raise HTTPException(status_code=404, detail="Memory not found")
-    return {"memory_id": memory_id, "forgotten": True}
 
 
 @app.post("/users/{user_id}/chat-sessions", status_code=201)
@@ -446,11 +634,11 @@ def create_user_chat_session(
     user_id: str,
     request: ChatSessionCreate,
 ) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         title = request.title.strip()
         if not title:
             session_count = connection.execute(
-                "SELECT COUNT(*) FROM chat_sessions WHERE user_id = ?",
+                "SELECT COUNT(*) FROM chat_sessions WHERE user_id = %s",
                 (user_id,),
             ).fetchone()[0]
             title = f"会话 {session_count + 1}"
@@ -460,7 +648,7 @@ def create_user_chat_session(
 
 @app.get("/users/{user_id}/chat-sessions")
 def list_user_chat_sessions(user_id: str) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         sessions = list_chat_sessions(connection, user_id)
     return {"user_id": user_id, "count": len(sessions), "sessions": sessions}
 
@@ -470,7 +658,7 @@ def get_user_chat_session(
     session_id: str,
     user_id: str = Query(min_length=1, max_length=128),
 ) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         session = get_chat_session(connection, user_id, session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Chat session not found")
@@ -484,7 +672,7 @@ def rename_user_chat_session(
     request: ChatSessionRename,
     user_id: str = Query(min_length=1, max_length=128),
 ) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         session = rename_chat_session(connection, user_id, session_id, request.title)
     if session is None:
         raise HTTPException(status_code=404, detail="Chat session not found")
@@ -496,9 +684,16 @@ def delete_user_chat_session(
     session_id: str,
     user_id: str = Query(min_length=1, max_length=128),
 ) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         if not delete_chat_session(connection, user_id, session_id):
             raise HTTPException(status_code=404, detail="Chat session not found")
+    # Session ended: fold the accumulated evidence into a consistent model.
+    try:
+        with database_session(settings.database_dsn) as connection:
+            consolidate_session(connection, user_id, session_id)
+    except BaseException:
+        pass
+    delete_session_outfit_cache(_redis_client, session_id)
     return {"session_id": session_id, "deleted": True}
 
 
@@ -549,12 +744,16 @@ def _resolve_session_turn(request: TaskExecutionInput) -> dict[str, Any] | None:
     """
     if not request.session_id:
         return None
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         session = get_chat_session(connection, request.user_id, request.session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="Chat session not found")
         context = get_session_outfit_context(
-            connection, request.user_id, request.session_id
+            connection,
+            request.user_id,
+            request.session_id,
+            redis=_redis_client,
+            redis_ttl=settings.redis_ttl,
         )
         append_message(
             connection,
@@ -573,9 +772,9 @@ def _append_chat_success(
     """Persist the assistant turn with a trimmed, re-renderable result snapshot."""
     if not request.session_id:
         return ""
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         outfit_context = outfit_context_from_payload(payload)
-        return append_message(
+        message_id = append_message(
             connection,
             session_id=request.session_id,
             user_id=request.user_id,
@@ -588,13 +787,16 @@ def _append_chat_success(
                 "outfit_context": outfit_context,
             },
         )
+    # Warm the Redis session cache so the next follow-up skips the DB scan.
+    cache_session_outfit(_redis_client, request.session_id, outfit_context, settings.redis_ttl)
+    return message_id
 
 
 def _append_chat_failure(request: TaskExecutionInput, detail: str) -> None:
     """Record the failure as an assistant message so the chain stays complete."""
     if not request.session_id:
         return
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         append_message(
             connection,
             session_id=request.session_id,
@@ -612,6 +814,31 @@ def _append_chat_failure(request: TaskExecutionInput, detail: str) -> None:
                 "error": detail,
             },
         )
+
+
+_TASK_TYPE_EVENTS = {
+    "style_advice": "style_requested",
+    "item_advice": "style_requested",
+    "wardrobe_compatibility": "compatibility_checked",
+    # OUTFIT_MODIFY is recorded inside task_workflow where the replaced
+    # item ids are known (item_replaced).
+}
+
+
+def _record_task_event(request: TaskExecutionInput, payload: dict[str, Any]) -> None:
+    """Record a raw event for the task type just executed (best-effort)."""
+    task_type = str(payload.get("task_type") or "")
+    event_type = _TASK_TYPE_EVENTS.get(task_type.lower())
+    if not event_type:
+        return
+    _try_behavior_event(
+        user_id=request.user_id,
+        event_type=event_type,
+        context={
+            "request": request.request,
+            "outfit_id": payload.get("outfit_id") or "",
+        },
+    )
 
 
 @app.post("/tasks/execute")
@@ -644,6 +871,7 @@ def execute_task(request: TaskExecutionInput) -> dict[str, Any]:
             detail=f"Task execution failed: {type(error).__name__}: {error}",
         ) from error
     message_id = _append_chat_success(request, payload)
+    _record_task_event(request, payload)
     payload["session_id"] = request.session_id
     payload["message_id"] = message_id
     return payload
@@ -651,7 +879,7 @@ def execute_task(request: TaskExecutionInput) -> dict[str, Any]:
 
 @app.get("/tasks/{user_id}/{run_id}")
 def read_task_run(user_id: str, run_id: str) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         payload = get_task_run(connection, user_id=user_id, run_id=run_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Task run not found")
@@ -660,11 +888,11 @@ def read_task_run(user_id: str, run_id: str) -> dict[str, Any]:
 
 @app.get("/wardrobes/{user_id}")
 def get_wardrobe(user_id: str) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         rows = connection.execute(
             "SELECT c.* FROM wardrobe_items w "
             "JOIN catalog_items c ON c.item_id = w.item_id "
-            "WHERE w.user_id = ? AND w.active = 1 "
+            "WHERE w.user_id = %s AND w.active = 1 "
             "ORDER BY c.item_type, c.item_id",
             (user_id,),
         ).fetchall()
@@ -702,7 +930,7 @@ def preview_wardrobe_import(
             payload,
             default_audience=request.default_audience,
         )
-        with database_session(settings.database_path) as connection:
+        with database_session(settings.database_dsn) as connection:
             batch_id, created, refreshed = create_import_preview(
                 connection,
                 user_id=user_id,
@@ -729,7 +957,7 @@ def preview_wardrobe_import(
 
 @app.get("/wardrobes/{user_id}/imports/{batch_id}")
 def get_wardrobe_import(user_id: str, batch_id: str) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         batch = get_import_batch(connection, user_id=user_id, batch_id=batch_id)
         if batch is None:
             raise HTTPException(status_code=404, detail="Wardrobe import batch not found")
@@ -751,7 +979,7 @@ def commit_wardrobe_import(
     image_root = personal_image_root(settings.artifact_root, user_id)
     image_root.mkdir(parents=True, exist_ok=True)
     try:
-        with database_session(settings.database_path) as connection:
+        with database_session(settings.database_dsn) as connection:
             item_ids = commit_import_rows(
                 connection,
                 user_id=user_id,
@@ -769,7 +997,7 @@ def commit_wardrobe_import(
     if request.auto_embed:
         try:
             embedding = embed_personal_items(
-                database_path=settings.database_path,
+                database_path=settings.database_dsn,
                 item_ids=item_ids,
                 model_dir=settings.artifact_root / "models",
                 device="cuda",
@@ -799,7 +1027,7 @@ def upload_personal_item_image(
     payload = _decode_base64(request.content_base64, maximum_bytes=20 * 1024 * 1024)
     try:
         return bind_personal_image(
-            database_path=settings.database_path,
+            database_path=settings.database_dsn,
             artifact_root=settings.artifact_root,
             user_id=user_id,
             item_id=item_id,
@@ -821,7 +1049,7 @@ def create_wardrobe_photo_item(
     payload = _decode_base64(request.content_base64, maximum_bytes=20 * 1024 * 1024)
     try:
         return create_photo_item(
-            database_path=settings.database_path,
+            database_path=settings.database_dsn,
             artifact_root=settings.artifact_root,
             user_id=user_id,
             image_bytes=payload,
@@ -912,7 +1140,7 @@ def start_wardrobe_photo_batch(
         images=images,
         default_gender=request.default_gender,
         vision_client=client,
-        database_path=settings.database_path,
+        database_path=settings.database_dsn,
         artifact_root=settings.artifact_root,
         model_dir=settings.artifact_root / "models",
     )
@@ -954,7 +1182,7 @@ def update_wardrobe_item(
 ) -> dict[str, Any]:
     try:
         return update_personal_item(
-            database_path=settings.database_path,
+            database_path=settings.database_dsn,
             user_id=user_id,
             item_id=item_id,
             model_dir=settings.artifact_root / "models",
@@ -974,9 +1202,9 @@ def update_wardrobe_item(
 
 @app.post("/wardrobes/{user_id}/items", status_code=201)
 def add_wardrobe_item(user_id: str, request: WardrobeItemRequest) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         row = connection.execute(
-            "SELECT * FROM catalog_items WHERE item_id = ?",
+            "SELECT * FROM catalog_items WHERE item_id = %s",
             (request.item_id,),
         ).fetchone()
         if row is None:
@@ -985,22 +1213,29 @@ def add_wardrobe_item(user_id: str, request: WardrobeItemRequest) -> dict[str, A
             raise HTTPException(status_code=409, detail="Catalog item image is unavailable")
         connection.execute(
             "INSERT INTO wardrobe_items(user_id, item_id, active, favorite, notes, added_at) "
-            "VALUES (?, ?, 1, 0, '', ?) "
+            "VALUES (%s, %s, 1, 0, '', %s) "
             "ON CONFLICT(user_id, item_id) DO UPDATE SET active = 1",
             (user_id, request.item_id, datetime.now(timezone.utc).isoformat()),
         )
+    _try_behavior_event(
+        user_id=user_id,
+        event_type="wardrobe_adopted",
+        item_id=request.item_id,
+        features={"category": row["main_category"], "color": row["color"]},
+    )
     return {"user_id": user_id, "item": _catalog_row_to_dict(row)}
 
 
 @app.delete("/wardrobes/{user_id}/items/{item_id}")
 def remove_wardrobe_item(user_id: str, item_id: str) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         cursor = connection.execute(
-            "UPDATE wardrobe_items SET active = 0 WHERE user_id = ? AND item_id = ?",
+            "UPDATE wardrobe_items SET active = 0 WHERE user_id = %s AND item_id = %s",
             (user_id, item_id),
         )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Wardrobe item not found")
+    _try_behavior_event(user_id=user_id, event_type="wardrobe_removed", item_id=item_id)
     return {"user_id": user_id, "item_id": item_id, "active": False}
 
 
@@ -1012,28 +1247,28 @@ def search_catalog(
     source: str | None = Query(default=None, max_length=32),
     limit: int = Query(default=24, ge=1, le=100),
 ) -> dict[str, Any]:
-    clauses = ["image_status = 'available'", "source NOT LIKE 'personal-%'"]
+    clauses = ["image_status = 'available'", "source NOT ILIKE 'personal-%'"]
     parameters: list[Any] = []
     if q.strip():
-        clauses.append("(name LIKE ? OR color LIKE ? OR description LIKE ?)")
+        clauses.append("(name ILIKE %s OR color ILIKE %s OR description ILIKE %s)")
         pattern = f"%{q.strip()}%"
         parameters.extend((pattern, pattern, pattern))
     if item_type:
-        clauses.append("item_type = ?")
+        clauses.append("item_type = %s")
         parameters.append(item_type)
     if audience:
-        clauses.append("gender = ?")
+        clauses.append("gender = %s")
         parameters.append(audience)
     if source:
-        clauses.append("source = ?")
+        clauses.append("source = %s")
         parameters.append(source)
     parameters.append(limit)
     sql = (
         "SELECT * FROM catalog_items WHERE "
         + " AND ".join(clauses)
-        + " ORDER BY item_id LIMIT ?"
+        + " ORDER BY item_id LIMIT %s"
     )
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         rows = connection.execute(sql, parameters).fetchall()
     return {"count": len(rows), "items": [_catalog_row_to_dict(row) for row in rows]}
 
@@ -1047,9 +1282,9 @@ def catalog_taxonomy() -> dict[str, Any]:
 
 @app.get("/items/{item_id}")
 def get_item(item_id: str) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         row = connection.execute(
-            "SELECT * FROM catalog_items WHERE item_id = ?",
+            "SELECT * FROM catalog_items WHERE item_id = %s",
             (item_id,),
         ).fetchone()
     if row is None:
@@ -1081,7 +1316,7 @@ def _resolve_image_path(
     if item_id is not None:
         user_row = connection.execute(
             "SELECT user_id FROM wardrobe_items "
-            "WHERE item_id = ? AND active = 1 LIMIT 1",
+            "WHERE item_id = %s AND active = 1 LIMIT 1",
             (item_id,),
         ).fetchone()
         if user_row is not None:
@@ -1116,10 +1351,10 @@ def _image_response(connection, row, *, item_id: str):
 
 @app.get("/items/{item_id}/image", response_class=FileResponse)
 def get_item_image(item_id: str):
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         row = connection.execute(
             "SELECT source, relative_image_path, image_status "
-            "FROM catalog_items WHERE item_id = ?",
+            "FROM catalog_items WHERE item_id = %s",
             (item_id,),
         ).fetchone()
         if row is None:
@@ -1129,9 +1364,9 @@ def get_item_image(item_id: str):
 
 @app.get("/items/{item_id}/images")
 def list_item_images(item_id: str) -> dict[str, Any]:
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         item = connection.execute(
-            "SELECT source FROM catalog_items WHERE item_id = ?",
+            "SELECT source FROM catalog_items WHERE item_id = %s",
             (item_id,),
         ).fetchone()
         if item is None:
@@ -1139,7 +1374,7 @@ def list_item_images(item_id: str) -> dict[str, Any]:
         rows = connection.execute(
             "SELECT position, image_role, image_filename, relative_image_path, "
             "image_status, is_primary FROM catalog_item_images "
-            "WHERE item_id = ? ORDER BY position",
+            "WHERE item_id = %s ORDER BY position",
             (item_id,),
         ).fetchall()
     return {
@@ -1158,12 +1393,12 @@ def list_item_images(item_id: str) -> dict[str, Any]:
 
 @app.get("/items/{item_id}/images/{position}", response_class=FileResponse)
 def get_item_image_by_position(item_id: str, position: int):
-    with database_session(settings.database_path) as connection:
+    with database_session(settings.database_dsn) as connection:
         row = connection.execute(
             "SELECT c.source, i.relative_image_path, i.image_status "
             "FROM catalog_item_images i "
             "JOIN catalog_items c ON c.item_id = i.item_id "
-            "WHERE i.item_id = ? AND i.position = ?",
+            "WHERE i.item_id = %s AND i.position = %s",
             (item_id, position),
         ).fetchone()
         if row is None:

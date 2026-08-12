@@ -15,17 +15,16 @@ from tests.extension_llm import ScriptedExtensionLlm, approved_review, intent_re
 from tests.helpers import make_item
 
 
-def _import_api(tmp_path: Path, monkeypatch) -> dict:
-    database_path = tmp_path / "chat-api.db"
-    monkeypatch.setenv("STYLEFORGE_DATABASE_PATH", str(database_path))
+def _import_api(db_dsn: str, monkeypatch) -> dict:
+    monkeypatch.setenv("STYLEFORGE_DATABASE_DSN", db_dsn)
     sys.modules.pop("styleforge.api", None)
     api = importlib.import_module("styleforge.api")
-    initialize_database(database_path)
-    return {"api": api, "database_path": database_path}
+    initialize_database(db_dsn)
+    return {"api": api, "database_path": db_dsn}
 
 
-def test_chat_sessions_crud_over_http(tmp_path: Path, monkeypatch) -> None:
-    context = _import_api(tmp_path, monkeypatch)
+def test_chat_sessions_crud_over_http(db_dsn: str, monkeypatch) -> None:
+    context = _import_api(db_dsn, monkeypatch)
     with TestClient(context["api"].app) as client:
         created = client.post("/users/u/chat-sessions", json={"title": ""})
         assert created.status_code == 201
@@ -62,9 +61,9 @@ def test_chat_sessions_crud_over_http(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_execute_task_persists_user_and_assistant_messages(
-    tmp_path: Path, monkeypatch
+    db_dsn: str, monkeypatch
 ) -> None:
-    context = _import_api(tmp_path, monkeypatch)
+    context = _import_api(db_dsn, monkeypatch)
     database_path = context["database_path"]
     api = context["api"]
     items = [
@@ -100,7 +99,7 @@ def test_execute_task_persists_user_and_assistant_messages(
             },
             approved_review(),
             # Successful execute also runs one memory-extraction call.
-            {"memories": []},
+            {"evidence": []},
         ]
     )
     workflow = MultiTaskWorkflow(
@@ -138,8 +137,8 @@ def test_execute_task_persists_user_and_assistant_messages(
         assert "outfit_context" in assistant
 
 
-def test_execute_task_persists_auto_memory(tmp_path: Path, monkeypatch) -> None:
-    context = _import_api(tmp_path, monkeypatch)
+def test_execute_task_persists_auto_memory(db_dsn: str, monkeypatch) -> None:
+    context = _import_api(db_dsn, monkeypatch)
     database_path = context["database_path"]
     api = context["api"]
     items = [
@@ -175,7 +174,18 @@ def test_execute_task_persists_auto_memory(tmp_path: Path, monkeypatch) -> None:
             },
             approved_review(),
             # Successful execute also runs one memory-extraction call.
-            {"memories": [{"category": "style", "content": "american vintage", "meta": {}}]},
+            {
+                "evidence": [
+                    {
+                        "dimension": "style",
+                        "attribute": "style",
+                        "value": "american vintage",
+                        "polarity": "positive",
+                        "strength": 0.5,
+                        "scope": {"type": "global"},
+                    }
+                ]
+            },
         ]
     )
     workflow = MultiTaskWorkflow(
@@ -197,13 +207,13 @@ def test_execute_task_persists_auto_memory(tmp_path: Path, monkeypatch) -> None:
         assert response.status_code == 200
 
         memories = client.get("/preferences/u/memories").json()["memories"]
-        assert [(m["category"], m["content"], m["source"]) for m in memories] == [
-            ("style", "american vintage", "auto")
+        assert [(m["dimension"], m["attribute"], m["value"]) for m in memories] == [
+            ("style", "style", "american vintage")
         ]
 
 
-def test_execute_task_with_unknown_session_is_404(tmp_path: Path, monkeypatch) -> None:
-    context = _import_api(tmp_path, monkeypatch)
+def test_execute_task_with_unknown_session_is_404(db_dsn: str, monkeypatch) -> None:
+    context = _import_api(db_dsn, monkeypatch)
     with TestClient(context["api"].app) as client:
         response = client.post(
             "/tasks/execute",
@@ -217,9 +227,9 @@ def test_execute_task_with_unknown_session_is_404(tmp_path: Path, monkeypatch) -
 
 
 def test_execute_task_failure_still_records_failed_message(
-    tmp_path: Path, monkeypatch
+    db_dsn: str, monkeypatch
 ) -> None:
-    context = _import_api(tmp_path, monkeypatch)
+    context = _import_api(db_dsn, monkeypatch)
     database_path = context["database_path"]
     api = context["api"]
     # No scripted responses: the first LLM call raises, the task fails, and the

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+from styleforge.repositories.database import Connection
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
@@ -15,7 +15,7 @@ INSERT INTO dataset_outfits (
     outfit_id, source, split, gender, name, description, style, season, occasion,
     theme, color_palette_json, is_official_outfit, is_official_look,
     source_revision, imported_at
-) VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (%s, %s, %s, %s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT(outfit_id) DO UPDATE SET
     source = excluded.source,
     split = excluded.split,
@@ -34,7 +34,7 @@ ON CONFLICT(outfit_id) DO UPDATE SET
 
 
 def upsert_outfits(
-    connection: sqlite3.Connection,
+    connection: Connection,
     outfits: Sequence[DatasetOutfit],
     source_revision: str,
 ) -> tuple[int, int]:
@@ -64,7 +64,7 @@ def upsert_outfits(
         ),
     )
     outfit_ids = tuple(outfit.outfit_id for outfit in outfits)
-    placeholders = ",".join("?" for _ in outfit_ids)
+    placeholders = ",".join("%s" for _ in outfit_ids)
     connection.execute(
         f"DELETE FROM dataset_outfit_items WHERE outfit_id IN ({placeholders})",  # noqa: S608
         outfit_ids,
@@ -77,14 +77,14 @@ def upsert_outfits(
     connection.executemany(
         """
         INSERT INTO dataset_outfit_items(outfit_id, position, item_id, item_description)
-        VALUES (?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s)
         """,
         item_rows,
     )
     return len(outfits), len(item_rows)
 
 
-def outfit_counts(connection: sqlite3.Connection) -> dict[str, object]:
+def outfit_counts(connection: Connection) -> dict[str, object]:
     outfit_count = connection.execute("SELECT COUNT(*) FROM dataset_outfits").fetchone()[0]
     relation_count = connection.execute("SELECT COUNT(*) FROM dataset_outfit_items").fetchone()[0]
     by_split = {

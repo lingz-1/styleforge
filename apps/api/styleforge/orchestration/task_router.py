@@ -102,7 +102,7 @@ _COMPATIBILITY_PATTERNS = (
 
 _GAP_PATTERNS = (
     re.compile(r"(?:衣柜|衣橱).{0,12}(?:还?缺|缺少|缺口|补充|补齐)"),
-    re.compile(r"(?:还缺什么|缺少什么|该补什么|应该补什么)"),
+    re.compile(r"(?:还缺什么|缺少什么|该补(?:点)?什么|应该补(?:点)?什么)"),
     re.compile(r"wardrobe\s+gap|(?:wardrobe|closet).{0,20}missing", re.IGNORECASE),
     re.compile(
         r"what(?:'s| is).{0,20}missing.{0,20}(?:wardrobe|closet)|"
@@ -113,10 +113,13 @@ _GAP_PATTERNS = (
 
 _MODIFY_PATTERNS = (
     re.compile(
-        r"(?:只|帮我)?换(?:一|个|双|件|条|掉|鞋|靴|外套|上衣|下装|裤子|裙子|包|配饰)|"
+        r"(?:只|帮我)?换(?:一|个|双|件|条|掉|成|到|为|鞋|靴|外套|上衣|下装|裤子|裙子|包|配饰)|"
         r"替换(?:掉|成)?|改成"
     ),
-    re.compile(r"(?:鞋|外套|上衣|下装|裤子|裙子|包|配饰).{0,8}(?:不好看|不合适|不要了)"),
+    re.compile(
+        r"(?:鞋|靴|外套|上衣|下装|裤子|裙子|包|配饰|衬衫|毛衣|卫衣|大衣|风衣|夹克|西装|牛仔裤)"
+        r".{0,8}(?:不好看|不合适|不要了)"
+    ),
     re.compile(r"(?:保留|锁定).{0,12}(?:其他|其余|剩下)"),
     re.compile(r"swap|replace|change\s+(?:the\s+)?(?:shoes|top|bottom|coat|bag)", re.IGNORECASE),
 )

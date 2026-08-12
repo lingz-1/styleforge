@@ -21,9 +21,9 @@ KNOWLEDGE_ROOT = Path("knowledge")
 
 
 def test_recommendation_weather_is_copied_into_shared_context_pack(
-    tmp_path: Path,
+    db_dsn: str,
 ) -> None:
-    database_path = _seed_database(tmp_path)
+    database_path = _seed_database(db_dsn)
     weather = {
         "status": "available",
         "source": "open-meteo",
@@ -54,8 +54,8 @@ def test_recommendation_weather_is_copied_into_shared_context_pack(
     assert payload["result"]["environment_context"]["weather"] == weather
 
 
-def test_task_execution_forwards_device_location_context(tmp_path: Path) -> None:
-    database_path = _seed_database(tmp_path)
+def test_task_execution_forwards_device_location_context(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
     captured: dict[str, object] = {}
     workflow = MultiTaskWorkflow(
         database_path=database_path,
@@ -90,8 +90,8 @@ def test_task_execution_forwards_device_location_context(tmp_path: Path) -> None
     assert captured.get("request") == "今晚在上海的露台约会穿什么"
 
 
-def _seed_database(tmp_path: Path, user_id: str = "u") -> Path:
-    database_path = tmp_path / "styleforge.db"
+def _seed_database(db_dsn: str, user_id: str = "u") -> str:
+    database_path = db_dsn
     initialize_database(database_path)
     items = [
         make_item("vest", "top", "White tailored waistcoat vest", "white"),
@@ -115,7 +115,7 @@ def _seed_database(tmp_path: Path, user_id: str = "u") -> Path:
 
 
 def _workflow(
-    database_path: Path,
+    database_path: str,
     agent2_response: dict,
 ) -> tuple[MultiTaskWorkflow, ScriptedExtensionLlm]:
     llm = ScriptedExtensionLlm(
@@ -124,7 +124,7 @@ def _workflow(
             agent2_response,
             approved_review(),
             # Each successful execute also runs one memory-extraction call.
-            {"memories": []},
+            {"evidence": []},
         ]
     )
     workflow = MultiTaskWorkflow(
@@ -185,8 +185,8 @@ def _assert_three_agent_execution(payload: dict, llm: ScriptedExtensionLlm) -> N
     assert all(not step.get("degraded", False) for step in payload["trace"][-3:])
 
 
-def test_local_modification_locks_non_target_items(tmp_path: Path) -> None:
-    database_path = _seed_database(tmp_path)
+def test_local_modification_locks_non_target_items(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
     agent2 = {
         "task_type": "outfit_modify",
         "status": "completed",
@@ -231,8 +231,8 @@ def test_local_modification_locks_non_target_items(tmp_path: Path) -> None:
     _assert_three_agent_execution(payload, llm)
 
 
-def test_style_advice_uses_local_knowledge_as_supporting_evidence(tmp_path: Path) -> None:
-    database_path = _seed_database(tmp_path)
+def test_style_advice_uses_local_knowledge_as_supporting_evidence(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
     agent2 = {
         "task_type": "style_advice",
         "status": "completed",
@@ -261,8 +261,8 @@ def test_style_advice_uses_local_knowledge_as_supporting_evidence(tmp_path: Path
     _assert_three_agent_execution(payload, llm)
 
 
-def test_item_advice_anchors_wardrobe_item_and_builds_outfit(tmp_path: Path) -> None:
-    database_path = _seed_database(tmp_path)
+def test_item_advice_anchors_wardrobe_item_and_builds_outfit(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
     agent2 = {
         "task_type": "item_advice",
         "status": "completed",
@@ -305,8 +305,8 @@ def test_item_advice_anchors_wardrobe_item_and_builds_outfit(tmp_path: Path) -> 
     _assert_three_agent_execution(payload, llm)
 
 
-def test_compatibility_keeps_candidate_transient(tmp_path: Path) -> None:
-    database_path = _seed_database(tmp_path)
+def test_compatibility_keeps_candidate_transient(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
     agent2 = {
         "task_type": "wardrobe_compatibility",
         "status": "completed",
@@ -362,8 +362,8 @@ def test_compatibility_keeps_candidate_transient(tmp_path: Path) -> None:
     _assert_three_agent_execution(payload, llm)
 
 
-def test_targeted_medieval_gap_and_task_run_persistence(tmp_path: Path) -> None:
-    database_path = _seed_database(tmp_path)
+def test_targeted_medieval_gap_and_task_run_persistence(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
     agent2 = {
         "task_type": "wardrobe_gap",
         "status": "completed",
@@ -411,8 +411,8 @@ def test_targeted_medieval_gap_and_task_run_persistence(tmp_path: Path) -> None:
     _assert_three_agent_execution(payload, llm)
 
 
-def test_gap_draft_must_match_agent1_missing_elements(tmp_path: Path) -> None:
-    database_path = _seed_database(tmp_path)
+def test_gap_draft_must_match_agent1_missing_elements(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
     invalid_agent2 = {
         "task_type": "wardrobe_gap",
         "status": "completed",
@@ -464,8 +464,8 @@ def test_gap_draft_must_match_agent1_missing_elements(tmp_path: Path) -> None:
     assert len(llm.calls) == 2
 
 
-def test_extension_without_llm_fails_and_is_persisted(tmp_path: Path) -> None:
-    database_path = _seed_database(tmp_path)
+def test_extension_without_llm_fails_and_is_persisted(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
     workflow = MultiTaskWorkflow(
         database_path=database_path,
         knowledge_root=KNOWLEDGE_ROOT,
@@ -483,8 +483,8 @@ def test_extension_without_llm_fails_and_is_persisted(tmp_path: Path) -> None:
     assert "Agent 1 requires" in stored["error_message"]
 
 
-def test_needs_clarification_is_persisted_as_a_terminal_status(tmp_path: Path) -> None:
-    database_path = _seed_database(tmp_path)
+def test_needs_clarification_is_persisted_as_a_terminal_status(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
     agent2 = {
         "task_type": "item_advice",
         "status": "needs_clarification",
@@ -525,8 +525,8 @@ def test_needs_clarification_is_persisted_as_a_terminal_status(tmp_path: Path) -
     _assert_three_agent_execution(payload, llm)
 
 
-def test_agent2_repairs_incomplete_item_advice_before_critic(tmp_path: Path) -> None:
-    database_path = _seed_database(tmp_path)
+def test_agent2_repairs_incomplete_item_advice_before_critic(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
     invalid_draft = {
         "task_type": "item_advice",
         "status": "needs_clarification",
@@ -574,8 +574,8 @@ def test_agent2_repairs_incomplete_item_advice_before_critic(tmp_path: Path) -> 
     assert "needs_clarification is forbidden" in llm.calls[2]["user"]
 
 
-def test_agent3_rejection_recomposes_once_and_reviews_again(tmp_path: Path) -> None:
-    database_path = _seed_database(tmp_path)
+def test_agent3_rejection_recomposes_once_and_reviews_again(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
     first_draft = _item_advice_draft(summary="给出一套基础组合")
     revised_draft = _item_advice_draft(summary="补充锚点、分层逻辑和完整通用搭配")
     llm = ScriptedExtensionLlm(

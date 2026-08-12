@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import sqlite3
+from styleforge.repositories.database import Connection
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 def start_import_run(
-    connection: sqlite3.Connection,
+    connection: Connection,
     source_path: Path,
     source_revision: str,
     image_root: Path | None,
@@ -21,7 +21,7 @@ def start_import_run(
         INSERT INTO dataset_import_runs (
             run_id, dataset_name, source_path, source_revision, image_root,
             status, processed_count, started_at
-        ) VALUES (?, ?, ?, ?, ?, 'running', 0, ?)
+        ) VALUES (%s, %s, %s, %s, %s, 'running', 0, %s)
         """,
         (
             run_id,
@@ -35,34 +35,34 @@ def start_import_run(
     return run_id
 
 
-def update_progress(connection: sqlite3.Connection, run_id: str, processed_count: int) -> None:
+def update_progress(connection: Connection, run_id: str, processed_count: int) -> None:
     connection.execute(
-        "UPDATE dataset_import_runs SET processed_count = ? WHERE run_id = ?",
+        "UPDATE dataset_import_runs SET processed_count = %s WHERE run_id = %s",
         (processed_count, run_id),
     )
 
 
 def finish_import_run(
-    connection: sqlite3.Connection,
+    connection: Connection,
     run_id: str,
     processed_count: int,
 ) -> None:
     connection.execute(
         """
         UPDATE dataset_import_runs
-        SET status = 'completed', processed_count = ?, finished_at = ?
-        WHERE run_id = ?
+        SET status = 'completed', processed_count = %s, finished_at = %s
+        WHERE run_id = %s
         """,
         (processed_count, datetime.now(timezone.utc).isoformat(), run_id),
     )
 
 
-def fail_import_run(connection: sqlite3.Connection, run_id: str, error: BaseException) -> None:
+def fail_import_run(connection: Connection, run_id: str, error: BaseException) -> None:
     connection.execute(
         """
         UPDATE dataset_import_runs
-        SET status = 'failed', error_message = ?, finished_at = ?
-        WHERE run_id = ?
+        SET status = 'failed', error_message = %s, finished_at = %s
+        WHERE run_id = %s
         """,
         (str(error)[:2000], datetime.now(timezone.utc).isoformat(), run_id),
     )

@@ -1,8 +1,52 @@
 # StyleForge 开发过程记录
 
-> 更新时间：2026-08-10
+> 更新时间：2026-08-12
 
 本文按开发批次记录“为什么改、如何设计、实现顺序、遇到的问题和验证证据”。当前能力结论以[项目状态](PROJECT_STATUS.md)为准；具体故障按编号收录在[问题与解决记录](ISSUE_LOG.md)。
+
+## 2026-08-12：部署环境升级（PostgreSQL 全量迁移 + Redis 会话缓存 + Chroma RAG）
+
+### 1. 需求与边界
+
+定稿技术栈把 SQLite 全量迁移到 PostgreSQL，并接入两个可选外部服务。开发前确认四个决策：**PG 全量一次性迁移**（20 张表 15,271 行 8.2MB）、**PG 由用户安装**（PG 17.10，`E:\PostgreSQL\`，trust 认证，127.0.0.1:5432，role `styleforge`，库 `styleforge`/`styleforge_test`）、**Redis 只接会话状态缓存**、**Chroma RAG 用 FashionCLIP 过渡**（复用 `encode_texts`，512 维）。
+
+边界：
+
+- 不引入 SQLAlchemy；裸 psycopg3 最贴合现状。`pgvector` 列为后续（本期 BYTEA 原样搬）。
+- 外部服务遵循既有模式：`enabled` 开关 + None 降级 + 吞异常 + 注入式测试。
+- 衣柜检索保持 NumPy/FAISS 不动；Chroma 只做知识文本检索，allow-list 隔离是隐私设计。
+- 真实连接串放项目根 `.env`（`STYLEFORGE_DATABASE_DSN` 等），不打印、不提交。
+
+### 2. 方言移植要点（SQLite → PostgreSQL）
+
+- 连接层：`connect(path)` → `connect(dsn)`，psycopg3 + 自定义 `sqlite_like_row_factory`；`PgConnection` 代理类为 psycopg3 Connection 补 `executemany`，`row["col"]`/`row[0]` 兼容旧 `sqlite3.Row`。
+- `contextmanager` 语义：`PgConnection` 显式定义 `__enter__`/`__exit__`（隐式特殊方法查找不走 `__getattr__`），`with connect(dsn)` 与旧 `sqlite3.Connection` 一致。
+- 方言点：`AUTOINCREMENT`→`BIGSERIAL`、`BLOB`→`BYTEA`、`rowid`（3 处排序 tiebreaker）→`chat_messages.message_seq BIGSERIAL`、`cursor.lastrowid`→`INSERT ... RETURNING`、`LIKE`→`ILIKE`、`?`→`%s`、`lastrowid`→`RETURNING`。
+
+### 3. 实现顺序
+
+1. PG schema 先行：`artifacts/init_pg_schema.py`（gitignored）建 20 表；`artifacts/migrate_sqlite_to_pg.py` 逐表迁移并 count 对比，20 表行数 SQLite == PG 零差异。
+2. `core/config.py` 增 `database_dsn`/`redis_enabled`/`redis_url`/`redis_ttl`/`chroma_dir`；`load_dotenv(override=False)`，窗口 env 优先。
+3. `repositories/database.py` 重写为 PG 连接层（`SCHEMA_VERSION=10`），SQLite 路径与 DDL 删除；`config.py` 删 `database_path`，只留 `database_dsn`。
+4. 14 个 repo + services/pipelines/evaluation 裸 SQL 分批移植（`?`→`%s`、`rowid`→`message_seq`、`ILIKE`、`RETURNING`）。
+5. 调用方连接注入：`api.py`/`graph.py`/`task_workflow.py`/services 等约 33 个文件，`database_session(settings.database_path)` → `database_session(settings)`。
+6. Redis 读穿缓存：`core/redis.py::redis_client_from_settings`（禁用或失败返回 None）；`chat_service.set_session_outfit_cache` 写 `session:<session_id>`，`get_session_outfit_context` 命中读/未命中重算写回；删会话失效；异常回落 DB。
+7. Chroma RAG：`integrations/embeddings/text_embedder.py` 包装 FashionCLIP `encode_texts`（超 77 token 分块）；`integrations/vectorstores/chroma_store.py`（PersistentClient，cosine）；`knowledge/{chunking,ingestion,indexer}.py` + CLI `styleforge-knowledge-index`；`knowledge/retriever.py::search` 加向量路径（关键词回退保留），`source="chroma_rag"`。
+8. 测试层：`tests/conftest.py` 建 PG fixture——每测试独立 schema（`options=-csearch_path%3D<schema>`），`db_dsn`/`db_conn` 隔离，`STYLEFORGE_TEST_DATABASE_DSN` 未设置时 skip；13 个 `tmp_path / "*.db"` 模式改 `db_dsn`；`test_database_schema.py` 重写为 `information_schema` 断言；`test_knowledge_rag.py` 新增 12 测试。
+
+### 4. 遇到的问题与修复
+
+- **pytest 全 skip（19 skipped）**：pytest 进程没加载 `.env`，conftest 模块级 `import styleforge.core.config` 触发 dotenv side effect 后修复。
+- **`AttributeError: __enter__`**：`with connect(dsn)` 报错，隐式特殊方法查找不走实例 `__getattr__` → 在 `PgConnection` 显式定义 `__enter__`/`__exit__`。
+- **sed 误改测试名**：批量 sed 只匹配单行签名，把 `test_batch_recognition.py` 的 5 个测试名误改，逐一手工恢复。
+- **`_make_workflow() missing 'llm'`**：多行调用漏插 `db_dsn`，手工补齐。
+- **ChromaStore.query include 缺 `documents`**、`search()` 向量路径提前 return、huggingface-hub 降级 0.36.2。
+
+### 5. 验证证据
+
+- 数据侧：20 表 15,271 行 SQLite == PG 逐表零差异。
+- 全量 Pytest **382 passed**（原 364 + 新增 18）、`compileall`、Ruff clean。
+- `artifacts/verify_pg_schema_isolation.py` 证明每测试独立 schema 端到端可行（20 表进独立 schema、public 零泄漏、drop CASCADE 清理）。
 
 ## 2026-08-10：P5 天气上下文接入三个主 Agent
 
@@ -343,3 +387,112 @@ API（`api.py`）：
 - 新增 32 个测试：`test_follow_up_detection.py`、`test_memory_extractor.py`、`test_memory_repository.py`、`test_chat_repository.py`、`test_session_multiturn.py`（核心多轮）、`test_chat_api.py`、`test_memory_api.py`，扩展 `test_context_pack.py`（memory_profile 注入/省略）与 `test_database_schema.py`（v10）。
 - 全量回归：**364 passed**；`ruff check apps/api/styleforge tests` → All checks passed；`npm run build` 通过（新增 MemoriesPage / TaskResultView chunk 正常产出）。
 - 端到端人工复现见任务 9 验收记录（curl 建会话 → 三连追问 → GET 会话链；手动记忆 → 注入 → 遗忘）。
+
+## 12. Context-Aware 自适应偏好记忆系统（2026-08-12，已实现）
+
+### 12.1 需求与已确认决策
+
+按《项目文档/StyleForge 记忆系统实现方案.md》落地记忆闭环：`实时交互状态 → Interaction Event → Preference Evidence → Preference Model → Memory Resolver → 三 Agent 差异化注入`。用户拍板三个决策：
+
+- **数据模型**：不保留旧 `user_memories`，按方案新建维度化偏好模型表（旧数据仅 5 条示例，直接废弃）。
+- **实现范围**：完整闭环一次做（事件 → 证据 → 聚合 → 生命周期/衰减 → Resolver → 三 Agent 差异化 → consolidation）。
+- **行为来源**：后端埋点 + 前端新增行为交互按钮。
+
+核心原则：**行为是事实、Evidence 是对事实的解释、Preference 是系统当前的假设**；**LLM 负责理解，确定性程序负责记忆管理**。
+
+### 12.2 实现清单
+
+Schema（`repositories/database.py`，v10→v11）：删 `user_memories`，新增 `interaction_events`（行为事实）、`preference_evidence`（标准化证据）、`preference_model`（维度化偏好，UNIQUE(user_id, dimension, attribute, value)），全部 `CREATE TABLE IF NOT EXISTS` 幂等兼容。
+
+新仓库（`repositories/`）：
+
+- `interaction_event_repository.py`：`record_event` / `list_events`。
+- `preference_evidence_repository.py`：`add_evidence` / `list_evidence` / `list_evidence_for_key` / `delete_evidence`。
+- `preference_model_repository.py`：`list_preferences`（active/lifecycle 过滤）/ `upsert_preference`（维度键）/ `get_preference_by_key` / `soft_forget`（软删除可复活）。
+
+新服务（`services/`）：
+
+- `memory_evidence.py`：`behavior_evidence_from_event`（确定性事件→证据，`_BEHAVIOR_RULES`）+ `record_and_fold` + 重导出 `extract_language_evidence`。
+- `memory_aggregator.py`：`apply_evidence` 幂等全量重算（置信度公式、lifecycle 升降、decay_policy、expires_at）。
+- `memory_decay.py`：读取路径 `effective_confidence = c·exp(-λ·elapsed_days)`（none/slow/normal）+ `is_expired`。
+- `memory_resolver.py`：五桶拆分 + 场景匹配 + `AGENT_BUCKETS` 三 Agent 差异化（retriever 全量 / composer 前三桶 / critic 仅 stable≥0.6 + avoidances≥0.5）。
+- `memory_consolidation.py`：`consolidate_session` 按 (dim, attr, value, polarity) 去重留最强 + 重跑幂等聚合。
+
+LLM 证据（`llm/memory_schema.py` / `memory_prompts.py` / `services/memory_extractor.py`）：`MemoryExtract` → `MemoryEvidence{dimension, attribute, value, polarity, strength, scope}`；prompt 按新 schema 重写；best-effort 容忍不变。
+
+改造（注入链路）：
+
+- `api.py`：记忆 API 重构到 `preference_model`（POST 走 `explicit_preference` 强证据晋升 long_term）；新增 `POST /users/{user_id}/events`；`PUT /preferences/{user_id}/evaluation`、`POST /tasks/execute` 埋点（`_record_task_event`，OUTFIT_MODIFY 的 `item_replaced` 在 `task_workflow.py` 内记录）；会话结束调用 `consolidate_session`。
+- `workflow/graph.py`：`_load_memory_profile` → `_load_memory_packs`，三 node 各自 `resolve(..., agent_role=...)` 差异化注入。
+- `workflow/task_workflow.py`：`_extract_memories` → 语言证据 + `apply_evidence` + 按角色 resolver 注入；`core/redis.py` 会话缓存追加 `session_signals`。
+- `agents/*.py` + `context/builder.py` + `llm/prompts.py` + `llm/extension_prompts.py`：`memory_profile` 语义改为 MemoryPack 分桶渲染。
+
+前端（`apps/web/src`）：
+
+- `services/api.js`：新增 `recordBehaviorEvent`；memory 函数参数 memoryId → preferenceId。
+- `components/TaskResultView.vue`：outfit 卡片 4 行为按钮（采纳/换掉/好评/差评）+ 单品级「换掉这件」，统一 `POST /users/{user_id}/events`。
+- `pages/RecommendPage.vue`：透传 `:user-id`。
+- `pages/MemoriesPage.vue`：重构为新维度化偏好模型（dimension/attribute/value + polarity/lifecycle + 支持/反对计数）。
+
+### 12.3 遇到的问题
+
+- **Resolver `TypeError: unhashable type: 'slice'`**：`session_signals` 桶初始化为空 dict `{}`，`_bucket_rows` 对其切片报错。修复：resolver 对 `session_signals` 桶直接透传 dict，不切片。
+- **decay 测试 `_pref() takes 0 positional arguments but 3 were given`**：`_pref(1.0, "slow", observed)` 误用位置参数。修复为关键字参数。
+- **`assert not soft_forget(...)` 失败**：`soft_forget` 的 UPDATE 即使行已 `active=0` 也 rowcount=1 返回 True。删除第二次 soft_forget 的断言（保留 missing id 返回 False）。
+- **Resolver 测试 `assert {} == []` 失败**：不允许的桶返回 `{}`（空 dict）而非 `[]`。修正 composer/critic 测试断言为 `== {}`（不允许）与 `== []`（允许但空）。
+- **`POST /catalog/items` 端点不存在**：行为事件证据测试原用不存在的 HTTP 端点 seed 品类。改为在创建 TestClient 前用 `upsert_items` 直接入库。
+- **chat_service 返回 `session_signals` 破坏旧测试**：无 outfit 时返回 `{current_outfit_id: "", current_item_ids: [], session_signals: {}}`，导致两个旧测试断言不含该键失败。修复：无 outfit 时返回 `{current_outfit_id: "", current_item_ids: []}`（不带 session_signals），保持向后兼容。
+
+### 12.4 验证证据
+
+- 新增/重写测试：`test_interaction_event_repository.py`、`test_preference_evidence_repository.py`、`test_preference_model_repository.py`、`test_memory_aggregator.py`、`test_memory_decay.py`、`test_memory_resolver.py`、`test_memory_consolidation.py`、重写 `test_memory_extractor.py`（新 MemoryEvidence schema）、`test_memory_api.py`（preference CRUD + `POST /users/{u}/events` + 行为事件折叠证据）、`test_database_schema.py`（v11 三表存在、`user_memories` 不在）；删除 `test_memory_repository.py`；适配 `test_context_pack.py` / `test_session_multiturn.py` / `test_chat_api.py` / `test_extended_tasks.py` / `test_extended_task_api.py` 到新 schema。
+- 全量回归：**414 passed**（1 个无关 StarletteDeprecationWarning）；`compileall` 通过；Ruff clean；`npm run build` 通过（MemoriesPage / TaskResultView / RecommendPage chunk 正常产出，仅 500kB chunk 尺寸警告非错误）。
+
+### 12.5 泛化改造（scope 修复 + 属性泛化 + 归因维度 + 冲突检测）
+
+对 demo 结果做深度技术评审后，用户拍板「全做：scope + 泛化 + 归因维度」。本小节落地的四件事：
+
+**scope 修复（违背方案的旧 bug）**：原 `behavior_evidence_from_event` 所有行为证据 `scope={"type":"global"}`，导致「换掉一件 dress-1」直接成为 global 级 negative category=dress。修复：弱证据 scope 全部改为 contextual + 场景词（`_OCCASION_TERMS` / `_FORMALITY_TERMS` 从 `context.request` 提取）。
+
+**item→category 泛化**：单次行为只记 item 级证据；同品类、同极性、**不同 item** 累计 ≥ 3 件（`CATEGORY_INDUCTION_THRESHOLD=3`，`count % 3 == 0` 触发）才归纳出 category 级证据（strength 0.15）。分层严格化：不喜欢当前这件 ≠ 不喜欢这一品类。
+
+**归因维度**：新增 `appearance/color_family=<颜色>` 归因（positive 0.2 / negative 0.1）。fit/style 因 catalog `features_json` 无结构化字段（为杂乱文本）而暂缓。
+
+**冲突检测（memory_aggregator）**：仅对 `scope.type=global` 的行，同 `(dimension, attribute)` 存在相反 polarity 的其他 value 时 confidence × 0.9 + `source_summary.conflict_with` 互标对方 value。`apply_evidence` 末尾对受影响 attribute 的**所有**行统一扫描（矛盾双方都降权，而非只后写入方）。
+
+**Resolver 上下文门控修正**：原实现把 contextual 行按 lifecycle 分流——long_term 的 contextual 行直接进 `stable_preferences` 跳过场景匹配，导致「周末=复古」泄漏进工作场景。改为：先做上下文匹配，不匹配直接丢弃；匹配且为 long_term_candidate/long_term（≥0.6）的**同时**进 contextual + stable 两桶（供 composer/critic 可见本场景长期偏好）。
+
+**验证**：新增 `tests/test_memory_generalization.py`（8 场景：单次拒绝不归纳 / 3 件归纳 / color 归因 / 场景激活+不泄漏 / 高置信 short_term 不进 stable / 会话方向信号 / explicit 对冲归纳 / 跨 value 冲突降权）；`test_memory_api.py` 行为事件断言改为 item+color 两行无 category；demo 重跑确认 item 级 + color 数据流。全量回归 **422 passed**，compileall + Ruff clean。
+
+## 13. 记忆提炼 prompt v2.1→v2.4 优化（2026-08-12，已实现）
+
+### 13.1 需求与背景
+
+第 12.5 节评估集（`evals/cases/memory_extraction.json`，33 例）基线 F1 0.9213（prompt v2.3），但用户真实测试 21+ 条 + 跑 12 例后报告 3 个确定性问题，指向 prompt 优化：
+
+1. **global/contextual 判定漂移**：同一请求多次调用结果不一致（「平时上班我就爱穿衬衫」的衬衫一次 global、一次 contextual(上班)），是最大 F1 拖累。
+2. **attribute 归类分歧**：「正式场合」被归 `formality` 而非 `occasion`；「牛仔」被归 `material` 而非 `category`。
+3. **复杂口语漏/多拆**：每例约漏 1 条或多拆 1 条。
+
+另修正两处评估集自身设计错误：mem-01 漏 `category=裤子`（已补）、mem-12 把「这件大衣别推」误标成长期 item 偏好——**item 级由行为事件产出，语言证据不该提炼**（已改空预期）。
+
+### 13.2 实现清单（`llm/memory_prompts.py`，v2.0→v2.4）
+
+- **移除 `item` attribute**：9 属性定版（category/color/fit/material/style/brand/occasion/formality/detail）。新增 `ITEM_RULE`：单件指代（「这件/那条/这双」）不提炼为偏好，单品级由行为事件追踪；只有泛指一类才提炼 category。
+- **`SCOPE_GUIDE` 确定性判定（7 条优先级）**：① 习惯陈述（平时/日常/一直/总是/就爱）中的单品/颜色/风格偏好 → global（场景词只是背景，不把「平时上班我就爱穿衬衫」的衬衫标 contextual）；② 明确限定「X的话/在X/只有X才/X场合/通勤穿惯了X」绑定唯一场景 → contextual；③ 对具体场景的着装要求（「面试要正式」）→ contextual(该场景)；④ 场合本身作为喜好对象（occasion 偏好）→ contextual；⑤ 其余一般提及 → global；⑥ 一次性场景（「明天面试」「周五见闺蜜」）不改变其他偏好 scope，只有对场景本身的着装要求才 contextual；⑦ 否定/厌恶句（「太紧的难受」「不喜欢修身」）默认 global。
+- **`DISAMBIGUATION_GUIDE`**：正式/休闲/商务作程度修饰→formality，作场合名词→occasion；牛仔默认→category（仅面料质感→material）；花花绿绿/花哨/印花/素色→style（非 color）；occasion value 用裸场合名词（「正式场合」→ value=正式）。
+- **弱信号不提炼**：还好/可以/还行/不算讨厌 → 跳过；只有明确喜欢或明确厌恶才提炼。否定拆分明确「配饰多了反而累赘」按 `配饰多=negative` 提炼，不翻转成 positive 的配饰克制。
+- **few-shot 扩到 6 例**：新增习惯句+单件不提炼（平时上班就爱穿衬衫+这件大衣别推）、场合消歧（婚礼要正式+别给牛仔）、弱信号（西装裤还好）。
+
+### 13.3 遇到的问题
+
+- **runner `_PROMPT_VERSION` 硬编码漂移**：`evals/runners/evaluate_memory_extraction.py` 行 38 写死 `"memory-evidence-v2.0"`，prompt 版本改动后报告版本号不跟。修复：改为 `from styleforge.llm.memory_prompts import MEMORY_PROMPT_VERSION` 直接引用，消除双源。
+- **few-shot 与 golden 冲突**：初版「平时上班就爱穿衬衫」few-shot 只输出衬衫 global，但 mem-05 golden 期望还含 `occasion=上班 contextual` 一条——习惯句里场合词仍可作独立 occasion 偏好。已把 few-shot 与 golden 对齐。
+- **scope 规则 ① 与 ② 边界**：规则 ① 说场合词只是背景，规则 ② 又允许「通勤穿惯了优衣库」标 contextual——需要在 prompt 里写明区别：习惯句若明确绑定唯一场景（「通勤穿惯了X」）按 ②，仅作背景场合（「平时上班就爱穿衬衫」的上班）按 ① 仍可在 occasion 维度单独提炼。
+
+### 13.4 验证证据
+
+- 全量回归 **455 passed**（含 443 基线上多出泛化/评估新增；首轮 1 个偶发 `test_global_conflict_ignores_contextual_opposite` 失败，重跑确认 PG 残留偶发、非代码问题）；compileall + Ruff clean。
+- 真实 LLM 评估集 33 例，v2.4 连续 3 次运行分布：F1 **0.847 / 0.911 / 0.921**（run3 精确复现文档记录的 v2.3 基线 0.9213，证实当前内容与基线一致）；Precision 0.837~0.872、Recall 0.857~0.976、极性一致率 1.00、scope 一致率 0.972~0.976。run2/run3 空案例零误报，run1 有 1 例空误报——符合 LLM 非确定性（temperature 0.2），单次结果在 F1 ~0.91 附近波动。
+- 用户报告的三个确定性问题在 v2.4 均被规则覆盖：mem-05（scope 漂移）修复为 global 确定性、mem-08（正式→occasion）/mem-11（牛仔→category）/mem-09（花花绿绿→style）归类修复、mem-02（西装裤还好）弱信号不再提炼、mem-07（配饰多）不翻转极性。
+

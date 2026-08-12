@@ -8,21 +8,20 @@ from styleforge.repositories.user_preferences_repository import (
 )
 
 
-def _db(tmp_path):
-    path = tmp_path / "prefs.sqlite"
-    initialize_database(path)
-    return path
+def _db(db_dsn):
+    initialize_database(db_dsn)
+    return db_dsn
 
 
-def test_default_weights_when_unset(tmp_path) -> None:
-    path = _db(tmp_path)
+def test_default_weights_when_unset(db_dsn) -> None:
+    path = _db(db_dsn)
     with database_session(path) as connection:
         weights = get_evaluation_weights(connection, "u")
     assert weights == DEFAULT_EVALUATION_WEIGHTS
 
 
-def test_save_and_read_weights(tmp_path) -> None:
-    path = _db(tmp_path)
+def test_save_and_read_weights(db_dsn) -> None:
+    path = _db(db_dsn)
     with database_session(path) as connection:
         saved = save_evaluation_weights(connection, "u", {"wearability": 0.5})
         loaded = get_evaluation_weights(connection, "u")
@@ -30,15 +29,15 @@ def test_save_and_read_weights(tmp_path) -> None:
     assert abs(sum(loaded.values()) - 1.0) < 1e-6
 
 
-def test_save_normalizes_input(tmp_path) -> None:
-    path = _db(tmp_path)
+def test_save_normalizes_input(db_dsn) -> None:
+    path = _db(db_dsn)
     with database_session(path) as connection:
         saved = save_evaluation_weights(connection, "u", {"wearability": 100})
     assert abs(sum(saved.values()) - 1.0) < 1e-6
 
 
-def test_weights_scoped_by_user(tmp_path) -> None:
-    path = _db(tmp_path)
+def test_weights_scoped_by_user(db_dsn) -> None:
+    path = _db(db_dsn)
     with database_session(path) as connection:
         save_evaluation_weights(connection, "a", {"wearability": 0.5})
         weights_a = get_evaluation_weights(connection, "a")
@@ -47,8 +46,8 @@ def test_weights_scoped_by_user(tmp_path) -> None:
     assert weights_b == DEFAULT_EVALUATION_WEIGHTS
 
 
-def test_save_requires_user_id(tmp_path) -> None:
-    path = _db(tmp_path)
+def test_save_requires_user_id(db_dsn) -> None:
+    path = _db(db_dsn)
     with database_session(path) as connection:
         try:
             save_evaluation_weights(connection, "", {"wearability": 0.5})

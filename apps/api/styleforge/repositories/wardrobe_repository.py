@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+from styleforge.repositories.database import Connection
 from collections.abc import Iterable
 from datetime import datetime, timezone
 
@@ -12,14 +12,14 @@ from styleforge.core.schemas import CatalogItem, EmbeddingStatus, ImageStatus
 
 
 def add_items(
-    connection: sqlite3.Connection,
+    connection: Connection,
     user_id: str,
     item_ids: Iterable[str],
 ) -> int:
     unique_ids = tuple(dict.fromkeys(item_ids))
     if not unique_ids:
         return 0
-    placeholders = ",".join("?" for _ in unique_ids)
+    placeholders = ",".join("%s" for _ in unique_ids)
     existing_ids = {
         row[0]
         for row in connection.execute(
@@ -35,7 +35,7 @@ def add_items(
     connection.executemany(
         """
         INSERT INTO wardrobe_items(user_id, item_id, active, added_at)
-        VALUES (?, ?, 1, ?)
+        VALUES (%s, %s, 1, %s)
         ON CONFLICT(user_id, item_id) DO UPDATE SET active = 1
         """,
         ((user_id, item_id, added_at) for item_id in unique_ids),
@@ -43,21 +43,21 @@ def add_items(
     return len(unique_ids)
 
 
-def deactivate_all_items(connection: sqlite3.Connection, user_id: str) -> int:
+def deactivate_all_items(connection: Connection, user_id: str) -> int:
     cursor = connection.execute(
-        "UPDATE wardrobe_items SET active = 0 WHERE user_id = ? AND active = 1",
+        "UPDATE wardrobe_items SET active = 0 WHERE user_id = %s AND active = 1",
         (user_id,),
     )
     return cursor.rowcount
 
 
-def list_items(connection: sqlite3.Connection, user_id: str) -> list[CatalogItem]:
+def list_items(connection: Connection, user_id: str) -> list[CatalogItem]:
     rows = connection.execute(
         """
         SELECT catalog_items.*
         FROM wardrobe_items
         JOIN catalog_items USING(item_id)
-        WHERE wardrobe_items.user_id = ? AND wardrobe_items.active = 1
+        WHERE wardrobe_items.user_id = %s AND wardrobe_items.active = 1
         ORDER BY catalog_items.item_id
         """,
         (user_id,),
@@ -84,7 +84,7 @@ def list_items(connection: sqlite3.Connection, user_id: str) -> list[CatalogItem
 
 
 def choose_demo_items(
-    connection: sqlite3.Connection,
+    connection: Connection,
     item_types: Iterable[str],
     per_type: int,
 ) -> list[str]:
@@ -97,9 +97,9 @@ def choose_demo_items(
             for row in connection.execute(
                 """
                 SELECT item_id FROM catalog_items
-                WHERE item_type = ? AND name <> '' AND color <> ''
+                WHERE item_type = %s AND name <> '' AND color <> ''
                 ORDER BY item_id
-                LIMIT ?
+                LIMIT %s
                 """,
                 (item_type, per_type),
             )
@@ -108,7 +108,7 @@ def choose_demo_items(
 
 
 def choose_demo_outfit_items(
-    connection: sqlite3.Connection,
+    connection: Connection,
     outfit_count: int,
     split: str = "train",
 ) -> tuple[list[str], list[str]]:
@@ -121,7 +121,7 @@ def choose_demo_outfit_items(
         FROM dataset_outfits AS o
         JOIN dataset_outfit_items AS oi ON oi.outfit_id = o.outfit_id
         JOIN catalog_items AS c ON c.item_id = oi.item_id
-        WHERE o.split = ?
+        WHERE o.split = %s
         ORDER BY o.outfit_id, oi.position
         """,
         (split,),

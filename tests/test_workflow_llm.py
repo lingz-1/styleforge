@@ -85,29 +85,34 @@ def _catalog_row(item: CatalogItem) -> tuple:
     )
 
 
-def _seed_database(db_path: Path) -> None:
-    initialize_database(db_path)
-    with database_session(db_path) as connection:
+def _seed_database(db_dsn: str) -> None:
+    initialize_database(db_dsn)
+    with database_session(db_dsn) as connection:
         for item in WARDROBE_ITEMS:
             connection.execute(
-                "INSERT OR REPLACE INTO catalog_items VALUES "
-                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO catalog_items VALUES "
+                "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (item_id) DO NOTHING",
                 _catalog_row(item),
             )
             connection.execute(
-                "INSERT OR REPLACE INTO wardrobe_items "
+                "INSERT INTO wardrobe_items "
                 "(user_id, item_id, active, favorite, notes, added_at) "
-                "VALUES (?, ?, 1, 0, '', ?)",
+                "VALUES (%s, %s, 1, 0, '', %s) "
+                "ON CONFLICT (user_id, item_id) DO NOTHING",
                 (USER, item.item_id, "2026-01-01T00:00:00+00:00"),
             )
 
 
-def _settings(tmp_path: Path, *, llm_enabled: bool = False) -> Settings:
+def _settings(
+    tmp_path: Path, db_dsn: str, *, llm_enabled: bool = False
+) -> Settings:
     return Settings(
         metadata_path=tmp_path / "meta.json",
         outfit_path=tmp_path / "outfit.json",
         image_root=None,
-        database_path=tmp_path / "db.sqlite",
+        knowledge_root=Path("knowledge"),
+        database_dsn=db_dsn,
         artifact_root=tmp_path / "artifacts",
         embedding_dir=tmp_path / "artifacts" / "embeddings" / "fashionclip",
         index_dir=tmp_path / "artifacts" / "index" / "fashionclip",
@@ -118,13 +123,14 @@ def _settings(tmp_path: Path, *, llm_enabled: bool = False) -> Settings:
 
 def _make_workflow(
     tmp_path: Path,
+    db_dsn: str,
     llm: FakeLlm | None,
     *,
     weather_tool=None,
 ) -> StyleForgeWorkflow:
-    settings = _settings(tmp_path, llm_enabled=llm is not None)
+    settings = _settings(tmp_path, db_dsn, llm_enabled=llm is not None)
     workflow = StyleForgeWorkflow(
-        database_path=settings.database_path,
+        database_path=settings.database_dsn,
         embedding_dir=settings.embedding_dir,
         model_dir=settings.artifact_root / "models",
         device="cpu",
@@ -202,10 +208,10 @@ def _agent3_payload(decision: str = "accept", **overrides) -> dict:
     return payload
 
 
-def test_workflow_accept_with_three_llm_calls(tmp_path: Path) -> None:
-    _seed_database(tmp_path / "db.sqlite")
+def test_workflow_accept_with_three_llm_calls(tmp_path: Path, db_dsn: str) -> None:
+    _seed_database(db_dsn)
     fake = FakeLlm([_agent1_payload(), _agent2_payload(), _agent3_payload()])
-    workflow = _make_workflow(tmp_path, fake)
+    workflow = _make_workflow(tmp_path, db_dsn, fake)
 
     output = workflow.recommend(user_id=USER, request=REQUEST)
 
@@ -223,7 +229,7 @@ def test_workflow_accept_with_three_llm_calls(tmp_path: Path) -> None:
     assert all(score > 0 for score in scores)
 
 
-def test_workflow_weather_context_is_shared_with_three_agents(tmp_path: Path) -> None:
+def test_workflow_weather_context_is_shared_with_three_agents(tmp_path: Path, db_dsn: str) -> None:
     class FakeWeatherTool:
         def __init__(self) -> None:
             self.inputs = []
@@ -253,7 +259,7 @@ def test_workflow_weather_context_is_shared_with_three_agents(tmp_path: Path) ->
                 condition="小雨",
             )
 
-    _seed_database(tmp_path / "db.sqlite")
+    _seed_database(db_dsn)
     first_agent1 = _agent1_payload()
     first_agent1["context_requirements"] = {
         "weather": {
@@ -278,6 +284,7 @@ def test_workflow_weather_context_is_shared_with_three_agents(tmp_path: Path) ->
     fake_weather = FakeWeatherTool()
     workflow = _make_workflow(
         tmp_path,
+        db_dsn,
         fake_llm,
         weather_tool=fake_weather,
     )
@@ -297,17 +304,16 @@ def test_workflow_weather_context_is_shared_with_three_agents(tmp_path: Path) ->
     assert "temperature_min_c" in fake_llm.calls[3]["user"]
 
 
-def test_workflow_persists_semantic_detail(tmp_path: Path) -> None:
-    db_path = tmp_path / "db.sqlite"
-    _seed_database(db_path)
+def test_workflow_persists_semantic_detail(tmp_path: Path, db_dsn: str) -> None:
+    _seed_database(db_dsn)
     fake = FakeLlm([_agent1_payload(), _agent2_payload(), _agent3_payload()])
-    workflow = _make_workflow(tmp_path, fake)
+    workflow = _make_workflow(tmp_path, db_dsn, fake)
 
     output = workflow.recommend(user_id=USER, request=REQUEST)
 
-    with database_session(db_path) as connection:
+    with database_session(db_dsn) as connection:
         row = connection.execute(
-            "SELECT semantic_detail_json FROM styling_runs WHERE run_id = ?",
+            "SELECT semantic_detail_json FROM styling_runs WHERE run_id = %s",
             (output.result.run_id,),
         ).fetchone()
     assert row is not None
@@ -317,8 +323,8 @@ def test_workflow_persists_semantic_detail(tmp_path: Path) -> None:
     assert detail["llm_call_count"] == 3
 
 
-def test_workflow_recompose_then_accept(tmp_path: Path) -> None:
-    _seed_database(tmp_path / "db.sqlite")
+def test_workflow_recompose_then_accept(tmp_path: Path, db_dsn: str) -> None:
+    _seed_database(db_dsn)
     fake = FakeLlm(
         [
             _agent1_payload(),
@@ -332,7 +338,7 @@ def test_workflow_recompose_then_accept(tmp_path: Path) -> None:
             _agent3_payload(),
         ]
     )
-    workflow = _make_workflow(tmp_path, fake)
+    workflow = _make_workflow(tmp_path, db_dsn, fake)
 
     output = workflow.recommend(user_id=USER, request=REQUEST)
 
@@ -342,8 +348,8 @@ def test_workflow_recompose_then_accept(tmp_path: Path) -> None:
     assert len(output.result.recommendations) == 3
 
 
-def test_workflow_retrieve_more_then_accept(tmp_path: Path) -> None:
-    _seed_database(tmp_path / "db.sqlite")
+def test_workflow_retrieve_more_then_accept(tmp_path: Path, db_dsn: str) -> None:
+    _seed_database(db_dsn)
     fake = FakeLlm(
         [
             _agent1_payload(),
@@ -354,7 +360,7 @@ def test_workflow_retrieve_more_then_accept(tmp_path: Path) -> None:
             _agent3_payload(),
         ]
     )
-    workflow = _make_workflow(tmp_path, fake)
+    workflow = _make_workflow(tmp_path, db_dsn, fake)
 
     output = workflow.recommend(user_id=USER, request=REQUEST)
 
@@ -364,8 +370,8 @@ def test_workflow_retrieve_more_then_accept(tmp_path: Path) -> None:
     assert len(output.result.recommendations) == 3
 
 
-def test_workflow_wardrobe_gap_returns_best_effort(tmp_path: Path) -> None:
-    _seed_database(tmp_path / "db.sqlite")
+def test_workflow_wardrobe_gap_returns_best_effort(tmp_path: Path, db_dsn: str) -> None:
+    _seed_database(db_dsn)
     fake = FakeLlm(
         [
             _agent1_payload(),
@@ -379,7 +385,7 @@ def test_workflow_wardrobe_gap_returns_best_effort(tmp_path: Path) -> None:
             ),
         ]
     )
-    workflow = _make_workflow(tmp_path, fake)
+    workflow = _make_workflow(tmp_path, db_dsn, fake)
 
     output = workflow.recommend(user_id=USER, request=REQUEST)
 
@@ -391,8 +397,8 @@ def test_workflow_wardrobe_gap_returns_best_effort(tmp_path: Path) -> None:
     assert len(output.result.recommendations) == 3
 
 
-def test_workflow_repeated_recompose_degrades_to_best_effort(tmp_path: Path) -> None:
-    _seed_database(tmp_path / "db.sqlite")
+def test_workflow_repeated_recompose_degrades_to_best_effort(tmp_path: Path, db_dsn: str) -> None:
+    _seed_database(db_dsn)
     fake = FakeLlm(
         [
             _agent1_payload(),
@@ -402,7 +408,7 @@ def test_workflow_repeated_recompose_degrades_to_best_effort(tmp_path: Path) -> 
             _agent3_payload("recompose", failure_source="composer", feedback="还是不行"),
         ]
     )
-    workflow = _make_workflow(tmp_path, fake)
+    workflow = _make_workflow(tmp_path, db_dsn, fake)
 
     output = workflow.recommend(user_id=USER, request=REQUEST)
 
@@ -414,9 +420,9 @@ def test_workflow_repeated_recompose_degrades_to_best_effort(tmp_path: Path) -> 
     assert output.best_effort is not None
 
 
-def test_workflow_without_llm_uses_deterministic_chain(tmp_path: Path) -> None:
-    _seed_database(tmp_path / "db.sqlite")
-    workflow = _make_workflow(tmp_path, None)
+def test_workflow_without_llm_uses_deterministic_chain(tmp_path: Path, db_dsn: str) -> None:
+    _seed_database(db_dsn)
+    workflow = _make_workflow(tmp_path, db_dsn, None)
 
     output = workflow.recommend(user_id=USER, request=REQUEST)
 
@@ -461,14 +467,14 @@ def _contextual_agent1(original: dict) -> dict:
     return payload
 
 
-def test_workflow_device_location_uses_coordinates_and_keeps_privacy(tmp_path: Path) -> None:
-    _seed_database(tmp_path / "db.sqlite")
+def test_workflow_device_location_uses_coordinates_and_keeps_privacy(tmp_path: Path, db_dsn: str) -> None:
+    _seed_database(db_dsn)
     first_agent1 = _weather_agent1_payload()
     fake_llm = FakeLlm(
         [first_agent1, _contextual_agent1(first_agent1), _agent2_payload(), _agent3_payload()]
     )
     fake_weather = _RecordingWeatherTool()
-    workflow = _make_workflow(tmp_path, fake_llm, weather_tool=fake_weather)
+    workflow = _make_workflow(tmp_path, db_dsn, fake_llm, weather_tool=fake_weather)
     # captured_at is relative so the resolver's real clock does not mark it stale.
     location_context = {
         "latitude": 31.234567,
@@ -499,8 +505,8 @@ def test_workflow_device_location_uses_coordinates_and_keeps_privacy(tmp_path: P
     assert "longitude" not in output.tool_calls[0]["arguments"]
 
 
-def test_workflow_beijing_travel_applies_default_3_day_window(tmp_path: Path) -> None:
-    _seed_database(tmp_path / "db.sqlite")
+def test_workflow_beijing_travel_applies_default_3_day_window(tmp_path: Path, db_dsn: str) -> None:
+    _seed_database(db_dsn)
     first_agent1 = _weather_agent1_payload(
         location="北京", weather_location="北京", date_expr=""
     )
@@ -508,7 +514,7 @@ def test_workflow_beijing_travel_applies_default_3_day_window(tmp_path: Path) ->
         [first_agent1, _contextual_agent1(first_agent1), _agent2_payload(), _agent3_payload()]
     )
     fake_weather = _RecordingWeatherTool()
-    workflow = _make_workflow(tmp_path, fake_llm, weather_tool=fake_weather)
+    workflow = _make_workflow(tmp_path, db_dsn, fake_llm, weather_tool=fake_weather)
 
     output = workflow.recommend(user_id=USER, request="去北京旅游该怎么穿？")
 
@@ -526,8 +532,8 @@ def test_workflow_beijing_travel_applies_default_3_day_window(tmp_path: Path) ->
     assert time_context["precision"] == "near_3_days"
 
 
-def test_workflow_style_knowledge_query_skips_weather_tool(tmp_path: Path) -> None:
-    _seed_database(tmp_path / "db.sqlite")
+def test_workflow_style_knowledge_query_skips_weather_tool(tmp_path: Path, db_dsn: str) -> None:
+    _seed_database(db_dsn)
     first_agent1 = _agent1_payload()
     first_agent1["context_requirements"] = {
         "weather": {"needed": False},
@@ -538,7 +544,7 @@ def test_workflow_style_knowledge_query_skips_weather_tool(tmp_path: Path) -> No
     first_agent1["default_policy_allowed"] = False
     fake_llm = FakeLlm([first_agent1, _agent2_payload(), _agent3_payload()])
     fake_weather = _RecordingWeatherTool()
-    workflow = _make_workflow(tmp_path, fake_llm, weather_tool=fake_weather)
+    workflow = _make_workflow(tmp_path, db_dsn, fake_llm, weather_tool=fake_weather)
 
     output = workflow.recommend(user_id=USER, request="黑色马甲怎么搭？")
 

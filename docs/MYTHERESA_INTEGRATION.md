@@ -5,12 +5,12 @@
 
 ## 1. 数据位置与边界
 
-- 元数据：`E:\style-dataset\mytheresa_image_v1.0_2512.json`
-- 图片根目录：`E:\style-dataset\images\images.tar\images\images`
+- 元数据：`E:\01-style-dataset\mytheresa_image_v1.0_2512.json`
+- 图片根目录：`E:\01-style-dataset\images\images.tar\images\images`
 - 图片布局：`<image_root>/<item_id>/<filename>`
 - 原始图片不会移动或复制进项目目录。
 
-这里的 `images.tar` 已经是解包后的目录名，不是本流程需要再次解压的压缩文件。用户已为本项目明确选择安装了 CUDA、FashionCLIP、API 和测试依赖的 `D:\anaconda\envs\style\python.exe`；项目根目录 [AGENTS.md](../AGENTS.md) 将其声明为项目级权威环境，覆盖其他工作区的通用 Python 默认值。执行导入前应至少预留 3GB 项目盘空间，用于增长后的 SQLite、合并嵌入、FAISS 索引、报告和临时状态；170GB 原图仍留在 E 盘。
+这里的 `images.tar` 已经是解包后的目录名，不是本流程需要再次解压的压缩文件。用户已为本项目明确选择安装了 CUDA、FashionCLIP、API 和测试依赖的 `D:\anaconda\envs\style\python.exe`；项目根目录 [AGENTS.md](../AGENTS.md) 将其声明为项目级权威环境，覆盖其他工作区的通用 Python 默认值。执行导入前应至少预留 3GB 项目盘空间，用于增长后的数据库转储、合并嵌入、FAISS 索引、报告和临时状态；170GB 原图仍留在 E 盘。
 
 运行账户必须能只读访问上述 E 盘 JSON/图片目录，并能写入项目的 `data` 与 `artifacts`。元数据读取器要求 UTF-8、顶层 JSON object、以商品 ID 为 key；当前文件尚未记录独立 SHA-256，发布复现实验前需要补充。元数据审计/导入依赖标准库即可；API 和全量嵌入还分别需要项目的 API、视觉和 CUDA 依赖，具体环境见 [本地部署](LOCAL_DEPLOYMENT.md)。
 
@@ -21,7 +21,7 @@ cd C:\Users\32369\Desktop\agent-p\style
 $env:PYTHONPATH=(Resolve-Path ".\apps\api")
 ```
 
-项目只在 SQLite 中保存商品元数据、相对路径和数据源对应的外部根目录。
+项目只在本地 PostgreSQL（`STYLEFORGE_DATABASE_DSN`）中保存商品元数据、相对路径和数据源对应的外部根目录。
 
 导入、审计和嵌入代码会拒绝把数据库、报告或嵌入输出目录设置到外部图片根目录之下。程序对原图只使用存在性检查或只读图片打开操作。如果要求操作系统级绝对保证，还应使用只有读取权限的专用 Windows 账户运行；不要仅依赖文件夹“只读”属性，因为该属性不能可靠地禁止程序写入。
 
@@ -94,7 +94,7 @@ D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests evals
 
 ```powershell
 D:\anaconda\envs\style\python.exe -m styleforge.pipelines.audit_mytheresa `
-  --metadata "E:\style-dataset\mytheresa_image_v1.0_2512.json"
+  --metadata "E:\01-style-dataset\mytheresa_image_v1.0_2512.json"
 ```
 
 查看 `artifacts/data_audit/mytheresa_audit.json`：
@@ -121,34 +121,27 @@ D:\anaconda\envs\style\python.exe -m styleforge.pipelines.audit_mytheresa `
 
 实现该 CLI 后必须重新执行`compileall → Pytest → Ruff`，三项通过后才能启动全量解码；不能沿用实现工具之前的测试结果。
 
-### 5.3 导入前备份 SQLite
+### 5.3 导入前备份主库
 
-先停止 API、Streamlit 和其他可能写入 SQLite 的进程。项目使用 WAL 模式，运行中的数据库不能只复制一个 `.db` 文件作为一致快照。确认所有进程退出后，创建带时间戳的备份目录，并同时保存可能存在的 WAL/SHM 文件：
+先停止 API、Streamlit 和其他可能写入主库的进程，再执行 `pg_dump` 自定义格式全库备份：
 
 ```powershell
 $backupStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $backupDir = "C:\Users\32369\Desktop\agent-p\style\data\backup-$backupStamp"
 New-Item -ItemType Directory -Path $backupDir
-Get-ChildItem -LiteralPath "C:\Users\32369\Desktop\agent-p\style\data" `
-  -Filter "styleforge.db*" | Copy-Item -Destination $backupDir
+E:\PostgreSQL\bin\pg_dump.exe -h 127.0.0.1 -U styleforge -Fc styleforge `
+  -f "$backupDir\styleforge-$backupStamp.dump"
 ```
 
-备份目录中至少应出现 `styleforge.db`。恢复时也必须先停止所有数据库进程，再用该备份恢复对应文件。
-
-安全恢复采用“隔离当前文件，再复制备份”的方式，不能把备份 `.db` 直接覆盖到仍残留旧 WAL/SHM 的目录：
+备份目录中至少应出现一个 `.dump` 文件。恢复使用 `pg_restore`，先创建目标库再恢复（库名冲突时需先 drop）：
 
 ```powershell
-$restoreSource = "C:\Users\32369\Desktop\agent-p\style\data\backup-YYYYMMDD-HHMMSS"
-$restoreStamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$quarantineDir = "C:\Users\32369\Desktop\agent-p\style\data\failed-import-$restoreStamp"
-New-Item -ItemType Directory -Path $quarantineDir
-Get-ChildItem -LiteralPath "C:\Users\32369\Desktop\agent-p\style\data" `
-  -Filter "styleforge.db*" | Move-Item -Destination $quarantineDir
-Get-ChildItem -LiteralPath $restoreSource `
-  -Filter "styleforge.db*" | Copy-Item -Destination "C:\Users\32369\Desktop\agent-p\style\data"
+E:\PostgreSQL\bin\createdb.exe -h 127.0.0.1 -U postgres -O styleforge -E UTF8 styleforge_restore
+E:\PostgreSQL\bin\pg_restore.exe -h 127.0.0.1 -U styleforge -d styleforge_restore `
+  "C:\Users\32369\Desktop\agent-p\style\data\backup-YYYYMMDD-HHMMSS\styleforge-YYYYMMDD-HHMMSS.dump"
 ```
 
-执行前必须把 `$restoreSource` 替换为已核对的具体备份目录。原失败数据库被移动到隔离目录，可人工恢复，不会被直接删除。
+执行前必须把 dump 路径替换为已核对的具体备份文件。原失败库保留不删，可随时恢复复核。
 
 ### 5.4 在一次性数据库上演练中断与重跑
 
@@ -159,8 +152,8 @@ $drillStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $drillDb = "C:\Users\32369\Desktop\agent-p\style\data\mytheresa-drill-$drillStamp.db"
 
 D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_mytheresa `
-  --metadata "E:\style-dataset\mytheresa_image_v1.0_2512.json" `
-  --image-root "E:\style-dataset\images\images.tar\images\images" `
+  --metadata "E:\01-style-dataset\mytheresa_image_v1.0_2512.json" `
+  --image-root "E:\01-style-dataset\images\images.tar\images\images" `
   --database $drillDb --batch-size 500 --simulate-failure-after 500 `
   --report "C:\Users\32369\Desktop\agent-p\style\artifacts\imports\mytheresa-drill-failed.json"
 ```
@@ -169,14 +162,14 @@ D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_mytheresa `
 
 ```powershell
 D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_mytheresa `
-  --metadata "E:\style-dataset\mytheresa_image_v1.0_2512.json" `
-  --image-root "E:\style-dataset\images\images.tar\images\images" `
+  --metadata "E:\01-style-dataset\mytheresa_image_v1.0_2512.json" `
+  --image-root "E:\01-style-dataset\images\images.tar\images\images" `
   --database $drillDb `
   --report "C:\Users\32369\Desktop\agent-p\style\artifacts\imports\mytheresa-drill-replay-1.json"
 
 D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_mytheresa `
-  --metadata "E:\style-dataset\mytheresa_image_v1.0_2512.json" `
-  --image-root "E:\style-dataset\images\images.tar\images\images" `
+  --metadata "E:\01-style-dataset\mytheresa_image_v1.0_2512.json" `
+  --image-root "E:\01-style-dataset\images\images.tar\images\images" `
   --database $drillDb `
   --report "C:\Users\32369\Desktop\agent-p\style\artifacts\imports\mytheresa-drill-replay-2.json"
 ```
@@ -197,8 +190,8 @@ Get-ChildItem -LiteralPath "C:\Users\32369\Desktop\agent-p\style\data" `
 
 ```powershell
 D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_mytheresa `
-  --metadata "E:\style-dataset\mytheresa_image_v1.0_2512.json" `
-  --image-root "E:\style-dataset\images\images.tar\images\images" `
+  --metadata "E:\01-style-dataset\mytheresa_image_v1.0_2512.json" `
+  --image-root "E:\01-style-dataset\images\images.tar\images\images" `
   --database $drillDb --batch-size 500 --simulate-failure-after 500 `
   --report "C:\Users\32369\Desktop\agent-p\style\artifacts\imports\mytheresa-drill-after-backup.json"
 ```
@@ -231,11 +224,27 @@ Compare-Object $expectedHashes $actualHashes -Property Name,Hash
 
 ### 5.4.1 一次性数据库 API 验收
 
-在新的 PowerShell 窗口中，把`$drillDb`设为前述演练数据库的实际绝对路径，然后启动 API：
+演练导入写入独立 PostgreSQL 库 `mytheresa_drill`（不是主库）。主库导入前先建库（首次）：
 
 ```powershell
-$drillDb = "C:\Users\32369\Desktop\agent-p\style\data\mytheresa-drill-实际时间戳.db"
-$env:STYLEFORGE_DATABASE_PATH = $drillDb
+E:\PostgreSQL\bin\psql.exe -U postgres -h 127.0.0.1 -c "CREATE DATABASE mytheresa_drill OWNER styleforge ENCODING 'UTF8';"
+```
+
+导入器以 `--database` 指向该库（库内表由 `initialize_database` 自动创建）：
+
+```powershell
+$env:PYTHONPATH=(Resolve-Path ".\apps\api")
+D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_mytheresa `
+  --metadata "E:\01-style-dataset\mytheresa_image_v1.0_2512.json" `
+  --image-root "E:\01-style-dataset\images\images.tar\images\images" `
+  --database "postgresql://styleforge@127.0.0.1:5432/mytheresa_drill"
+```
+
+在新的 PowerShell 窗口中，把`$drillDsn`设为该一次性库的连接串并启动 API。窗口环境变量优先于 `.env`，可覆盖主库 DSN：
+
+```powershell
+$drillDsn = "postgresql://styleforge@127.0.0.1:5432/mytheresa_drill"
+$env:STYLEFORGE_DATABASE_DSN = $drillDsn
 $env:GARMENTS2LOOK_IMAGE_ROOT = "E:\image.tar\image\images"
 D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app `
   --app-dir apps\api `
@@ -254,32 +263,32 @@ foreach ($audience in $audiences) {
 }
 ```
 
-同时验证`/health`中的`catalog_items_by_source.mytheresa = 62457`，以及至少一个已确认样本的主图和多图片接口。这里验收的是`$drillDb`，不能把环境变量指向主库。
+同时验证`/health`中的`catalog_items_by_source.mytheresa = 62457`，以及至少一个已确认样本的主图和多图片接口。这里验收的是`$drillDsn`（一次性库），不能把环境变量指向主库。
 
 ### 5.5 通过一次性库验收后导入主数据库
 
-停止一次性库 API 和所有可能写主 SQLite 的进程。紧邻主库导入前再次建立新备份，不复用 5.3 的旧备份目录：
+停止一次性库 API 和所有可能写主库的进程。紧邻主库导入前再次建立新备份，不复用 5.3 的旧备份目录。PostgreSQL 用 `pg_dump` 做全库备份：
 
 ```powershell
 $finalBackupStamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $finalBackupDir = "C:\Users\32369\Desktop\agent-p\style\data\backup-before-mytheresa-$finalBackupStamp"
 New-Item -ItemType Directory -Path $finalBackupDir
-Get-ChildItem -LiteralPath "C:\Users\32369\Desktop\agent-p\style\data" `
-  -Filter "styleforge.db*" | Copy-Item -Destination $finalBackupDir
+E:\PostgreSQL\bin\pg_dump.exe -h 127.0.0.1 -U styleforge -Fc styleforge `
+  -f "$finalBackupDir\styleforge-$finalBackupStamp.dump"
 ```
 
-确认备份目录至少含`styleforge.db`后，再执行正式导入：
+确认备份目录至少含一个 `.dump` 文件后，再执行正式导入。`--database` 指向主库连接串；`.env` 已配置时也可省略（默认取 `settings.database_dsn`）：
 
 ```powershell
 D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_mytheresa `
-  --metadata "E:\style-dataset\mytheresa_image_v1.0_2512.json" `
-  --image-root "E:\style-dataset\images\images.tar\images\images" `
-  --database "C:\Users\32369\Desktop\agent-p\style\data\styleforge.db"
+  --metadata "E:\01-style-dataset\mytheresa_image_v1.0_2512.json" `
+  --image-root "E:\01-style-dataset\images\images.tar\images\images" `
+  --database "postgresql://styleforge@127.0.0.1:5432/styleforge"
 ```
 
-该步骤只读取外部 JSON/图片文件状态，并写入项目内 SQLite 和导入报告；不会移动或改写图片。
+该步骤只读取外部 JSON/图片文件状态，并写入主库和导入报告；不会移动或改写图片。
 
-导入器启动时会调用`initialize_database`，把当前数据库迁移到`SCHEMA_VERSION = 5`。Schema v3 引入的`dataset_sources`和`catalog_item_images`仍保留；Schema v4/v5 又增加个人订单衣柜、订单准入状态和个人嵌入表。导入报告必须包含`database_schema_version == 5`。如果数据库 schema 高于当前代码支持版本，初始化会在导入前拒绝执行，避免旧代码覆盖未来数据库。
+导入器启动时会调用`initialize_database`，检查主库 schema 版本（当前 `SCHEMA_VERSION = 10`）。如果数据库 schema 高于当前代码支持版本，初始化会在导入前拒绝执行，避免旧代码覆盖未来数据库。导入报告应包含当前 `database_schema_version`。
 
 导入按批次提交，不是覆盖全部 62,457 件商品的单一事务。若中途失败，已完成批次会保留，`dataset_import_runs` 会记录 `failed`；修复原因后重复执行同一命令即可通过 upsert/图片替换继续收敛。不要通过删除主数据库处理普通导入失败。
 
@@ -296,7 +305,7 @@ Polyvore 尚未重新注册到 `dataset_sources` 时，继续保留兼容环境�
 
 ```powershell
 $env:GARMENTS2LOOK_IMAGE_ROOT="E:\image.tar\image\images"
-$env:STYLEFORGE_DATABASE_PATH="C:\Users\32369\Desktop\agent-p\style\data\styleforge.db"
+$env:STYLEFORGE_DATABASE_DSN="postgresql://styleforge@127.0.0.1:5432/styleforge"
 D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app `
   --app-dir apps\api `
   --host 127.0.0.1 --port 8000

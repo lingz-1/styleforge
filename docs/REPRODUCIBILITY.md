@@ -6,7 +6,7 @@
 
 这条路径已经基本验证，前提是以下文件存在：
 
-- `data/styleforge.db`
+- PostgreSQL（本地 `127.0.0.1:5432`，`styleforge` 库）与 `.env` 中的 `STYLEFORGE_DATABASE_DSN`
 - `artifacts/models/` 完整 FashionCLIP 快照
 - `artifacts/embeddings/fashionclip/`
 - `artifacts/index/fashionclip/`
@@ -65,7 +65,11 @@ artifacts/models/
 | `GARMENTS2LOOK_METADATA_PATH` | 商品元数据 JSON |
 | `GARMENTS2LOOK_OUTFIT_PATH` | 搭配 JSON |
 | `GARMENTS2LOOK_IMAGE_ROOT` | `images` 根目录 |
-| `STYLEFORGE_DATABASE_PATH` | SQLite 文件 |
+| `STYLEFORGE_DATABASE_DSN` | PostgreSQL 连接串（主库，127.0.0.1:5432） |
+| `STYLEFORGE_TEST_DATABASE_DSN` | PostgreSQL 连接串（测试库，pytest 用） |
+| `STYLEFORGE_REDIS_ENABLED` | 会话状态缓存开关（0/1，默认关） |
+| `STYLEFORGE_REDIS_URL` | Redis 连接串（如 `redis://127.0.0.1:6379/0`） |
+| `STYLEFORGE_CHROMA_DIR` | Chroma 持久化目录（默认 `artifacts/chroma/`） |
 | `STYLEFORGE_ARTIFACT_ROOT` | 模型、向量、索引和报告根目录 |
 | `STYLEFORGE_API_URL` | Streamlit 调用的 API 地址 |
 

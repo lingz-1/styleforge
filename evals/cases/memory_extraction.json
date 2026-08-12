@@ -1,0 +1,266 @@
+[
+  {
+    "id": "mem-01",
+    "rule": "multi_attribute_split + one_off_scene",
+    "request": "帮我看看，明天面试，穿得正式一点，白衬衫黑裤子那种吧",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "category", "value": "衬衫", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "garment", "attribute": "category", "value": "裤子", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "garment", "attribute": "color", "value": "白色", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "garment", "attribute": "color", "value": "黑色", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "style", "attribute": "formality", "value": "正式", "polarity": "positive", "scope": {"type": "contextual", "occasions": ["面试"]}}
+    ]
+  },
+  {
+    "id": "mem-02",
+    "rule": "negation_split",
+    "request": "我是真的不喜欢黑色裤子，西装裤还好，修身那种完全穿不了",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "color", "value": "黑色", "polarity": "negative", "scope": {"type": "global"}},
+      {"dimension": "garment", "attribute": "category", "value": "裤子", "polarity": "negative", "scope": {"type": "global"}},
+      {"dimension": "garment", "attribute": "fit", "value": "修身", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-03",
+    "rule": "whole_sentence_negation_no_claim",
+    "request": "这套看着还行，但不是我想要的风格，说不上来",
+    "expected_evidence": []
+  },
+  {
+    "id": "mem-04",
+    "rule": "one_off_scene_ignored",
+    "request": "周五去见闺蜜，帮我拿个主意",
+    "expected_evidence": []
+  },
+  {
+    "id": "mem-05",
+    "rule": "global_vs_contextual",
+    "request": "平时上班我就爱穿衬衫，省事又显精神",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "category", "value": "衬衫", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "shopping", "attribute": "occasion", "value": "上班", "polarity": "positive", "scope": {"type": "contextual", "occasions": ["上班"]}}
+    ]
+  },
+  {
+    "id": "mem-06",
+    "rule": "contextual_fit + negation",
+    "request": "通勤的话我喜欢宽松一点的，太紧的难受",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "fit", "value": "宽松", "polarity": "positive", "scope": {"type": "contextual", "occasions": ["通勤"]}},
+      {"dimension": "garment", "attribute": "fit", "value": "紧", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-07",
+    "rule": "appearance_dimension",
+    "request": "显瘦是我的命，配饰多了反而累赘",
+    "expected_evidence": [
+      {"dimension": "appearance", "attribute": "detail", "value": "显瘦", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "appearance", "attribute": "detail", "value": "配饰多", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-08",
+    "rule": "shopping_brand + occasion",
+    "request": "我衣柜里全是 MaxMara，正式场合还是它靠谱",
+    "expected_evidence": [
+      {"dimension": "shopping", "attribute": "brand", "value": "maxmara", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "shopping", "attribute": "occasion", "value": "正式", "polarity": "positive", "scope": {"type": "contextual", "occasions": ["正式"]}}
+    ]
+  },
+  {
+    "id": "mem-09",
+    "rule": "double_negation",
+    "request": "别给我推宽松的，花花绿绿的也算了，看着就烦",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "fit", "value": "宽松", "polarity": "negative", "scope": {"type": "global"}},
+      {"dimension": "style", "attribute": "style", "value": "花花绿绿", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-10",
+    "rule": "weak_signal_no_fabrication",
+    "request": "就……随便搭一套吧，能出门就行",
+    "expected_evidence": []
+  },
+  {
+    "id": "mem-11",
+    "rule": "repeated_avoidance",
+    "request": "以后牛仔的少给我整了，真的穿腻了",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "category", "value": "牛仔", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-12",
+    "rule": "one_off_item_request_not_long_term",
+    "request": "这件大衣是不是有点旧了，要不别推它了，给我换个新的",
+    "expected_evidence": []
+  },
+  {
+    "id": "mem-13",
+    "rule": "habit_fit_preference",
+    "request": "我平时穿裤子就爱宽松的，紧身的勒得慌",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "fit", "value": "宽松", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "garment", "attribute": "fit", "value": "紧", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-14",
+    "rule": "conditional_rule_preference",
+    "request": "如果穿西装，我一定选黑色的",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "color", "value": "黑色", "polarity": "positive", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-15",
+    "rule": "comparison_preference",
+    "request": "运动鞋比皮鞋舒服多了，上班我也穿",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "category", "value": "运动鞋", "polarity": "positive", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-16",
+    "rule": "material_three_way",
+    "request": "真丝和纯棉我穿着最舒服，化纤的贴身就不行",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "material", "value": "真丝", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "garment", "attribute": "material", "value": "纯棉", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "garment", "attribute": "material", "value": "化纤", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-17",
+    "rule": "print_as_style",
+    "request": "格纹和条纹我能接受，波点的真不行",
+    "expected_evidence": [
+      {"dimension": "style", "attribute": "style", "value": "格纹", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "style", "attribute": "style", "value": "条纹", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "style", "attribute": "style", "value": "波点", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-18",
+    "rule": "item_reference_dialect",
+    "request": "这色儿显老气，贼土",
+    "expected_evidence": []
+  },
+  {
+    "id": "mem-19",
+    "rule": "english_mixed_fit",
+    "request": "我超爱 oversize 的版型",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "fit", "value": "oversize", "polarity": "positive", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-20",
+    "rule": "noise_low_signal",
+    "request": "感觉今天状态一般，随便穿穿得了",
+    "expected_evidence": []
+  },
+  {
+    "id": "mem-21",
+    "rule": "occasion_binding_contextual",
+    "request": "年会这种场合我只穿西装",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "category", "value": "西装", "polarity": "positive", "scope": {"type": "contextual", "occasions": ["年会"]}}
+    ]
+  },
+  {
+    "id": "mem-22",
+    "rule": "repeated_aversion_strong",
+    "request": "真的真的不要再给我推碎花的东西了，看吐了",
+    "expected_evidence": [
+      {"dimension": "style", "attribute": "style", "value": "碎花", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-23",
+    "rule": "wide_leg_category_habit",
+    "request": "阔腿裤我穿着可舒服了，上班都穿它",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "category", "value": "阔腿裤", "polarity": "positive", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-24",
+    "rule": "contradiction_item_reference",
+    "request": "这件颜色还行，但版型真的不行，拉黑",
+    "expected_evidence": []
+  },
+  {
+    "id": "mem-25",
+    "rule": "brand_aversion",
+    "request": "优衣库的东西我基本不碰，质量太差了",
+    "expected_evidence": [
+      {"dimension": "shopping", "attribute": "brand", "value": "优衣库", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-26",
+    "rule": "habit_layer_combo",
+    "request": "我冬天永远毛衣配大衣",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "category", "value": "毛衣", "polarity": "positive", "scope": {"type": "global"}},
+      {"dimension": "garment", "attribute": "category", "value": "大衣", "polarity": "positive", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-27",
+    "rule": "hedge_then_direction",
+    "request": "这件还行吧，不过颜色再暗点更好",
+    "expected_evidence": []
+  },
+  {
+    "id": "mem-28",
+    "rule": "one_off_scene_functional",
+    "request": "这周日海边玩，帮我配一套，防晒那种",
+    "expected_evidence": []
+  },
+  {
+    "id": "mem-29",
+    "rule": "strong_aversion_category",
+    "request": "我一辈子都不会穿高跟鞋，走路都费劲",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "category", "value": "高跟鞋", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-30",
+    "rule": "style_route_preference",
+    "request": "我这人就走法式路线，谁家的都行",
+    "expected_evidence": [
+      {"dimension": "style", "attribute": "style", "value": "法式", "polarity": "positive", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-31",
+    "rule": "weather_habit",
+    "request": "下雨天我就穿马丁靴",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "category", "value": "马丁靴", "polarity": "positive", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-32",
+    "rule": "color_family_aversion",
+    "request": "荧光色打死我都不穿",
+    "expected_evidence": [
+      {"dimension": "garment", "attribute": "color", "value": "荧光色", "polarity": "negative", "scope": {"type": "global"}}
+    ]
+  },
+  {
+    "id": "mem-33",
+    "rule": "multi_occasion_style_split",
+    "request": "上班走极简，周末走复古",
+    "expected_evidence": [
+      {"dimension": "style", "attribute": "style", "value": "极简", "polarity": "positive", "scope": {"type": "contextual", "occasions": ["上班"]}},
+      {"dimension": "style", "attribute": "style", "value": "复古", "polarity": "positive", "scope": {"type": "contextual", "occasions": ["周末"]}}
+    ]
+  }
+]
