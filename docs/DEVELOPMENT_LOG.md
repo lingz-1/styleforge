@@ -306,7 +306,7 @@ Schema（`repositories/database.py`，v9→v10）：
 - `repositories/chat_repository.py`：会话 CRUD、`append_message`（同时刷新 session.updated_at）、`list_messages`（ascending）、`active_outfit_messages`（取最近产生搭配的 assistant 消息）。
 - `repositories/memory_repository.py`：`list_memories` / `create_manual_memory`（upsert 强制 manual + 重置 occurrences）/ `update_memory` / `forget_memory`（软删除可复活）/ `active_memory_profile` / `upsert_auto_memories`（置信度累加、manual 优先、复活）。
 - `services/chat_service.py`：`outfit_context_from_payload` / `assistant_summary` / `trim_message_payload` / `get_session_outfit_context`。
-- `services/memory_extractor.py`：确定性规则提炼（复用 request_parser 词典），每类上限 2 条。
+- `services/memory_extractor.py`：LLM 提炼（`llm/memory_schema.py` + `memory_prompts.py` v1.0），best-effort 不阻断任务。
 
 引擎：
 

@@ -57,6 +57,8 @@ def test_execute_and_read_extended_task_over_http(
                 "evidence_source_ids": ["style-american-vintage"],
             },
             approved_review(),
+            # Successful execute also runs one memory-extraction call.
+            {"memories": []},
         ]
     )
     workflow = MultiTaskWorkflow(

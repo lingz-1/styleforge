@@ -5,6 +5,7 @@ from pathlib import Path
 from styleforge.models.task import TaskExecutionInput
 from styleforge.repositories.catalog_repository import upsert_items
 from styleforge.repositories.database import database_session, initialize_database
+from styleforge.repositories.memory_repository import list_memories
 from styleforge.repositories.wardrobe_repository import add_items
 from styleforge.services.chat_service import outfit_context_from_payload
 from styleforge.workflow.task_workflow import MultiTaskWorkflow
@@ -104,13 +105,22 @@ def test_session_multiturn_reuses_outfit_context(tmp_path: Path) -> None:
     initialize_database(database_path)
     _seed_wardrobe(database_path)
 
+    # Every successful execute runs one memory-extraction call afterwards, so
+    # each round needs an extraction response before the next round's agents.
     script = [
+        # Round 1 is a deterministic recommendation (no LLM); its extraction
+        # returns one occasion preference so persistence is observable.
+        {"memories": [{"category": "occasion", "content": "通勤", "meta": {}}]},
         intent_response("理解换外套请求"),
         ROUND2_MODIFY,
         approved_review(),
+        # Round 2 extraction: nothing durable to keep.
+        {"memories": []},
         intent_response("理解整体调整请求"),
         ROUND3_MODIFY,
         approved_review(),
+        # Round 3 extraction: nothing durable to keep.
+        {"memories": []},
     ]
     workflow = MultiTaskWorkflow(
         database_path=database_path,
@@ -125,6 +135,12 @@ def test_session_multiturn_reuses_outfit_context(tmp_path: Path) -> None:
     )
     assert payload1["task_type"] == "outfit_recommend"
     assert payload1["status"] == "completed"
+    # The round-1 request distills a durable occasion preference into memory.
+    with database_session(database_path) as connection:
+        memories = list_memories(connection, "u")
+    assert [(m["category"], m["content"], m["source"]) for m in memories] == [
+        ("occasion", "通勤", "auto")
+    ]
 
     # Round 2: explicit slot modification, reuse the round-1 outfit.
     session_context = outfit_context_from_payload(payload1)

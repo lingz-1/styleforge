@@ -1,7 +1,7 @@
 # 会话持久化多轮对话 + 用户长期记忆系统
 
 > 版本：v1.0（2026-08-12）
-> 范围：`chat_sessions` / `chat_messages` / `user_memories` 三张新表、`POST /tasks/execute` 会话化、两段式路由、整体调整模式、确定性记忆提炼与注入
+> 范围：`chat_sessions` / `chat_messages` / `user_memories` 三张新表、`POST /tasks/execute` 会话化、两段式路由、整体调整模式、LLM 记忆提炼与注入
 
 ## 1. 目标
 
@@ -122,18 +122,19 @@ route0 = router.route(request, current_outfit_id=task_input.current_outfit_id, .
 
 ### 6.1 类别与自动提炼
 
-`memory_extractor.extract_memories(request)` 用确定性规则从请求提炼 `{category, content, meta}`，无 LLM 依赖：
+`memory_extractor.extract_memories(llm, request)` 在任务成功路径末尾调用一次 LLM，把请求提炼成 `{category, content, meta}` 列表。提炼是 best-effort：未配置 LLM、调用失败或返回全无效时返回空列表，绝不阻断任务；单条不合法会被丢弃，`normalize_content()` 归一化去重（小写、压缩空白、限 64 字符）。
 
-| 类别 | 来源 |
+| 类别 | 含义 |
 |---|---|
-| `color` | 复用 `request_parser.COLOR_ALIASES`；否定极性（"不要黑色"）→ `avoid:xxx` |
-| `category` | 复用 `SUBTYPE_ALIASES` |
-| `occasion` | 复用 `OCCASION_ALIASES` |
-| `formality` | 正式/休闲/商务/简约…词表 |
-| `style` | 中文风格词表 → `STYLE_TAG_RULES` tag |
-| `habit` | 每天/经常/总是…（低优先级） |
+| `category` | 品类/单品偏好（衬衫、连衣裙、外套） |
+| `color` | 颜色偏好（黑色、米白；否定用「避免黑色」） |
+| `style` | 风格偏好（复古、极简、街头） |
+| `formality` | 正式度偏好（正式、休闲、商务） |
+| `occasion` | 常去场合（通勤、约会、运动） |
+| `habit` | 穿衣习惯（每天穿衬衫、总是叠穿） |
+| `general` | 其他长期偏好 |
 
-每类上限 2 条防噪声；`normalize_content()` 归一化去重（小写、压缩空白、限 64 字符）。
+提示词模板 `llm/memory_prompts.py`（`MEMORY_PROMPT_VERSION = memory-extract-v1.0`）只提炼长期偏好、忽略一次性场景（如「明天面试穿什么」的「面试」不算常去场合），否定偏好写成「避免 + 词」并带 `meta.polarity="negative"`；无长期偏好时返回 `{"memories": []}`。
 
 ### 6.2 置信度
 
@@ -183,6 +184,6 @@ novelty = novelty_scores(wardrobe_items, recent_signatures)
 
 - 整体调整 = 重建完整搭配（严格替换池，不保留当前单品）；"保留部分单品"列为后续。
 - 无 LLM 时多轮第 1 轮可降级；修改/扩展任务严格三 Agent → 503 并落 failed 消息，会话记录不受影响。
-- 记忆是规则式提炼（确定性、可测），可能与 LLM 提炼有差距；以置信度 + 手动编辑兜底。
+- 记忆由 LLM 提炼（best-effort）：未配置 LLM 或提炼失败时跳过该轮、不产生记忆；以置信度 + 手动编辑兜底。
 - 跨端：本期仅 Web 前端会话化；小程序仍只传 `user_id/request`（`session_id` 默认空串行为不变）。
 - 会话标题自动命名"会话 N"，不做摘要式命名（后续可用 LLM 从首条请求生成）。

@@ -419,9 +419,9 @@ class MultiTaskWorkflow:
         return route0
 
     def _extract_memories(self, task_input: TaskExecutionInput) -> None:
-        """Distill preference memories from the request; failures are swallowed."""
+        """Distill preference memories via LLM; failures are swallowed."""
         try:
-            extracts = extract_memories(task_input.request)
+            extracts = extract_memories(self.llm_client, task_input.request)
             if not extracts:
                 return
             with database_session(self.database_path) as connection:

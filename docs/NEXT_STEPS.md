@@ -5,7 +5,7 @@
 
 ## P1：用户长期记忆系统与多轮对话（✅ 2026-08-12 已完成）
 
-- **记忆系统**：`user_memories` 表 + 确定性自动提炼（复用 request_parser 词典，每类上限 2 条）+ 置信度累加 + 手动增删改查（手动优先）+ 注入三 Agent prompt。Web 新增 `/memories` 偏好管理页。
+- **记忆系统**：`user_memories` 表 + LLM 自动提炼 + 置信度累加 + 手动增删改查（手动优先）+ 注入三 Agent prompt。Web 新增 `/memories` 偏好管理页。
 - **多轮对话**：`chat_sessions` + `chat_messages` 表，`POST /tasks/execute` 带 `session_id` 落库，会话 outfit context 自动恢复；两段式路由让"换一件外套""更正式一点"自动带上文并路由到修改任务；"更正式一点"走整体调整模式（重建一套完整搭配）。前端聊天化：会话侧栏 + 历史恢复 + localStorage 记住当前会话。
 - 验证：全量 **364 passed**、Ruff clean、Web 构建通过；方案与契约见 [会话与记忆契约](SESSION_CHAT_MEMORY.md)。
 

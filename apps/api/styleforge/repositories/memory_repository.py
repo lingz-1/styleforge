@@ -1,6 +1,6 @@
 """Long-term user preference memories.
 
-An ``auto`` memory is distilled deterministically from a user request; repeat
+An ``auto`` memory is distilled from a user request by the LLM extractor; repeat
 observations raise ``confidence``.  A ``manual`` memory comes from the user and
 is never overwritten by auto extraction.  Forgetting is a soft delete
 (``active = 0``) so a memory can be revived if re-observed.

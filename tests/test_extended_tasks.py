@@ -119,7 +119,13 @@ def _workflow(
     agent2_response: dict,
 ) -> tuple[MultiTaskWorkflow, ScriptedExtensionLlm]:
     llm = ScriptedExtensionLlm(
-        [intent_response("理解请求并建立衣橱事实范围"), agent2_response, approved_review()]
+        [
+            intent_response("理解请求并建立衣橱事实范围"),
+            agent2_response,
+            approved_review(),
+            # Each successful execute also runs one memory-extraction call.
+            {"memories": []},
+        ]
     )
     workflow = MultiTaskWorkflow(
         database_path=database_path,
@@ -170,7 +176,7 @@ def _item_advice_draft(*, summary: str = "以黑色马甲组合衣橱单品") ->
 def _assert_three_agent_execution(payload: dict, llm: ScriptedExtensionLlm) -> None:
     assert payload["llm_enabled"] is True
     assert payload["llm_call_count"] == 3
-    assert len(llm.calls) == 3
+    assert len(llm.calls) == 4  # 3 agent calls + 1 memory-extraction call
     assert [item["node"] for item in payload["trace"]][-3:] == [
         "semantic_retriever_agent",
         "composer_agent",

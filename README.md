@@ -4,7 +4,7 @@
 
 完整文档入口：[docs/README.md](docs/README.md)。当前完成度、未验证改动和下一验收顺序请先阅读[项目状态](docs/PROJECT_STATUS.md)。
 
-StyleForge 是一个本地优先的个人衣柜多 Agent 穿搭系统。用户输入自然语言需求，系统只从该用户显式衣柜白名单中选择可追溯商品 ID，并输出硬约束检查、评分、选择理由和执行轨迹。演示衣柜来自数据集抽样，不代表真实用户实际拥有这些商品。
+StyleForge 是一个个人衣柜多 Agent 穿搭系统，默认配置 DeepSeek 语义链。用户输入自然语言需求，系统只从该用户显式衣柜白名单中选择可追溯商品 ID，并输出硬约束检查、评分、选择理由和执行轨迹。演示衣柜来自数据集抽样，不代表真实用户实际拥有这些商品。
 
 购物订单建立个人衣柜的流程见[订单衣柜导入与增量嵌入](docs/ORDER_WARDROBE_IMPORT.md)。订单先经过收货状态白名单；若导出文件含退款、退货或售后列，再执行对应硬过滤，最后由用户预览确认。当前完整订单表没有独立售后列，不能保证识别所有历史售后。有图使用图像嵌入，无图使用文字嵌入；该最新版增量已通过回归与一次性数据库验收，待真实提交和嵌入验收。
 
@@ -25,7 +25,7 @@ StyleForge 是一个本地优先的个人衣柜多 Agent 穿搭系统。用户�
 - P5 天气上下文：Agent 1 按请求决定是否需要天气，Context Router 通过 typed Open-Meteo Tool 获取事实，再把同一事实交给三个主 Agent；Weather Tool 不生成穿搭建议，当前实现不是 MCP Server。契约见[天气上下文工具](docs/WEATHER_CONTEXT.md)。
 - P2.5 路由评估切片（已验证）：`evals/cases/task_routing.json` 固化 42 条中英文用例，六类各 7 条；基线准确率 100%，六类逐类准确率均为 100%，失败样本 0。该指标只评价固定集任务路由，不代表穿搭质量。
 - 衣柜照片识别与批量导入：单图识别（`POST /items/analyze` 预填 + `/items/photo` 入库）和批量识别（`POST /items/batch-recognize`，后台 3 张并发、前端轮询进度/预计剩余、失败项可编辑入库或删除、处理完确认删除批次记录）。识别走本地代理调 Vertex Gemini 多模态；批量入库 `embedding_status=pending` 待统一补嵌入。详见[开发过程记录](docs/DEVELOPMENT_LOG.md)第 10 节。
-- 会话持久化多轮对话 + 用户长期记忆：`POST /tasks/execute` 带 `session_id` 落库消息并恢复上文，同一会话内连续追问（"换件外套""更正式一点"）自动携带当前搭配；`user_memories` 从提问中确定性提炼长期偏好（置信度累加、手动优先）并注入三位 Agent；Web 推荐页聊天化 + 新增偏好管理页。契约见[会话与记忆](docs/SESSION_CHAT_MEMORY.md)。
+- 会话持久化多轮对话 + 用户长期记忆：`POST /tasks/execute` 带 `session_id` 落库消息并恢复上文，同一会话内连续追问（"换件外套""更正式一点"）自动携带当前搭配；`user_memories` 由 LLM 从提问中提炼长期偏好（置信度累加、手动优先）并注入三位 Agent；Web 推荐页聊天化 + 新增偏好管理页。契约见[会话与记忆](docs/SESSION_CHAT_MEMORY.md)。
 
 ## 职责边界
 
