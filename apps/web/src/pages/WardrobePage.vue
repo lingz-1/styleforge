@@ -141,6 +141,7 @@
                 <div v-for="line in itemAttrLines(item)" :key="line" class="item-attr-line">{{ line }}</div>
               </div>
               <div class="actions">
+                <el-button size="small" type="primary" plain @click="recommendForItem(item)">搭配</el-button>
                 <el-button size="small" @click="openEdit(item)">编辑</el-button>
                 <el-button size="small" @click="openPhoto(item)">补图</el-button>
                 <el-button size="small" type="danger" plain @click="remove(item.item_id)">
@@ -435,6 +436,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Loading, UploadFilled, Plus } from '@element-plus/icons-vue'
 import {
@@ -443,6 +445,8 @@ import {
   startBatchRecognition, listBatchRecognition, deleteBatchRecognition,
 } from '../services/api'
 import { getUserId, setUserId } from '../services/user'
+
+const router = useRouter()
 
 const userId = ref(getUserId())
 const items = ref([])
@@ -615,6 +619,14 @@ async function remove(itemId) {
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || e.message)
   }
+}
+
+// 衣柜点选单品 → 直达单品搭配：跳到推荐页并以该件为锚点自动发起 item_advice
+function recommendForItem(item) {
+  const label = item.name
+    || [typeLabel(item.item_type), item.color].filter(Boolean).join('·')
+    || item.item_id
+  router.push({ path: '/recommend', query: { item_id: item.item_id, label } })
 }
 
 // --- 创建 ---

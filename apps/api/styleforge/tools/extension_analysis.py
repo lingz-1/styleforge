@@ -56,6 +56,19 @@ OUTFIT_TEMPLATES = {
     "outerwear": (("top", "bottom", "footwear"), ("one_piece", "footwear")),
     "bag": (("top", "bottom", "footwear"), ("one_piece", "footwear")),
     "accessory": (("top", "bottom", "footwear"), ("one_piece", "footwear")),
+    # 运动/内衣/家居/泳装等特殊槽位按身体部位归类：上半身类视同上装，
+    # 下半身类视同下装，其余按完整搭配处理，保证 anchor 槽位永远有模板可套。
+    "base_layer_top": (("bottom", "footwear"),),
+    "activewear_bra": (("bottom", "footwear"),),
+    "sleepwear": (("bottom", "footwear"),),
+    "underwear": (("bottom", "footwear"),),
+    "swimwear": (("bottom", "footwear"),),
+    "swim_coverup": (("bottom", "footwear"),),
+    "skiwear": (("top", "bottom", "footwear"), ("one_piece", "footwear")),
+    "bathwear": (("top", "bottom", "footwear"), ("one_piece", "footwear")),
+    "base_layer_bottom": (("top", "footwear"),),
+    "swim_bottom": (("top", "footwear"),),
+    "other": (("top", "bottom", "footwear"), ("one_piece", "footwear")),
 }
 
 

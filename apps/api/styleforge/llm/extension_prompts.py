@@ -16,7 +16,7 @@ from styleforge.models.task_results import RESULT_MODELS
 from styleforge.orchestration.task_router import TaskType
 
 
-EXTENSION_PROMPT_VERSION = "extension-three-agent-v3.1"
+EXTENSION_PROMPT_VERSION = "extension-three-agent-v3.2"
 
 TASK_COMPLETION_RULES: dict[TaskType, str] = {
     TaskType.OUTFIT_MODIFY: (
@@ -31,6 +31,9 @@ TASK_COMPLETION_RULES: dict[TaskType, str] = {
         "只要 Agent 1 已解析 anchor_item，就不得因缺少场合、季节或偏好返回 needs_clarification。"
         "completed 时必须原样保留 anchor_item，compatible_items_by_slot 至少一个分组非空，"
         "sample_outfits 至少一套；每套 item_ids 必须包含锚点和衣橱支撑单品，并提供 reasoning。"
+        "只能引用 Agent 1 candidate_item_ids 中出现的单品 ID；"
+        "严禁联想或补全同系列、同款不同色等候选范围外单品，"
+        "候选支撑不足时宁可减少搭配套数或分组数量，也绝不引用范围外 ID。"
     ),
     TaskType.WARDROBE_COMPATIBILITY: (
         "只要候选新品已解析，就不得因缺少场合返回 needs_clarification。"

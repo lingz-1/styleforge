@@ -127,6 +127,112 @@ def _validate_gap(
     return issues
 
 
+def _filter_item_refs(
+    items: list[dict[str, Any]],
+    allowed_ids: set[str],
+) -> list[dict[str, Any]]:
+    return [item for item in items if str(item.get("item_id", "")) in allowed_ids]
+
+
+def _filter_slot_refs(
+    grouped: dict[str, list[dict[str, Any]]],
+    allowed_ids: set[str],
+) -> dict[str, list[dict[str, Any]]]:
+    kept: dict[str, list[dict[str, Any]]] = {}
+    for slot, items in grouped.items():
+        filtered = _filter_item_refs(items, allowed_ids)
+        if filtered:
+            kept[slot] = filtered
+    return kept
+
+
+def _sanitize_item_advice_result(
+    result: dict[str, Any],
+    allowed_ids: set[str],
+    anchor_id: str,
+) -> dict[str, Any]:
+    """Prune item references in an item-advice draft to the candidate scope.
+
+    Out-of-scope items (LLM hallucinated same-series variants etc.) are removed
+    from grouped suggestions, flat match lists and sample outfits. A sample
+    outfit is kept only when it still carries the anchor plus at least one
+    supporting item; anything emptied by pruning is dropped. Never invents or
+    reorders items. The caller decides how to handle a contract violation that
+    survives pruning (repair retry, then fail).
+    """
+    pruned = dict(result)
+    if pruned.get("compatible_items_by_slot"):
+        pruned["compatible_items_by_slot"] = _filter_slot_refs(
+            pruned["compatible_items_by_slot"], allowed_ids
+        )
+    if pruned.get("wardrobe_matches"):
+        pruned["wardrobe_matches"] = _filter_item_refs(
+            pruned["wardrobe_matches"], allowed_ids
+        )
+    if pruned.get("wardrobe_matches_by_slot"):
+        pruned["wardrobe_matches_by_slot"] = _filter_slot_refs(
+            pruned["wardrobe_matches_by_slot"], allowed_ids
+        )
+    outfits: list[dict[str, Any]] = []
+    for outfit in pruned.get("sample_outfits", []):
+        kept_ids = [
+            item_id for item_id in outfit.get("item_ids", []) if item_id in allowed_ids
+        ]
+        if anchor_id and anchor_id not in kept_ids:
+            continue  # every sample outfit must keep the anchor
+        if len(kept_ids) < 2:
+            continue  # contract requires the anchor plus a supporting item
+        copy = dict(outfit)
+        copy["item_ids"] = kept_ids
+        outfits.append(copy)
+    pruned["sample_outfits"] = outfits
+    return pruned
+
+
+def sanitize_extension_references(
+    agent1: Agent1TaskOutput,
+    agent2: Agent2TaskOutput,
+) -> Agent2TaskOutput:
+    """Drop out-of-bound item references from an Agent 2 draft in place.
+
+    Pure cleanup (never invents or reorders items): removes references that fall
+    outside the Agent 1 candidate scope so borderline LLM hallucinations (e.g.
+    completing same-series variant IDs) no longer hard-fail the extension
+    validator. Shared ``used_item_ids`` / ``evidence_source_ids`` are
+    intersected for every task type; ITEM_ADVICE additionally prunes the result
+    body. Returns the same object when nothing needed cleaning.
+    """
+    wardrobe_scope = set(agent1.candidate_item_ids)
+    wardrobe_scope.update(agent1.facts.get("current_item_ids", []))
+
+    used_kept = sorted(set(agent2.used_item_ids) & wardrobe_scope)
+    evidence_ids = {str(item.source_id) for item in agent1.evidence}
+    evidence_kept = sorted(set(agent2.evidence_source_ids) & evidence_ids)
+
+    result = agent2.result
+    if agent1.task_type is TaskType.ITEM_ADVICE:
+        anchor_id = str((agent1.facts.get("anchor_item") or {}).get("item_id", ""))
+        allowed = set(agent1.candidate_item_ids)
+        if anchor_id:
+            allowed.add(anchor_id)
+        result = _sanitize_item_advice_result(result, allowed, anchor_id)
+
+    changed = (
+        used_kept != sorted(agent2.used_item_ids)
+        or evidence_kept != sorted(agent2.evidence_source_ids)
+        or result is not agent2.result
+    )
+    if not changed:
+        return agent2
+    return agent2.model_copy(
+        update={
+            "used_item_ids": used_kept,
+            "evidence_source_ids": evidence_kept,
+            "result": result,
+        }
+    )
+
+
 def validate_extension_draft(
     *,
     agent1: Agent1TaskOutput,

@@ -36,6 +36,13 @@
 
         <WeatherCard />
 
+        <section class="anchor-bar">
+          <el-button type="primary" plain size="large" :loading="loading" @click="openPickItem">
+            🧥 从衣柜选一件单品搭配
+          </el-button>
+          <span class="anchor-hint">选择衣柜内任意单品，三位 Agent 会以它为锚点生成整套搭配</span>
+        </section>
+
         <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="block" />
 
         <section v-if="store.messages.length" class="chat-history" aria-label="会话记录">
@@ -104,17 +111,45 @@
           </div>
           <p class="shortcut">Ctrl / ⌘ + Enter 提交</p>
         </section>
+
+        <el-dialog v-model="pickVisible" title="选择一件单品作为搭配锚点" width="760px" top="6vh">
+          <div class="pick-header">
+            <el-input v-model="pickKeyword" placeholder="搜索名称 / 品类 / 颜色" clearable />
+          </div>
+          <div v-if="pickLoading" class="pick-empty">正在加载衣柜…</div>
+          <div v-else-if="!filteredItems.length" class="pick-empty">
+            {{ pickKeyword ? '没有匹配的单品' : '衣橱还是空的，先到「我的衣橱」添加单品' }}
+          </div>
+          <div v-else class="pick-grid">
+            <button
+              v-for="item in filteredItems"
+              :key="item.item_id"
+              type="button"
+              class="pick-card"
+              @click="pickAndRun(item)"
+            >
+              <el-image :src="imageUrl(item.image_url)" fit="cover" class="pick-img">
+                <template #error><div class="pick-ph">无图</div></template>
+              </el-image>
+              <div class="pick-meta">
+                <strong>{{ item.name || typeLabel(item.item_type) }}</strong>
+                <small>{{ typeLabel(item.item_type) }} · {{ item.color || '—' }}</small>
+              </div>
+            </button>
+          </div>
+        </el-dialog>
       </div>
     </div>
   </main>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import WeatherCard from '../components/WeatherCard.vue'
 import TaskResultView from '../components/TaskResultView.vue'
-import { createChatSession, listChatSessions, deleteChatSession } from '../services/api'
+import { createChatSession, listChatSessions, deleteChatSession, getWardrobe, imageUrl } from '../services/api'
 import { useRecommendationStore } from '../stores/recommendation'
 import { getUserId, setUserId } from '../services/user'
 
@@ -129,6 +164,56 @@ const userId = ref(getUserId())
 const request = ref('黑色马甲怎么搭？')
 const store = useRecommendationStore()
 const { loading, error } = storeToRefs(store)
+const route = useRoute()
+const router = useRouter()
+
+// --- 首页「从衣柜选单品搭配」：以衣橱内某件单品为锚点直达 item_advice ---
+const TYPE_LABELS = {
+  top: '上装', pants: '裤装', skirt: '半身裙', dress: '连衣裙', jumpsuit: '连体装',
+  outwear: '外套', shoes: '鞋', bag: '包', accessory: '配饰', other: '其他',
+}
+const pickVisible = ref(false)
+const pickLoading = ref(false)
+const pickKeyword = ref('')
+const wardrobeItems = ref([])
+const loadedForUser = ref('')
+const typeLabel = (type) => TYPE_LABELS[type] || type
+
+const filteredItems = computed(() => {
+  const kw = pickKeyword.value.trim().toLowerCase()
+  if (!kw) return wardrobeItems.value
+  return wardrobeItems.value.filter((item) => {
+    const hay = [item.name, item.item_type, typeLabel(item.item_type), item.color]
+      .filter(Boolean).join(' ').toLowerCase()
+    return hay.includes(kw)
+  })
+})
+
+async function openPickItem() {
+  pickKeyword.value = ''
+  if (loadedForUser.value !== userId.value) {
+    loadedForUser.value = userId.value
+    wardrobeItems.value = []
+    pickLoading.value = true
+    try {
+      const res = await getWardrobe(userId.value)
+      wardrobeItems.value = res.data.items || []
+    } catch (e) {
+      error.value = e.response?.data?.detail || e.message
+    } finally {
+      pickLoading.value = false
+    }
+  }
+  pickVisible.value = true
+}
+
+function pickAndRun(item) {
+  pickVisible.value = false
+  const label = item.name
+    || [typeLabel(item.item_type), item.color].filter(Boolean).join('·')
+    || item.item_id
+  run({ itemId: item.item_id, label })
+}
 
 // --- Multi-turn chat sessions (persisted per user, restored on reload) ---
 const sessions = ref([])
@@ -184,8 +269,14 @@ function agentRail(payload) {
   return AGENTS.map((agent) => ({ ...agent, done: nodes.has(agent.node) || agent.aliases.some((name) => nodes.has(name)) }))
 }
 
-async function run() {
-  if (!request.value.trim() || loading.value) return
+async function run({ itemId = '', label = '' } = {}) {
+  // 衣柜点选单品直达：以该件为锚点构造请求文本，其余复用会话与提交逻辑。
+  let requestText = request.value.trim()
+  if (itemId) {
+    requestText = `以「${label || '这件单品'}」为锚点，搭配一整套`
+    request.value = requestText
+  }
+  if (!requestText || loading.value) return
   // 已授予「使用期间允许」定位权限时，每次新提问都静默取一次最新位置；
   // 未授权不打扰（不实时定位，明确目的地仍由后端按地点名解析天气）。
   await refreshLocationIfGranted()
@@ -201,7 +292,10 @@ async function run() {
       sid = '' // 降级为无会话执行（不落库）
     }
   }
-  await store.run(userId.value, request.value, 3, deviceLocation.value, sid)
+  await store.run(userId.value, requestText, 3, deviceLocation.value, sid, {
+    itemId,
+    requestedTaskType: itemId ? 'item_advice' : undefined,
+  })
   request.value = ''
   void refreshSessions()
 }
@@ -345,6 +439,14 @@ void checkLocationPermission()
 
 onMounted(async () => {
   await refreshSessions()
+  // 从衣柜点选单品跳转而来（URL 带 item_id）：立即以该件为锚点发起单品搭配，
+  // 完成后清掉 query，避免刷新页面重复触发。
+  const anchorItemId = route.query.item_id
+  if (anchorItemId) {
+    await run({ itemId: String(anchorItemId), label: String(route.query.label || '') })
+    router.replace({ path: '/recommend' })
+    return
+  }
   // 恢复上次会话（localStorage 按用户隔离，跨刷新/跨设备保持）。
   const saved = localStorage.getItem(sessionStorageKey())
   if (saved && sessions.value.some((session) => session.session_id === saved)) {
@@ -399,6 +501,17 @@ h1 { margin: 0; max-width: 720px; font-family: Georgia, 'Noto Serif SC', serif; 
 .agent-step strong, .agent-step small { display: block; }.agent-step small { margin-top: 3px; color: #7e8882; }
 .step-status { color: var(--moss); font-size: 12px; }
 .location-bar { display: flex; align-items: center; gap: 10px; margin-top: 12px; }.location-msg { font-size: 12px; color: #7c8580; }.location-msg.ready { color: var(--moss); }.location-msg.denied { color: #a86138; }.location-msg.error { color: #a83a38; }
+.anchor-bar { display: flex; align-items: center; gap: 14px; margin-top: 20px; }.anchor-hint { color: #7c8580; font-size: 13px; }
+.pick-header { margin-bottom: 14px; }
+.pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 12px; max-height: 56vh; overflow: auto; padding: 4px; }
+.pick-card { display: block; width: 100%; padding: 8px; border: 1px solid #d9ded9; border-radius: 6px; background: #fff; cursor: pointer; text-align: left; transition: border-color .15s, box-shadow .15s; }
+.pick-card:hover, .pick-card:focus-visible { border-color: var(--copper); box-shadow: 0 2px 8px rgba(0, 0, 0, .06); outline: none; }
+.pick-img { display: block; width: 100%; height: 96px; border-radius: 4px; }
+.pick-ph { height: 96px; display: flex; align-items: center; justify-content: center; background: #eef1ec; color: #98a09b; font-size: 12px; }
+.pick-meta { margin-top: 6px; }
+.pick-meta strong, .pick-meta small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-meta strong { font-size: 12px; color: var(--ink); }.pick-meta small { margin-top: 2px; color: #8a928d; font-size: 11px; }
+.pick-empty { padding: 34px 0; text-align: center; color: #98a09b; font-size: 13px; }
 @media (max-width: 900px) { .hero { flex-direction: column; }.user-box { width: 100%; }.chat-layout { flex-direction: column; }.session-sidebar { position: static; width: 100%; max-height: none; }.agent-rail { grid-template-columns: 1fr; }.agent-step { border-right: 0; border-bottom: 1px solid #d9ded9; }.prompt-footer { align-items: stretch; flex-direction: column; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
 </style>

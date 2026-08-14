@@ -31,6 +31,7 @@ from styleforge.models.agent_tasks import Agent1TaskOutput, Agent2TaskOutput
 from styleforge.models.context import ContextPack
 from styleforge.models.task_results import validate_task_result
 from styleforge.tools.candidate_generation import generate_candidates, select_diverse_candidates
+from styleforge.tools.extension_validation import sanitize_extension_references
 
 
 def deterministic_strategy(task: TaskSpec) -> CompositionStrategy:
@@ -152,6 +153,26 @@ class ComposerAgent:
                 if result["status"] != output.status:
                     raise ValueError("result.status differs from top-level status")
                 output = output.model_copy(update={"result": result})
+                # Boundary cleanup: drop out-of-scope references (LLM may fill
+                # same-series variants that were never in Agent 1's candidate
+                # scope). Re-validate afterwards because pruning can empty a
+                # slot or drop the only sample outfit.
+                output = sanitize_extension_references(agent1_output, output)
+                try:
+                    result = validate_task_result(output.task_type, output.result)
+                    output = output.model_copy(update={"result": result})
+                except (ValidationError, ValueError) as error:
+                    if attempt == 0:
+                        repair_feedback = (
+                            "上次草稿引用了 Agent 1 候选范围外的单品 ID，清理后无法满足完成条件。"
+                            "请严格只使用 Agent 1 的 candidate_item_ids 中的单品，"
+                            "不得联想同系列或同款不同色的单品。"
+                            f"校验失败：{error}"
+                        )
+                        continue
+                    raise LlmSchemaViolation(
+                        f"extension Agent 2 result invalid after boundary cleanup: {error}"
+                    ) from error
                 break
             except (ValidationError, ValueError, KeyError) as error:
                 if attempt == 0:

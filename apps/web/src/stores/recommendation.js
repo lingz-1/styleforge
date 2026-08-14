@@ -23,11 +23,11 @@ export const useRecommendationStore = defineStore('recommendation', () => {
     return typeof text === 'string' ? text : JSON.stringify(text)
   }
 
-  async function run(userId, request, maxResults = 3, locationContext = null, sid = '') {
+  async function run(userId, request, maxResults = 3, locationContext = null, sid = '', opts = {}) {
     if (loading.value) return // already generating
     loading.value = true
     error.value = ''
-    const key = `${userId}|${maxResults}|${request}|${locationContext ? JSON.stringify(locationContext) : ''}|${sid}`
+    const key = `${userId}|${maxResults}|${request}|${locationContext ? JSON.stringify(locationContext) : ''}|${sid}|${opts.itemId || ''}|${opts.requestedTaskType || ''}`
     requestKey = key
     // Optimistically show the user turn; the backend also persists it on send.
     const userMessage = { role: 'user', content: request }
@@ -39,6 +39,9 @@ export const useRecommendationStore = defineStore('recommendation', () => {
         max_results: maxResults,
         session_id: sid,
         ...(locationContext ? { location_context: locationContext } : {}),
+        // 衣柜点选单品直达：精确锁定锚点并显式路由到 item_advice
+        ...(opts.itemId ? { item_id: opts.itemId } : {}),
+        ...(opts.requestedTaskType ? { requested_task_type: opts.requestedTaskType } : {}),
       })
       if (requestKey === key) {
         payload.value = res.data

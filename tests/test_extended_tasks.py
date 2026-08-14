@@ -610,3 +610,89 @@ def test_agent3_rejection_recomposes_once_and_reviews_again(db_dsn: str) -> None
     ]
     assert payload["trace"][-3]["status"] == "rejected"
     assert payload["trace"][-1]["status"] == "completed"
+
+
+def test_item_advice_prunes_out_of_scope_llm_references(db_dsn: str) -> None:
+    """LLM hallucinated same-series variant IDs are pruned to the candidate scope
+    instead of hard-failing the extension validator (regression for tank-top 422)."""
+    database_path = _seed_database(db_dsn)
+    dirty_draft = _item_advice_draft(summary="越界联想同系列背心变体")
+    dirty_draft["result"]["compatible_items_by_slot"]["top"].append(
+        {"item_id": "P00893231", "name": "同系列背心变体"}
+    )
+    dirty_draft["result"]["sample_outfits"][0]["item_ids"] = [
+        "candidate-preview",
+        "shirt",
+        "trousers",
+        "loafers",
+        "P00893231",
+    ]
+    dirty_draft["used_item_ids"] = ["shirt", "trousers", "loafers", "P00893231"]
+    workflow, llm = _workflow(database_path, dirty_draft)
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="以黑色马甲为锚点，搭配一整套",
+            requested_task_type=TaskType.ITEM_ADVICE,
+        )
+    )
+
+    assert payload["status"] == "completed"
+    referenced = []
+    referenced += payload["result"]["sample_outfits"][0]["item_ids"]
+    for items in payload["result"]["compatible_items_by_slot"].values():
+        referenced += [item["item_id"] for item in items]
+    assert "P00893231" not in referenced
+    assert "candidate-preview" in payload["result"]["sample_outfits"][0]["item_ids"]
+    assert "shirt" in payload["result"]["sample_outfits"][0]["item_ids"]
+    assert payload["diagnostics"]["agent2"]["call_count"] == 1  # no repair needed
+    _assert_three_agent_execution(payload, llm)
+
+
+def test_item_advice_fully_out_of_scope_triggers_repair(db_dsn: str) -> None:
+    """When pruning empties every slot and outfit, Agent 2 retries once with a
+    repair hint instead of returning a broken draft or hard-failing."""
+    database_path = _seed_database(db_dsn)
+    broken_draft = _item_advice_draft(summary="全部引用越界变体")
+    broken_draft["result"]["compatible_items_by_slot"] = {
+        "top": [{"item_id": "P00893231", "name": "越界背心"}]
+    }
+    broken_draft["result"]["sample_outfits"] = [
+        {
+            "outfit_id": "broken-1",
+            "item_ids": ["candidate-preview", "P00893231"],
+            "reasoning": "补全同系列背心",
+        }
+    ]
+    broken_draft["used_item_ids"] = ["P00893231"]
+    llm = ScriptedExtensionLlm(
+        [
+            intent_response("黑色马甲通用搭配"),
+            broken_draft,
+            _item_advice_draft(),
+            approved_review(),
+        ]
+    )
+    workflow = MultiTaskWorkflow(
+        database_path=database_path,
+        knowledge_root=KNOWLEDGE_ROOT,
+        llm_client=llm,
+    )
+
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="黑色马甲怎么搭？",
+            requested_task_type=TaskType.ITEM_ADVICE,
+        )
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["result"]["sample_outfits"][0]["item_ids"] == [
+        "candidate-preview",
+        "shirt",
+        "trousers",
+        "loafers",
+    ]
+    assert payload["diagnostics"]["agent2"]["call_count"] == 2
+    assert "候选范围外" in llm.calls[2]["user"]
