@@ -1,6 +1,6 @@
 # StyleForge 项目状态
 
-> 更新时间：2026-08-10
+> 更新时间：2026-08-14
 > 定位：用于实习求职展示的本地个人衣柜多 Agent 穿搭项目  
 > 当前阶段：Polyvore 演示主链路已形成可运行基线；Mytheresa 接入和订单衣柜导入已完成代码实现，订单衣柜最新版已通过回归与一次性数据库验收，但真实订单尚未提交、个人商品嵌入和 Mytheresa 全量接入仍待端到端验收。2026-08-05 修复了运动场合推荐不合理、UI 提交强制逐条填写、推荐结果不更新等问题，详见[问题与解决记录](ISSUE_LOG.md)。2026-08-05 完成 v3.2.1 语义驱动三 Agent 改造（DeepSeek）；2026-08-06 用真实 DeepSeek API 对 8 类代表性请求完成端到端验收（全部 accept、正常 3 次 LLM 调用、0 回退、推荐 100% 衣柜归属），备选方案已补确定性评分。2026-08-06 落地《评估方案.txt》五维统一评估框架：统一 Rubric 贯穿三 Agent、第三维改名 `outfit_coordination`、`request_signature` 新增 `explicit_style`、用户可配置五维权重（真实链路验证首选分=用户权重加权结果）。2026-08-06 完成架构规划 v3.3-plan.1（参考目录 + 扩展版方案收口，见 [ARCHITECTURE_PLAN.md](architecture/ARCHITECTURE_PLAN.md)），后端移动至 `apps/api/styleforge/`（保持 import），双端前端（Vue Web + 小程序）骨架与核心功能完成（衣柜/上传/编辑/补图/订单导入/推荐/偏好），新增拍照创建与修改衣物接口；小程序真机预览因校园网隔离待通。2026-08-09 完成默认模拟衣柜重建（catalog=衣柜零冗余）、FashionCLIP 嵌入 + FAISS 索引全量构建、衣柜可折叠（双端）、推荐跨页面持久化、推荐评分改为按 LLM 五维分排序并双分数展示（LLM+规则归一化到 100）、中英分类结构文档与上传表单大类必选/细分类可选联动、小程序真机 http 图片本地化修复，详见下方各节。
 
@@ -13,6 +13,10 @@
 > 2026-08-12 P1进度：会话持久化多轮对话 + **Context-Aware 自适应偏好记忆**已完成。会话层新增 `chat_sessions/chat_messages` 两表、会话 HTTP API、`POST /tasks/execute` 消息落库、两段式路由（"换件外套""更正式一点"自动带上文并走整体调整模式）、前端聊天化（会话侧栏 + 历史恢复 + localStorage 记住当前会话）。记忆层按《StyleForge 记忆系统实现方案.md》落地完整闭环：`interaction_events → preference_evidence → preference_model` 三表（Schema v11，取代 v10 `user_memories`）+ Memory Resolver 五桶拆分 + 三 Agent 差异化注入 + 生命周期/衰减 + consolidation；行为事件采集（`POST /users/{user_id}/events` + 现有端点埋点 + 前端推荐结果行为按钮）+ LLM 结构化证据提炼。**v2.1 泛化改造**：行为证据改为 item 级 + color 归因 + category 归纳（≥3 件不同单品才归纳），弱证据 scope 修正为 contextual+场景词；全局偏好跨 value 冲突降权（×0.9 + `conflict_with` 互标）；Resolver contextual 先做上下文门控（不匹配不泄漏）。当批验证：全量 Pytest **422 passed**、`compileall`、Ruff clean、Vue 生产构建通过；契约见[会话与记忆契约](SESSION_CHAT_MEMORY.md)，过程见[开发过程记录](DEVELOPMENT_LOG.md)。
 
 > 2026-08-12 部署环境升级批次：数据层全量迁移到本地 **PostgreSQL 17.10**（`STYLEFORGE_DATABASE_DSN`，`styleforge`/`styleforge_test` 双库，SCHEMA_VERSION=10），SQLite 退役；**Redis** 会话状态缓存（读穿，`STYLEFORGE_REDIS_ENABLED`，默认关，异常自动回落 DB）；**Chroma RAG** 知识向量检索（FashionCLIP 512 维过渡，`styleforge-knowledge-index` 构建，失败降级关键词）。20 张表 15,271 行一次性迁移零差异；pytest 测试改为连 PG 每测试独立 schema 隔离。当批验证：全量 Pytest **382 passed**、`compileall`、Ruff clean。详见[本地部署](LOCAL_DEPLOYMENT.md)与[开发过程记录](DEVELOPMENT_LOG.md)。
+
+> 2026-08-13 记忆提炼批次：Context-Aware 记忆的 LLM 侧 prompt 连续优化至 v2.4（`llm/memory_prompts.py`，`memory-evidence-v2.4`）：确定性 scope 规则（习惯→global、明确限定→contextual、一次性场景不改其他 scope）、attribute 消歧（正式场合→occasion、牛仔→category、印花归 style）、单件指代不提炼、弱信号（还好/还行）不提炼、6 例 few-shot。评估集扩到 33 例口语化请求，runner 独立化（直接导入 `MEMORY_PROMPT_VERSION` 防版本漂移），真实 DeepSeek 连续 3 次运行 F1 **0.847 / 0.911 / 0.921**（v2.0 基线约 0.63），极性一致率 1.00、scope 一致率 0.97+；详见[测试与评估](TESTING_AND_EVALUATION.md)第 9 节与[开发过程记录](DEVELOPMENT_LOG.md)第 13 节。
+
+> 2026-08-14 评估基准数据集确认：`E:\01-style-dataset\p-outfit` 为官方 **Polyvore Outfits** 评测基准（HF ArtmeScienceLab/Polyvore-Outfits，cc-by-4.0，Maryland LSTM / Type Spaces 论文同款）。Compatibility 任务 train/valid/test = 33,990 / 6,000 / 30,290（正负平衡对）；FITB 留一件任务 16,995 / 3,000 / 15,145 题 + Maryland hardneg 3,076 题；disjoint 图片 71,967 / 14,657 / 70,035 张，FITB test 74,262 个 item 引用 100% 有图；映射链 `set_id_index → test.json(set_id→items→item_id) → images/{split}/{item_id}.jpg` 已验证 0 缺失；test 70,035 个 item_id 100% 带 `semantic_category` 品类标签。据此完成评估计划（计划书 v4 §16.3/16.4）可行性分析：图片门禁阻塞解除，兼容性 5 基线中随机排序 / 品类共现 / Fashion embedding / 学习型模型可直接跑，规则评分需适配（官方基准无颜色/正式度字段）。下一步：第一段离线基线（随机/共现/FashionCLIP → `artifacts/evaluation/polyvore_baselines.json`）+ 单品搭配真实 LLM 端到端验证。
 
 > 历史统计口径修正：2026-08-06真实API的8类请求全部`accept`且100%衣柜归属；其中7类无回退，“高考”请求的Critic发生一次瞬时API失败并按标准推荐策略降级。文中旧的“8请求0回退”摘要以本说明为准。
 
@@ -63,10 +67,15 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 | Context-Aware 自适应偏好记忆（2026-08-12） | 已验证 | 行为事件 → 证据 → 维度化偏好模型完整闭环：`interaction_events / preference_evidence / preference_model` 三表（Schema v11，取代 `user_memories`）；`POST /users/{user_id}/events` 行为采集 + 前端推荐结果行为按钮；确定性聚合（幂等全量重算）+ 生命周期/衰减 + Memory Resolver 五桶 + 三 Agent 差异化注入；LLM 结构化证据提炼；consolidation 去重重算。v2.1：行为证据 item 级 + color 归因 + category 归纳（≥3 件）、弱证据 scope 改 contextual+场景词、全局偏好跨 value 冲突降权 + Resolver 上下文门控；全量 **422 passed** |
 | PostgreSQL 全量迁移（2026-08-12） | 已验证 | SQLite 退役，20 表 15,271 行迁移到 PG 17.10（`STYLEFORGE_DATABASE_DSN`）；pytest 连 PG 每测试独立 schema 隔离；全量 382 passed |
 | Redis 会话缓存 + Chroma RAG（2026-08-12） | 已验证（可选） | Redis 读穿缓存默认关，异常回落 DB；Chroma 知识向量检索失败降级关键词；注入式测试覆盖 |
+| 记忆提炼 LLM 评估（2026-08-13） | 已验证 | `memory_prompts.py` v2.4：确定性 scope/消歧/单件不提炼/弱信号 + 6 few-shot；33 例口语化评估集 3 次运行 F1 0.847/0.911/0.921（v2.0 基线 0.63）、极性一致率 1.00、scope 一致率 0.97+ |
+| 官方 Polyvore 评测基准（2026-08-14） | 数据集就位 | `E:\01-style-dataset\p-outfit`：Compatibility 30,290 正负对 + FITB 15,145 题 + Maryland hardneg 3,076 题 + disjoint 图片 156,659 张；映射链与品类标签 100% 验证 |
+| 兼容性 / FITB 离线评测 | 已规划，未执行 | 随机/品类共现/FashionCLIP 基线 → `polyvore_baselines.json`；规则评分需适配品类/颜色字段 |
 
 ## 3. 已验证证据
 
 ### 3.1 Polyvore 基线
+
+> 注：本节为 Garments2Look-Polyvore 口径（`polyvore_image_v1.0_2512.json`，126,928 件，用于演示衣柜与检索评估）。另有一套官方 Polyvore-Outfits 评测基准位于 `E:\01-style-dataset\p-outfit`（见 §2 状态表与 2026-08-14 进度段），二者 item ID 与图片组织不保证一致，不直接拼接，视觉评测统一以官方基准为规范来源。
 
 - 商品元数据：126,928 条。
 - 商品图片：126,928 张，缺失 0、解码错误 0。
@@ -236,6 +245,7 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 8. 最新 Streamlit 订单状态列、提交错误提示和个人图片重嵌入尚未人工验收。
 9. 语义三 Agent 已用假 LLM 完成工作流级回归，并于2026-08-06用真实DeepSeek API验收8类请求（全部accept、100%衣柜归属；7类无回退，“高考”请求Critic瞬时降级一次）。
 10. 搭配质量尚无人工偏好评测；现有 95.5% 是检索品类指标，不是穿搭满意度。
+11. 官方 Polyvore 基准（`E:\01-style-dataset\p-outfit`）的兼容性 / FITB 离线评测尚未执行；规则评分基线需先适配（官方数据无颜色/正式度字段，颜色或需从图片/文本推断）。
 
 ## 6. 已知限制
 

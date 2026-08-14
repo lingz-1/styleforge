@@ -1,506 +1,560 @@
-StyleForge v3.2.1-final
-五维统一评估框架修改案 v1.1
+# StyleForge 评估体系设计文档
 
-修改性质：基于现有 StyleForge v3.2.1-final 的评价方式调整
-不修改：三 Agent 主架构、LangGraph 编排、检索/组合/评审流程
-修改核心：建立统一五维 Rubric，并让三个 Agent 在不同阶段共享同一评价口径。
+**文档版本**: v1.0
+**基于框架**: Agent 系统通用评估框架 v1.0
+**状态**: 可冻结
 
-一、修改目标
 
-当前 StyleForge 的核心链路仍然保持：
+## 摘要
 
+本文档将通用 Agent 评估框架实例化到 StyleForge——一个基于三 Agent 协作的 AI 穿搭系统。StyleForge 的评估不是“给最终穿搭打个分”，而是回答一组完整的问题：系统能否完成真实穿搭任务？生成质量如何？三个 Agent 是否正确协作？工具和检索是否正确使用？Critic 是否真正改善了结果？系统是否稳定？相比 Single LLM 和已有服装搭配方法到底提升了什么？
+
+评估体系采用四层结构：**L1 任务层**判断任务是否完成，**L2 过程层**评价 Agent 与工具执行是否正确，**L3 质量层**衡量穿搭质量与可靠性，**L4 对比层**通过基线对照、消融实验和公开 Benchmark 证明系统设计的价值。
+
+
+## 第一部分：总体评估结构
+
+StyleForge 评估采用四层结构，每层回答不同层面的问题：
+
+```text
+StyleForge Evaluation
+│
+├── L1 Task-Level Eval
+│     真实任务最终有没有完成
+│
+├── L2 Process / Agent Eval
+│     Agent、Tool、Handoff、Routing 是否正确
+│
+├── L3 Quality / Reliability Eval
+│     穿搭质量、约束、稳定性、成本
+│
+└── L4 Comparative Eval
+      Baseline / Ablation / Public Benchmark
+```
+
+| 层级 | 目的 | 核心问题 |
+|------|------|----------|
+| L1 | 主结果 | 任务最终完成了吗？ |
+| L2 | 过程诊断 | 为什么成功或失败？ |
+| L3 | 质量与可靠性 | 效果好不好？稳定不稳定？ |
+| L4 | 价值证明 | 架构和模块真的有用吗？ |
+
+
+## 第二部分：Benchmark 设计
+
+### 2.1 术语定义
+
+- **Benchmark**：一套固定的 StyleForge 标准测试集，用于开发验收、版本比较和回归测试。
+- **Eval Case**：Benchmark 中的一道具体穿搭任务，包含完整的输入、预期行为和判定规则。
+- **Golden Set**：经人工确认的高质量标准任务集，用于核心能力锚定。
+
+### 2.2 Eval Case 数据结构
+
+每条 Eval Case 定义为以下结构：
+
+```json
+{
+  "case_id": "Q2O_001",
+  "task_type": "QUERY_TO_OUTFIT",
+
+  "user_request": "...",
+  "wardrobe_snapshot": "...",
+  "context": {},
+  "user_memory": {},
+  "previous_outfit": null,
+
+  "hard_assertions": [],
+  "soft_rubric": {},
+  "process_assertions": [],
+
+  "pass_criteria": {}
+}
+```
+
+每个字段的含义：
+
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| `case_id` | string | 唯一标识符 |
+| `task_type` | enum | 任务类型（T1-T4） |
+| `user_request` | string | 用户原始请求 |
+| `wardrobe_snapshot` | object | 衣橱状态快照 |
+| `context` | object | 上下文信息（天气、场景等） |
+| `user_memory` | object | 用户历史偏好 |
+| `previous_outfit` | object | 历史搭配记录 |
+| `hard_assertions` | list | 硬性断言列表 |
+| `soft_rubric` | object | 五维评分量表 |
+| `process_assertions` | list | 过程级断言 |
+| `pass_criteria` | object | PASS/FAIL 判定规则 |
+
+### 2.3 任务类型（T1-T4）
+
+Benchmark 覆盖四类核心任务：
+
+**T1. Query-to-Outfit**
+
+用户自然语言描述需求 → 系统生成完整 Outfit。这是 StyleForge 的第一核心任务。
+
+完整执行路径：
+
+```text
+User Query
+   ↓
 Semantic Retrieval Agent
-        ↓
+   ↓
+Context / Tools / Retrieval
+   ↓
 Outfit Composer Agent
-        ↓
+   ↓
+Validator
+   ↓
 Outfit Critic Agent
+   ↓
+Final Outfit
+```
 
-本修改案不改变这一架构。
+示例：
+> “明天看音乐剧，想有点复古文学感，但别太正式。”
 
-主要解决的问题是：
+---
 
-三个 Agent 不能分别按照自己的标准理解“什么是好的推荐”。
+**T2. Anchor-to-Outfit**
 
-因此建立统一的五维评价框架：
+指定一件单品，要求围绕它生成完整 Outfit。核心要求：
 
-① 需求还原度 Request Relevance
-② 请求特异性 Request Specificity
-③ 搭配协调性 Outfit Coordination
-④ 实穿性 Wearability
-⑤ 新鲜感 Freshness
+- Anchor 必须保留
+- 其他单品围绕 Anchor 生成
+- Outfit 必须完整
+- 用户上下文仍需满足
 
-这五个维度既用于最终 Critic 评价，也作为 Agent 1 和 Agent 2 的决策依据。
+示例：
+> “就用这件棕色夹克，搭一套秋天上课穿的。”
 
-二、统一五维 Rubric
-维度	英文	核心问题
-需求还原度	Request Relevance	推荐是否真正满足用户完整需求？
-请求特异性	Request Specificity	推荐是否真正针对当前请求，而非泛化日常搭配？
-搭配协调性	Outfit Coordination	各单品组合后是否形成协调完整的穿搭？
-实穿性	Wearability	方案在真实场景中是否合理可穿？
-新鲜感	Freshness	是否避免近期推荐的机械重复？
+---
 
-默认权重仍然保持：
+**T3. Outfit Modify**
 
-{
-  "request_relevance": 0.25,
-  "request_specificity": 0.25,
-  "outfit_coordination": 0.20,
-  "wearability": 0.15,
-  "freshness": 0.15
-}
+已有 Outfit 基础上按指令进行局部修改。测试能力：
 
-同时保留你之前的设计：允许用户设置五维权重。
+- 局部修改精度
+- 上下文记忆
+- 锁定单品保持
+- 多轮对话控制
 
-但用户权重不是新的评价维度，而只是改变五个既有维度的重要程度。
+示例：
+> “鞋换正式一点，其他别动。”
 
-三、维度一：需求还原度
-3.1 定义
+---
 
-**需求还原度（Request Relevance）**评价：
+**T4. Wardrobe Gap / No-Solution**
 
-推荐结果在多大程度上准确响应了用户完整请求中的有效信息。
+衣橱不足以满足需求时，系统应识别并返回 `WARDROBE_GAP` 而非强行生成。
 
-这里不只是用户明确说出的硬性要求，还包括从完整语境中能够合理理解出的信息。
+示例：
+> 用户要求 35°C 海边穿搭，但衣橱只有厚冬装。
 
-评价范围包括：
+正确结果应为结构化状态 `status: "FAILURE_DUE_TO_GAP"`，而非任何 Outfit 或解释性文本。
 
-Request Relevance
-│
-├── 穿搭风格 Explicit Style
-│   ├── 美拉德
-│   ├── 多巴胺
-│   ├── 薄荷曼波
-│   ├── 亚比
-│   ├── American Vintage
-│   └── 其他用户明确指定风格
-│
-├── 活动 Activity
-├── 主题 Theme
-├── 文化/作品语境 Cultural Context
-├── 环境 Environment
-├── 氛围 Mood
-├── 使用需求 Practical Needs
-└── 显式偏好 Explicit Preferences
-示例 1
+### 2.4 数据集划分
 
-用户：
+| 集合 | 用途 | 使用频率 |
+|------|------|----------|
+| **Development Set** | 日常开发调试 | 反复运行 |
+| **Validation Set** | 阶段性版本比较 | 按需运行 |
+| **Holdout Set** | 最终验收 | 版本冻结时运行一次 |
+| **Challenge Set** | 高难度专项评估 | 按需运行 |
+| **Regression Set** | 历史 Bug 回归 | 每版必跑 |
 
-“给我一套美拉德风穿搭。”
+**Holdout Set 原则**：开发过程中完全不用于调优，仅在最终验收时运行。一旦跑过，该集合不再“未知”，应在下一开发周期更新。
 
-那么美拉德风本身就是 Relevance 的主要评价依据。
+**Challenge Set 构成**：复杂上下文、冲突要求、小衣橱、缺失信息、长对话、容易出现 Retry 的任务。
 
-不应该再额外建立：
 
-Style Match = 20%
+## 第三部分：评估方法论
 
-否则会与需求还原度重复计权。
+### 3.1 判定机制
 
-示例 2
+每个 Eval Case 的判定由三层规则构成：
 
-用户：
+**1. Hard Assertion（硬断言）**
 
-“明天去看《悲惨世界》音乐剧穿什么？”
+机器可检查的 PASS/FAIL 条件。违反任何一条即 Case FAIL。
 
-这里 Relevance 不应该只理解：
+```text
+Anchor 必须存在
+所有 item 必须来自衣橱
+不得修改 locked slots
+必须包含 shoes
+不得出现重复 item
+```
 
-Activity = 看音乐剧
+这些由 Code-based Grader 执行，不交给 LLM。
 
-而应该综合理解：
+**2. Process Assertion（过程断言）**
 
-活动：剧场观看音乐剧
-作品语境：《悲惨世界》
-氛围：克制、沉郁、文学/历史感
-使用需求：剧场、久坐
+执行路径必须满足的条件，违反即 FAIL。
 
-因此需求还原度负责判断：
+```text
+必须调用 Wardrobe Retriever
+必须传递 Anchor ID
+不得生成 wardrobe 外 item
+Critic=RETRIEVE_MORE 时必须重新进入 Retrieval
+```
 
-系统到底有没有理解用户在问什么。
+**3. Soft Rubric（五维评分量表）**
 
-四、维度二：请求特异性
-4.1 定义
+不直接判 FAIL，而是影响 Case 的通过判定中的质量分维度：
 
-**请求特异性（Request Specificity）**评价：
+| 维度 | 缩写 | 权重 | 测量内容 |
+|------|------|------|----------|
+| Request Relevance | R | 0.25 | 是否真正回答了用户需求 |
+| Request Specificity | S | 0.25 | 是否针对当前请求，而非泛化日常搭配 |
+| Outfit Coordination | C | 0.20 | 色彩、材质、廓形、层次、风格组合是否成立 |
+| Wearability | W | 0.15 | 真实场景中是否合理可穿 |
+| Freshness | F | 0.15 | 是否避免近期重复 |
 
-当前推荐中是否存在足够明确的视觉或组合证据，证明它是针对“当前这个请求”生成的，而不是可以直接复制给大量其他请求。
+**Overall Quality Score**：
 
-这是 StyleForge 防止**“日常化坍缩”**的核心维度。
+\[
+\text{Overall} = 0.25R + 0.25S + 0.20C + 0.15W + 0.15F
+\]
 
-示例
+### 3.2 pass_criteria
 
-用户：
+每个 Eval Case 的 `pass_criteria` 定义 PASS/FAIL 的最终判定逻辑：
 
-“去周杰伦演唱会穿什么？”
+```yaml
+pass_criteria:
+  all_hard_assertions: true
+  all_process_assertions: true
+  min_quality_score: 7.0
+  required_dimensions:
+    relevance: 7
+    coordination: 6
+```
 
-方案 A：
+**阈值冻结规则**：所有 Pass threshold 必须在 Validation 阶段预先冻结，不得在查看 Holdout 结果后修改。
 
-白T
-+
-普通牛仔裤
-+
-运动鞋
+### 3.3 Grader 配置
 
-可能：
+StyleForge 采用 Hybrid Grader：
 
-Relevance = 7
-Specificity = 3
+**1. Code-based Grader**
 
-因为它确实适合演唱会，但也适合：
+负责所有确定性指标：
 
-上课；
-逛街；
-普通聚会；
-看电影。
+| 检查项 | 说明 |
+|--------|------|
+| Item 存在性 | 输出中的单品是否在衣橱中存在 |
+| Anchor 保持 | Anchor 单品是否保留 |
+| Locked Slot 保持 | 被锁定的槽位是否被修改 |
+| Schema 合法性 | 结构化输出是否符合要求 |
+| Required Slot 完整性 | 必填槽位是否完整 |
+| Hard Constraint | 是否违反硬约束 |
+| 衣橱外单品 | 是否使用了衣橱外的单品 |
+| Tool 参数 | 工具调用参数是否正确 |
 
-方案 B：
+**2. Independent LLM/VLM Judge**
 
-复古感上衣
-+
-宽松牛仔
-+
-做旧鞋履
-+
-具有视觉重点的街头配饰
+负责五维 Soft Rubric 评分。
 
-可能：
+**关键原则**：Runtime Critic 与 Independent Judge 必须分离。
 
-Relevance = 8
-Specificity = 8
+```text
+Runtime Critic        → 系统内部决策（ACCEPT / RECOMPOSE / RETRIEVE_MORE）
+Independent Judge     → 实验最终评分
+```
 
-所以二者不能合并。
+不得将 Critic 自己的打分直接作为论文或验收的最终结论。
 
-Agent 3 的核心判断
+**Judge 配置**：固定 Judge 模型版本、Prompt 模板、Temperature 等超参数，定期进行人工校准。
 
-可以直接加入一个反事实问题：
+**3. Human Evaluation**
 
-如果把用户当前请求替换成普通日常出行，这套搭配是否几乎不需要改变？
+抽取部分 Case 做匿名盲测：
 
-如果答案是“是”，Specificity 应降低。
+```text
+Single LLM          vs    StyleForge
+     ↓                         ↓
+  同一用户请求 + 同一衣橱
+     ↓                         ↓
+  评价者盲评（A/B，不知来源）
+     ↓
+Human Preference Win Rate
+```
 
-五、维度三：搭配协调性
-5.1 正式定义
+实验控制要求：盲测、随机化顺序、多名评分者、明确评分指引、评分者间一致性报告、平局处理策略、明确抽样策略。
 
-**搭配协调性（Outfit Coordination）**评价：
+### 3.4 Trace / Trajectory 评估
 
-完整穿搭方案中各单品之间在色彩、材质、风格、廓形、层次以及视觉主次关系上是否协调，并最终形成自然、完整且成立的搭配效果。
+每次运行必须保存完整执行轨迹：
 
-评价对象不是单件衣服，而是：
-
-Outfit 作为一个组合是否成立。
-
-5.2 主要观察因素
-Outfit Coordination
-│
-├── Color Coordination
-│   色彩关系
-│
-├── Material Coordination
-│   材质关系
-│
-├── Silhouette Coordination
-│   廓形与比例
-│
-├── Style Compatibility
-│   风格元素之间是否成立
-│
-├── Layering
-│   层次关系
-│
-└── Visual Hierarchy
-    是否有合理的视觉主次
-
-这里尤其不要求：
-
-所有单品必须属于同一种 Style。
-
-例如：
-
-Vintage × Streetwear
-Formal × Casual
-Girly × Sporty
-
-只要组合成立，仍然可以获得较高的搭配协调性。
-
-这能避免 StyleForge 重新退化成“风格标签一致性检查器”。
-
-六、维度四：实穿性
-6.1 定义
-
-**实穿性（Wearability）**评价：
-
-推荐方案是否能够在用户对应的现实环境、活动条件和使用需求下合理穿着。
-
-主要考虑：
-
-Wearability
-│
-├── 环境适应性
-├── 温度/天气适应性
-├── 活动便利性
-├── 舒适程度
-├── 场景合理性
-└── 过度造型化风险
-
-例如用户说：
-
-“去看《悲惨世界》音乐剧。”
-
-一套极强戏剧感、近似舞台服装的组合可能：
-
-Relevance       9
-Specificity     10
-Coordination    9
-Wearability     3
-
-这正是 Wearability 独立存在的价值。
-
-它负责防止 StyleForge 为了“主题表达”走得太远。
-
-七、维度五：新鲜感
-7.1 定义
-
-**新鲜感（Freshness）**评价：
-
-当前推荐相对于用户近期已经看到的推荐，在单品使用、搭配结构、色彩结构和风格组合上是否提供了合理的新变化。
-
-它是历史维度，而不是当前请求维度。
-
-主要参考：
-
-Freshness
-│
-├── Item Repetition
-├── Category Structure Repetition
-├── Color Structure Repetition
-├── Style Mix Repetition
-└── Outfit Signature Repetition
-
-例如系统上一次已经推荐：
-
-黑外套 + 白内搭 + 牛仔裤 + 黑鞋
-
-这次虽然换成另外一件黑外套：
-
-黑外套 B + 白内搭 B + 牛仔裤 B + 黑鞋 B
-
-Item Overlap 可能不高，但结构几乎完全相同。
-
-因此 Freshness 不能只比较 item_id，还要比较 Outfit Signature。
-
-八、五维之间的职责边界
-
-最终可以把整个评价体系理解为：
-
-                    推荐质量
-                       │
-        ┌──────────────┼──────────────┐
-        │              │              │
-    当前请求          搭配本身          历史
-        │              │              │
-   ┌────┴────┐     ┌───┴───┐          │
-   ↓         ↓     ↓       ↓          ↓
-Relevance Specificity Coordination Wearability Freshness
-
-对应五个非常明确的问题：
-
-Relevance
-→ 回答对了吗？
-
-Specificity
-→ 真的是针对这次问题回答的吗？
-
-Coordination
-→ 这套衣服本身搭得好吗？
-
-Wearability
-→ 现实中适合这样穿吗？
-
-Freshness
-→ 最近是不是总在推荐类似东西？
-
-这也是后续实现 Rubric 时最重要的边界。
-
-九、三 Agent 统一使用五维
-
-五维不是 Critic 专属评分表，而是整个决策图共享的质量目标。
-
-Agent 1：Semantic Retrieval Agent
-
-Agent 1 不需要给最终 Outfit 打五维分，因为此时还没有 Outfit。
-
-它负责为五维准备信息和候选：
-
-五维	Agent 1 中的体现
-Relevance	core retrieval
-Specificity	distinctive retrieval + unique_mood
-Coordination	supporting retrieval，为组合提供兼容单品
-Wearability	practical_context
-Freshness	历史曝光软惩罚
-
-因此 Agent 1 的目标是：
-
-让后续 Composer 有足够好的候选空间实现五维目标。
-
-十、Agent 2 使用五维进行组合
-
-Outfit Composer Agent 在 Prompt 中接收统一 Rubric。
-
-其任务不是：
-
-从 Top-50 中挑最相似的几件。
-
-而应该是：
-
-根据五维目标，在候选池中形成整体最合理的 Outfit。
-
-建议其内部保持：
-
-Step 1
-理解 request_signature
-
+```text
+Case ID
 ↓
-
-Step 2
-形成 composition_strategy
-
+Router
 ↓
-
-Step 3
-根据五维 Rubric 进行组合取舍
-
+Agent 1 (Semantic Retrieval)
 ↓
+Retrieval / Tools
+↓
+Context Pack
+↓
+Agent 2 (Composer)
+↓
+Validator
+↓
+Agent 3 (Critic)
+↓
+Retry / Recompose / Retrieve More
+↓
+Final State
+↓
+Final Outfit
+```
 
-Step 4
-输出 3-5 个候选 Outfit
+**Golden Path 原则**：不要求每次执行路径完全一致，但必须满足：
 
-尤其要注意：
+| 必须发生 | 禁止发生 |
+|----------|----------|
+| 调用 Wardrobe Retriever | 生成衣橱外 item |
+| 传递 Anchor ID | Critic 决策被忽略 |
+| 传递 Locked Items | 关键约束在 Agent 间丢失 |
+| 满足 Final State 条件 | —— |
 
-五维是决策目标，不要求 Agent 2 自己输出五个评分。
+## 第四部分：各组件专项评估
 
-否则 Composer 会变成“自己生成、自己评分”，增加无意义的自评偏差。
+### 4.1 工具调用评估
 
-十一、Agent 3 使用五维进行正式评审
+工具调用评估贯穿六个阶段：
 
-Critic 才是五维的正式评分节点。
+```text
+需要 Tool？ → 选对 Tool？ → 参数正确？ → 成功执行？ → 正确理解结果？ → 正确影响最终决策？
+```
 
-输出：
+| 指标 | 定义 | 关键说明 |
+|------|------|----------|
+| Tool Selection Accuracy | 是否选择了正确的工具 | —— |
+| Argument Accuracy | 参数名、值是否精确匹配 | 如 location, date 等 |
+| Necessary Tool Recall | 必要工具是否全部调用 | 有无漏调用 |
+| Unnecessary Tool Call Rate | 是否乱调用工具 | 越低越好 |
+| Tool Result Utilization | 是否正确使用了工具返回结果 | **即使 Tool 执行成功，若结果被误读仍算失败** |
 
-{
-  "dimension_scores": {
-    "request_relevance": 8.7,
-    "request_specificity": 8.2,
-    "outfit_coordination": 9.0,
-    "wearability": 8.4,
-    "freshness": 7.6
-  }
-}
+Tool Result Utilization 示例：
 
-然后根据用户配置权重：
+```text
+Weather Tool → 35°C
+Composer → 推荐厚羽绒服
+```
 
-Final Score =
-Relevance × w1
-+ Specificity × w2
-+ Coordination × w3
-+ Wearability × w4
-+ Freshness × w5
+Weather Tool 调用正确且成功执行，但结果利用失败——这是 Tool Result Utilization 指标专门检测的场景。
 
-Critic 再结合具体失败维度决定：
+### 4.2 Semantic Retrieval Agent 评估
 
-accept
+| 指标 | 定义 |
+|------|------|
+| Request Signature Accuracy | 是否正确解析 activity、explicit_style、unique_mood、practical_context、preferences |
+| Context Requirement Accuracy | 是否正确判断需要 Weather / Memory / RAG / Wardrobe Retrieval 中的哪些信息 |
+| Retrieval Recall@K | Golden Case 中人工标记的相关 items 在 Top-K 中的召回率 |
+| Candidate Relevance | 候选池与请求的相关程度 |
 
-recompose
-→ 候选够好，但是 Composer 组合不好
+### 4.3 Composer Agent 评估
 
-retrieve_more
-→ 当前候选空间不足
+| 指标 | 定义 |
+|------|------|
+| Candidate Utilization | 是否从 Retrieval Pool 中选择，而非幻觉生成 |
+| Outfit Completeness | 是否生成完整结构（所有必要槽位） |
+| Constraint Preservation | 是否保留 Anchor、Locked Items、explicit requirements |
+| Schema Validity | 结构化输出是否合法 |
+| Invalid Item Rate | 是否生成衣橱中不存在的 item |
 
-wardrobe_gap
-→ 整个衣橱本身缺少合适单品
+### 4.4 Critic Agent 评估
 
-这样五维不仅用于“打分”，还能参与LangGraph 路由决策。
+Critic 的评价不看“平均给了多少分”，而是看它是否真正改善了系统。
 
-十二、用户权重配置
+| 指标 | 定义 | 意义 |
+|------|------|------|
+| Critic Decision Accuracy | 该 ACCEPT 时是否 ACCEPT；该 RECOMPOSE 时是否正确触发 | 判断是否正确 |
+| Recovery Success Rate (RSR) | \(\frac{\text{经Critic后成功的Cases}}{\text{First Pass失败的Cases}}\) | 是否拯救了失败 |
+| Recovery Gain | \(\text{Score}_{\text{final}} - \text{Score}_{\text{first}}\) | 改善了多少 |
+| False Retry Rate | 已合格的 Outfit 被错误要求重新生成的比例 | 越低越好 |
 
-保留用户主动设置五维权重的设计。
+### 4.5 多智能体协作评估
 
-系统提供默认值：
+| 指标 | 适用系统 | 定义 |
+|------|----------|------|
+| Routing Accuracy | 动态路由系统 | 请求是否进入正确的 Agent / Workflow |
+| Role Assignment Accuracy | 动态角色分配系统 | 任务是否交予正确角色 |
+| Handoff Accuracy | 所有多 Agent 系统 | Agent 间交接信息是否完整准确 |
+| Information Preservation | 所有多 Agent 系统 | 关键语义在传播中是否丢失 |
+| Coordination Success Rate | 所有多 Agent 系统 | 需多 Agent 协作的任务中成功比例 |
+| Conflict Resolution | 有冲突场景的系统 | 冲突能否被正确发现和处理 |
 
-{
-  "request_relevance": 0.25,
-  "request_specificity": 0.25,
-  "outfit_coordination": 0.20,
-  "wearability": 0.15,
-  "freshness": 0.15
-}
+**固定拓扑系统说明**：StyleForge 的三个 Agent 角色固定（Retrieval → Composer → Critic），不存在动态角色分配。因此 Role Assignment Accuracy 记为 **N/A**，不参与指标聚合；重点评估 Handoff Accuracy、Information Preservation 与 Coordination Success Rate。
 
-用户可以调整，例如更重视“好看、协调”：
+Handoff 检查点：
 
-{
-  "request_relevance": 0.20,
-  "request_specificity": 0.15,
-  "outfit_coordination": 0.35,
-  "wearability": 0.20,
-  "freshness": 0.10
-}
+```text
+Agent 1 → Agent 2:
+  Request Signature
+  Context
+  Candidates
 
-或者更追求主题表达与差异化：
+Agent 2 → Agent 3:
+  User Request
+  Outfit
+  Evidence
+  Constraints
+```
 
-{
-  "request_relevance": 0.25,
-  "request_specificity": 0.35,
-  "outfit_coordination": 0.15,
-  "wearability": 0.10,
-  "freshness": 0.15
-}
+Information Preservation 反例：
 
-同一份 evaluation_profile 贯穿三个 Agent，但作用方式不同：
+```text
+User:        "不要高跟鞋"
+Agent1:      avoid heels
+Agent2:      信息丢失
+Final:       high heels
+```
 
-User Evaluation Profile
-           │
-     ┌─────┼─────┐
-     ↓     ↓     ↓
- Agent 1 Agent 2 Agent 3
- 检索侧重 组合侧重 最终评分
-十三、修改后的核心数据结构
+### 4.6 Memory 评估
 
-建议统一增加：
+| 指标 | 定义 |
+|------|------|
+| Preference Violation Rate | 已知用户不喜欢某类元素，后续还推荐的比例 |
+| Item Repeat Rate | 最近推荐过的 Item 重复使用比例 |
+| Outfit Signature Repeat Rate | 搭配结构重复的比例（不仅是 item_id，还包括 category、color、style 的组合模式） |
 
-{
-  "evaluation_profile": {
-    "weights": {
-      "request_relevance": 0.25,
-      "request_specificity": 0.25,
-      "outfit_coordination": 0.20,
-      "wearability": 0.15,
-      "freshness": 0.15
-    }
-  }
-}
 
-request_signature：
+## 第五部分：实验设计
 
-{
-  "theme": "...",
-  "explicit_style": ["美拉德"],
-  "unique_mood": ["温暖", "醇厚", "秋日感"],
-  "practical_context": ["户外", "步行", "秋季"],
-  "explicit_preferences": [],
-  "generic_tendencies_to_avoid": []
-}
+### 5.1 Baselines
 
-这里我建议正式增加 explicit_style 字段。
+| 基线 | 描述 | 目的 |
+|------|------|------|
+| **B0: Single LLM** | User Request + 全部衣橱 → LLM → Outfit | 证明 StyleForge 架构优于简单方法 |
+| **B1: Retrieval + Single LLM** | User Request → Fashion Retrieval → Single LLM | 证明 Retrieval + Composer 的增益 |
+| **B2: Full StyleForge** | Retrieval Agent + Composer + Critic + Memory | 主系统 |
 
-因为虽然穿搭风格不应该成为第六评价维度，但在 Agent 1 的语义表示中，它值得被单独保留下来。
+主对比表：
 
-这样：
+| System | Pass@1 | Overall | CSR-strict | Hard Violation Rate | Consistency (Std) |
+|--------|--------|---------|------------|---------------------|-------------------|
+| Single LLM | | | | | |
+| Retrieval + LLM | | | | | |
+| **StyleForge** | | | | | |
 
-“我要美拉德风”
+### 5.2 Ablation（消融实验）
 
-不会在 unique_mood 里被模糊成“温暖、棕色、秋季感”，从而再次产生信息损耗。
+Baseline 回答“StyleForge 比别的方法好不好”，Ablation 回答“StyleForge 为什么好”。
 
-十四、本次修改后的最终五维
-维度	最终名称	是否保留
-①	需求还原度 Request Relevance	✅
-②	请求特异性 Request Specificity	✅
-③	搭配协调性 Outfit Coordination	✅ 修改名称
-④	实穿性 Wearability	✅
-⑤	新鲜感 Freshness	✅
+| 移除组件 | 预期主要影响 |
+|----------|-------------|
+| `-Retrieval` | Relevance / Hallucination |
+| `-RAG` | Specificity / Relevance |
+| `-Memory` | Freshness / Preference |
+| `-Critic` | Recovery / Hard Violation Rate |
+
+**评估逻辑**：
+
+- 如果去掉 Critic 后 Pass Rate 和 Overall Quality 几乎无变化 → Critic 的工程价值需要重新审视
+- 如果去掉 Memory 后 Freshness 和 Preference Violation Rate 无变化 → Memory 模块未产生预期贡献
+- 应同时报告质量变化与成本变化，评估各模块的工程 ROI
+
+### 5.3 Public Fashion Benchmark
+
+Agent Benchmark 解决“系统是否好用”的问题，Public Fashion Benchmark 解决“StyleForge 的基础能力是否达到学术界标准”的问题。两者使用不同的数据与指标体系，不合并。
+
+| 任务 | 数据 | 指标 | 对比对象 |
+|------|------|------|----------|
+| Complementary Item Retrieval | Polyvore 等 | R@10, R@30, R@50 | CSA-Net, OutfitTransformer, TATTOO |
+| Compatibility Prediction | Polyvore 等 | ROC-AUC | Type-Aware, CSA-Net, OutfitTransformer |
+| Text-to-Outfit | 严格对齐后 | R@K | CLIP4Outfit |
+
+### 5.4 统计方法
+
+| 场景 | 方法 |
+|------|------|
+| Pass Rate 置信区间 | Wilson Score Interval |
+| 复杂指标置信区间 | Bootstrap（Case-level / Cluster Bootstrap） |
+| 系统比较（二值指标） | McNemar Test |
+| 系统比较（连续指标） | Paired t-test / Wilcoxon |
+| 多重假设检验 | Holm–Bonferroni 校正 |
+| 效应量 | Cohen's d 或相对提升百分比 |
+
+**多重比较校正**：在同时进行多项消融实验配对多个指标时，应进行多重比较校正，并预先指定 Primary Metrics，避免选择性报告。
+
+
+## 第六部分：最终报告结构
+
+### 6.1 一级核心指标（主表）
+
+| 指标类别 | 指标 | 定义 |
+|----------|------|------|
+| Task Success | **Pass@1** | 单次运行成功率（主指标） |
+| Quality | **Overall Quality** | 五维加权综合分 |
+| Quality | 五维分项 | R, S, C, W, F 分别报告 |
+| Constraint | **CSR-strict** | 所有约束全部满足的 Case 比例 |
+| Reliability | **Hard Violation Rate** | 违反硬约束的比例 |
+| Stability | **Std / Variance** | 多次运行质量分标准差 |
+| Human | **Human Preference Win Rate** | 盲测中优于 Baseline 的比例 |
+
+### 6.2 二级诊断指标
+
+| 模块 | 指标 |
+|------|------|
+| **Tool** | Tool Selection Accuracy, Argument Accuracy, Tool Result Utilization |
+| **Multi-Agent** | Handoff Accuracy, Information Preservation, Coordination Success Rate |
+| **Critic** | Recovery Success Rate, Recovery Gain, False Retry Rate |
+| **Modify** | Target Slot Success, Locked Slot Preservation, Unintended Modification Rate |
+| **Retrieval** | Recall@K, Candidate Relevance |
+
+### 6.3 工程指标
+
+| 指标 | 单位 |
+|------|------|
+| P50/P95 Latency | 秒 |
+| Tokens / Case | token |
+| Agent Calls / Case | 次 |
+| Tool Calls / Case | 次 |
+| Retry / Case | 次 |
+| Cost / Success | $ |
+
+
+## 第七部分：完整评估工作流
+
+```text
+① Benchmark
+定义系统应该处理哪些真实任务
+        ↓
+② Eval Case
+固定输入、衣橱、上下文和预期行为
+        ↓
+③ Assertion
+判断有没有完成硬要求（Hard + Process）
+        ↓
+④ Rubric
+判断最终穿搭做得好不好（五维）
+        ↓
+⑤ Trace / Golden Path
+判断 Agent、Tool、Handoff 和状态流转是否合理
+        ↓
+⑥ Repeated Runs
+计算 Pass@1、Best-of-3、Consistency、Variance
+        ↓
+⑦ Baseline
+Single LLM vs Retrieval+LLM vs StyleForge
+        ↓
+⑧ Ablation
+证明 Retrieval / RAG / Memory / Critic 的贡献
+        ↓
+⑨ Public Benchmark
+与现有 Fashion Recommendation 工作建立学术对比
+        ↓
+⑩ Regression
+历史失败 Case 永久进入测试集
+```
+
+
+**文档结束**
+
+> **一句话概括 StyleForge 评估**：任务层判断有没有完成；输出层判断搭得好不好；工具层判断能力有没有正确使用；协作层判断三个 Agent 有没有正确配合；Trace 层判断执行过程是否合法；稳定性层判断重复运行是否可靠；Baseline/Ablation 证明系统设计确实有价值；再用公开 Fashion Benchmark 与已有研究建立横向联系。
