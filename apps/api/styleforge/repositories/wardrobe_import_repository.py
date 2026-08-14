@@ -269,7 +269,7 @@ def commit_import_rows(
     for row in rows:
         attributes = _selected_attributes(row, override_by_row[row["row_id"]])
         existing_item_id = row["catalog_item_id"]
-        item_id = str(existing_item_id or f"personal:{row['row_id']}")
+        item_id = str(existing_item_id or str(uuid.uuid4()))
         existing_catalog = connection.execute(
             "SELECT image_filename, relative_image_path, image_status, embedding_status "
             "FROM catalog_items WHERE item_id = %s",
@@ -324,6 +324,7 @@ def commit_import_rows(
                     else EmbeddingStatus.PENDING
                 ),
                 raw_json_hash=selected_hash,
+                dataset_item_id=row["external_product_id"] or "",
             )
         )
         item_ids.append(item_id)

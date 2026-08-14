@@ -36,6 +36,7 @@ class CatalogItem:
     image_status: ImageStatus
     embedding_status: EmbeddingStatus = EmbeddingStatus.PENDING
     raw_json_hash: str = ""
+    dataset_item_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)

@@ -80,7 +80,7 @@ def create_photo_item(
 
     if not skip_initialize:
         initialize_database(database_path)
-    item_id = f"personal:{uuid.uuid4()}"
+    item_id = str(uuid.uuid4())
     source = personal_source_for_user(user_id)
     root = personal_image_root(artifact_root, user_id)
     filename = save_personal_image(root, item_id, image_bytes)
@@ -106,6 +106,7 @@ def create_photo_item(
         image_status=ImageStatus.AVAILABLE,
         embedding_status=EmbeddingStatus.PENDING,
         raw_json_hash="",
+        dataset_item_id="",
     )
 
     with database_session(database_path) as connection:

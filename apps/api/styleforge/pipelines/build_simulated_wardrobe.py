@@ -16,6 +16,7 @@ import argparse
 import json
 import random
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from styleforge.data.mytheresa import (
     normalize_mytheresa_item,
 )
 from styleforge.data.outfits import normalize_outfit
+from styleforge.pipelines.uuid_mapping import ensure_uuids, reid_catalog_item, reid_images
 from styleforge.repositories.catalog_repository import upsert_items
 from styleforge.repositories.database import (
     database_session,
@@ -291,6 +293,7 @@ def build_simulated_wardrobe(
     my_item_batch: list[Any] = []
     my_image_batch: list[Any] = []
     my_id_set = set(my_ids_list)
+    my_raw_to_uuid: dict[str, str] = {}
     for item_id, record in iter_json_object(mytheresa_metadata):
         if item_id not in my_id_set:
             continue
@@ -299,28 +302,74 @@ def build_simulated_wardrobe(
         my_image_batch.extend(images)
         if len(my_item_batch) >= 500:
             with database_session(database_path) as connection:
+                ensure_uuids(
+                    connection,
+                    "mytheresa",
+                    my_raw_to_uuid,
+                    [item.item_id for item in my_item_batch],
+                )
+                my_item_batch = [
+                    reid_catalog_item(item, my_raw_to_uuid) for item in my_item_batch
+                ]
+                my_image_batch = reid_images(my_image_batch, my_raw_to_uuid)
                 my_imported += upsert_items(connection, my_item_batch, DEFAULT_REVISION)
                 my_images += replace_item_images(connection, my_image_batch)
             my_item_batch.clear()
             my_image_batch.clear()
     if my_item_batch:
         with database_session(database_path) as connection:
+            ensure_uuids(
+                connection,
+                "mytheresa",
+                my_raw_to_uuid,
+                [item.item_id for item in my_item_batch],
+            )
+            my_item_batch = [
+                reid_catalog_item(item, my_raw_to_uuid) for item in my_item_batch
+            ]
+            my_image_batch = reid_images(my_image_batch, my_raw_to_uuid)
             my_imported += upsert_items(connection, my_item_batch, DEFAULT_REVISION)
             my_images += replace_item_images(connection, my_image_batch)
 
     pv_id_set = set(pv_ids_list)
     pv_item_batch: list[Any] = []
+    pv_raw_to_uuid: dict[str, str] = {}
     for item_id, record in iter_json_object(polyvore_metadata):
         if item_id not in pv_id_set:
             continue
         pv_item_batch.append(normalize_catalog_item(item_id, record, pv_resolver))
         if len(pv_item_batch) >= 500:
             with database_session(database_path) as connection:
+                ensure_uuids(
+                    connection,
+                    "polyvore",
+                    pv_raw_to_uuid,
+                    [item.item_id for item in pv_item_batch],
+                )
+                pv_item_batch = [
+                    reid_catalog_item(item, pv_raw_to_uuid) for item in pv_item_batch
+                ]
                 pv_imported += upsert_items(connection, pv_item_batch, DEFAULT_REVISION)
             pv_item_batch.clear()
     if pv_item_batch:
         with database_session(database_path) as connection:
+            ensure_uuids(
+                connection,
+                "polyvore",
+                pv_raw_to_uuid,
+                [item.item_id for item in pv_item_batch],
+            )
+            pv_item_batch = [
+                reid_catalog_item(item, pv_raw_to_uuid) for item in pv_item_batch
+            ]
             pv_imported += upsert_items(connection, pv_item_batch, DEFAULT_REVISION)
+
+    # Merge both source mappings so outfit items and the wardrobe resolve to
+    # the same UUIDs that were written to catalog_items.
+    raw_to_uuid = {**my_raw_to_uuid, **pv_raw_to_uuid}
+    wardrobe_item_uuids = sorted(
+        raw_to_uuid[raw] for raw in (my_id_set | pv_id_set) if raw in raw_to_uuid
+    )
 
     # Import exactly the picked outfits (only the selected outfit ids).
     outfit_count = 0
@@ -330,7 +379,16 @@ def build_simulated_wardrobe(
         for outfit_id, record in iter_json_object(source_path):
             if outfit_id not in picked_outfit_ids:
                 continue
-            outfit_batch.append(normalize_outfit(outfit_id, record))
+            outfit = normalize_outfit(outfit_id, record)
+            mapped = tuple(
+                (raw_to_uuid[item_id], description)
+                for item_id, description in outfit.items
+                if item_id in raw_to_uuid
+            )
+            # Defensive: skip any picked outfit whose items did not all resolve.
+            if len(mapped) != len(outfit.items):
+                continue
+            outfit_batch.append(replace(outfit, items=mapped))
             if len(outfit_batch) >= 500:
                 with database_session(database_path) as connection:
                     imported, relations = upsert_outfits(
@@ -351,7 +409,7 @@ def build_simulated_wardrobe(
         _insert_wardrobe_items(
             connection,
             DEMO_USER_ID,
-            sorted(my_id_set | pv_id_set),
+            wardrobe_item_uuids,
         )
         image_stats = {
             row["image_status"]: row["count"]

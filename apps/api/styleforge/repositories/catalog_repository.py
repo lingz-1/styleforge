@@ -14,8 +14,8 @@ UPSERT_ITEM_SQL = """
 INSERT INTO catalog_items (
     item_id, source, gender, item_type, main_category, name, color, description,
     features_json, image_filename, relative_image_path, image_status,
-    embedding_status, raw_json_hash, source_revision, imported_at
-) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    embedding_status, raw_json_hash, source_revision, imported_at, dataset_item_id
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT(item_id) DO UPDATE SET
     source = excluded.source,
     gender = excluded.gender,
@@ -35,7 +35,8 @@ ON CONFLICT(item_id) DO UPDATE SET
     END,
     raw_json_hash = excluded.raw_json_hash,
     source_revision = excluded.source_revision,
-    imported_at = excluded.imported_at
+    imported_at = excluded.imported_at,
+    dataset_item_id = excluded.dataset_item_id
 """
 
 
@@ -57,6 +58,7 @@ def _item_row(item: CatalogItem, source_revision: str, imported_at: str) -> tupl
         item.raw_json_hash,
         source_revision,
         imported_at,
+        item.dataset_item_id,
     )
 
 
@@ -111,4 +113,37 @@ def fetch_items_by_ids(
             ids,
         )
     )
+
+
+def existing_dataset_item_ids(
+    connection: Connection, source: str, raw_ids: Iterable[str]
+) -> dict[str, str]:
+    """Return ``{dataset_item_id: item_id}`` for already-imported raw IDs.
+
+    Used by import pipelines for lookup-or-create: reuse the existing UUID for
+    a given ``(source, dataset_item_id)`` so re-runs stay idempotent.
+    """
+    raws = tuple(dict.fromkeys(raw_ids))
+    if not raws:
+        return {}
+    placeholders = ",".join("%s" for _ in raws)
+    rows = connection.execute(
+        f"SELECT item_id, dataset_item_id FROM catalog_items "
+        f"WHERE source = %s AND dataset_item_id IN ({placeholders})",  # noqa: S608
+        (source, *raws),
+    )
+    return {row["dataset_item_id"]: row["item_id"] for row in rows}
+
+
+def dataset_id_to_uuid(connection: Connection) -> dict[str, str]:
+    """Return ``{dataset_item_id: item_id}`` across the whole catalog.
+
+    Used by outfit import pipelines to remap outfit item references from
+    raw dataset IDs to the UUID item_ids in catalog_items.
+    """
+    rows = connection.execute(
+        "SELECT item_id, dataset_item_id FROM catalog_items "
+        "WHERE dataset_item_id != ''"
+    )
+    return {row["dataset_item_id"]: row["item_id"] for row in rows}
 

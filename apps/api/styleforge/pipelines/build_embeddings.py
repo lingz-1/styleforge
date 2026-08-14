@@ -83,7 +83,8 @@ def _load_catalog(
             sql += " AND c.source = %s"
             parameters.append(source)
         else:
-            sql += " AND c.source NOT ILIKE 'personal-%'"
+            sql += " AND c.source NOT ILIKE %s"
+            parameters.append("personal-%")
         sql += " ORDER BY c.item_id"
         if limit is not None:
             if limit <= 0:

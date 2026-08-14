@@ -11,6 +11,7 @@ from styleforge.common.files import write_json_atomic
 from styleforge.core.config import Settings
 from styleforge.data.garments2look import ImagePathResolver, normalize_catalog_item
 from styleforge.data.json_stream import iter_json_object
+from styleforge.pipelines.uuid_mapping import ensure_uuids, reid_catalog_item
 from styleforge.repositories.catalog_repository import catalog_counts, upsert_items
 from styleforge.repositories.database import database_session, initialize_database
 from styleforge.repositories.dataset_source_repository import register_dataset_source
@@ -48,16 +49,31 @@ def import_metadata(
 
     try:
         batch = []
+        raw_to_uuid: dict[str, str] = {}
         for item_id, record in iter_json_object(metadata_path):
             batch.append(normalize_catalog_item(item_id, record, resolver))
             if len(batch) >= batch_size:
                 with database_session(database_path) as connection:
+                    ensure_uuids(
+                        connection,
+                        "polyvore",
+                        raw_to_uuid,
+                        [item.item_id for item in batch],
+                    )
+                    batch = [reid_catalog_item(i, raw_to_uuid) for i in batch]
                     processed_count += upsert_items(connection, batch, source_revision)
                     update_progress(connection, run_id, processed_count)
                 batch.clear()
 
         if batch:
             with database_session(database_path) as connection:
+                ensure_uuids(
+                    connection,
+                    "polyvore",
+                    raw_to_uuid,
+                    [item.item_id for item in batch],
+                )
+                batch = [reid_catalog_item(i, raw_to_uuid) for i in batch]
                 processed_count += upsert_items(connection, batch, source_revision)
                 update_progress(connection, run_id, processed_count)
 

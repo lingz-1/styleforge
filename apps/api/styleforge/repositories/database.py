@@ -14,7 +14,7 @@ from typing import Any, Iterator
 import psycopg
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 class SqliteLikeRow(dict):
@@ -131,11 +131,15 @@ CREATE TABLE IF NOT EXISTS catalog_items (
     embedding_status TEXT NOT NULL CHECK (embedding_status IN ('pending', 'ready', 'failed')),
     raw_json_hash TEXT NOT NULL,
     source_revision TEXT NOT NULL,
-    imported_at TEXT NOT NULL
+    imported_at TEXT NOT NULL,
+    dataset_item_id TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_catalog_gender_type
 ON catalog_items (gender, item_type);
+
+CREATE INDEX IF NOT EXISTS idx_catalog_dataset_item
+ON catalog_items (source, dataset_item_id);
 
 CREATE INDEX IF NOT EXISTS idx_catalog_main_category
 ON catalog_items (main_category);
@@ -492,6 +496,14 @@ def initialize_database(dsn: str) -> None:
                 "Database schema is newer than this StyleForge build: "
                 f"database={version_row['value']}, supported={SCHEMA_VERSION}"
             )
+        # Idempotent additive migration for databases created before the
+        # dataset_item_id column existed. Must run before PG_SCHEMA_SQL so the
+        # idx_catalog_dataset_item index can be created against it. On a fresh
+        # schema the table does not exist yet, so guard the ALTER itself.
+        connection.execute(
+            "ALTER TABLE IF EXISTS catalog_items "
+            "ADD COLUMN IF NOT EXISTS dataset_item_id TEXT NOT NULL DEFAULT ''"
+        )
         connection.execute(PG_SCHEMA_SQL)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES('schema_version', %s) "

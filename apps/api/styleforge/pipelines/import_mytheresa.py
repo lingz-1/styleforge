@@ -11,6 +11,7 @@ from styleforge.common.files import write_json_atomic
 from styleforge.core.config import Settings
 from styleforge.data.json_stream import iter_json_object
 from styleforge.data.mytheresa import MytheresaImagePathResolver, normalize_mytheresa_item
+from styleforge.pipelines.uuid_mapping import ensure_uuids, reid_catalog_item, reid_images
 from styleforge.repositories.catalog_repository import catalog_counts, upsert_items
 from styleforge.repositories.database import (
     SCHEMA_VERSION,
@@ -38,15 +39,18 @@ def _reject_write_path_inside_image_root(
         raise ValueError(f"{label} must not be inside the external image root")
 
 
-def _reject_cross_source_collisions(connection, item_ids: list[str]) -> None:
-    if not item_ids:
+def _reject_cross_source_collisions(connection, raw_ids: list[str]) -> None:
+    if not raw_ids:
         return
-    placeholders = ",".join("%s" for _ in item_ids)
+    placeholders = ",".join("%s" for _ in raw_ids)
     rows = connection.execute(
-        f"SELECT item_id, source FROM catalog_items WHERE item_id IN ({placeholders})",  # noqa: S608
-        item_ids,
+        f"SELECT dataset_item_id, source FROM catalog_items "
+        f"WHERE dataset_item_id IN ({placeholders}) AND dataset_item_id != ''",  # noqa: S608
+        raw_ids,
     )
-    collisions = [row["item_id"] for row in rows if row["source"] != "mytheresa"]
+    collisions = [
+        row["dataset_item_id"] for row in rows if row["source"] != "mytheresa"
+    ]
     if collisions:
         preview = ", ".join(collisions[:5])
         raise RuntimeError(f"Cross-source item ID collision: {preview}")
@@ -90,6 +94,7 @@ def import_mytheresa(
 
     processed_count = 0
     image_count = 0
+    raw_to_uuid: dict[str, str] = {}
     try:
         item_batch = []
         image_batch = []
@@ -103,6 +108,14 @@ def import_mytheresa(
                         connection,
                         [item.item_id for item in item_batch],
                     )
+                    ensure_uuids(
+                        connection,
+                        "mytheresa",
+                        raw_to_uuid,
+                        [item.item_id for item in item_batch],
+                    )
+                    item_batch = [reid_catalog_item(i, raw_to_uuid) for i in item_batch]
+                    image_batch = reid_images(image_batch, raw_to_uuid)
                     processed_count += upsert_items(
                         connection,
                         item_batch,
@@ -127,6 +140,14 @@ def import_mytheresa(
                     connection,
                     [item.item_id for item in item_batch],
                 )
+                ensure_uuids(
+                    connection,
+                    "mytheresa",
+                    raw_to_uuid,
+                    [item.item_id for item in item_batch],
+                )
+                item_batch = [reid_catalog_item(i, raw_to_uuid) for i in item_batch]
+                image_batch = reid_images(image_batch, raw_to_uuid)
                 processed_count += upsert_items(connection, item_batch, source_revision)
                 image_count += replace_item_images(connection, image_batch)
                 update_progress(connection, run_id, processed_count)

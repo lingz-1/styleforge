@@ -82,6 +82,7 @@ def _catalog_row(item: CatalogItem) -> tuple:
         item.raw_json_hash,
         "test",
         "2026-01-01T00:00:00+00:00",
+        item.dataset_item_id or "",
     )
 
 
@@ -91,7 +92,7 @@ def _seed_database(db_dsn: str) -> None:
         for item in WARDROBE_ITEMS:
             connection.execute(
                 "INSERT INTO catalog_items VALUES "
-                "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT (item_id) DO NOTHING",
                 _catalog_row(item),
             )

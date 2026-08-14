@@ -88,7 +88,7 @@ def test_schema_contains_personal_wardrobe_import_tables(db_dsn: str) -> None:
     }.issubset(personal_item_columns)
 
 
-def test_schema_v11_contains_chat_and_preference_memory_tables(db_dsn: str) -> None:
+def test_schema_v12_contains_chat_and_preference_memory_tables(db_dsn: str) -> None:
     initialize_database(db_dsn)
     with connect(db_dsn) as connection:
         tables = _table_names(db_dsn)
@@ -102,8 +102,9 @@ def test_schema_v11_contains_chat_and_preference_memory_tables(db_dsn: str) -> N
         event_columns = _column_names(db_dsn, "interaction_events")
         evidence_columns = _column_names(db_dsn, "preference_evidence")
         preference_columns = _column_names(db_dsn, "preference_model")
+        catalog_columns = _column_names(db_dsn, "catalog_items")
 
-    assert SCHEMA_VERSION == 11
+    assert SCHEMA_VERSION == 12
     assert {"chat_sessions", "chat_messages"}.issubset(tables)
     # The retired user_memories table is gone, replaced by the evidence + model pair.
     assert "user_memories" not in tables
@@ -124,6 +125,9 @@ def test_schema_v11_contains_chat_and_preference_memory_tables(db_dsn: str) -> N
         "support_count",
         "contradiction_count",
     }.issubset(preference_columns)
+    # v12: catalog_items carries the raw dataset ID alongside UUID item_id.
+    assert "dataset_item_id" in catalog_columns
+    assert {"idx_catalog_dataset_item"}.issubset(indexes)
 
 
 def test_initialize_database_is_idempotent(db_dsn: str) -> None:

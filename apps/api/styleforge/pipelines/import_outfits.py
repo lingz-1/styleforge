@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from styleforge.common.files import write_json_atomic
 from styleforge.core.config import Settings
 from styleforge.data.json_stream import iter_json_object
 from styleforge.data.outfits import normalize_outfit
+from styleforge.repositories.catalog_repository import dataset_id_to_uuid
 from styleforge.repositories.database import database_session, initialize_database
 from styleforge.repositories.import_run_repository import (
     fail_import_run,
@@ -21,9 +23,9 @@ from styleforge.repositories.import_run_repository import (
 from styleforge.repositories.outfit_repository import outfit_counts, upsert_outfits
 
 
-def _catalog_item_ids(database_path: str) -> set[str]:
+def _dataset_id_to_uuid_map(database_path: str) -> dict[str, str]:
     with database_session(database_path) as connection:
-        return {row[0] for row in connection.execute("SELECT item_id FROM catalog_items")}
+        return dataset_id_to_uuid(connection)
 
 
 def import_outfits(
@@ -35,8 +37,8 @@ def import_outfits(
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
     initialize_database(database_path)
-    catalog_item_ids = _catalog_item_ids(database_path)
-    if not catalog_item_ids:
+    dataset_to_uuid = _dataset_id_to_uuid_map(database_path)
+    if not dataset_to_uuid:
         raise ValueError("Catalog is empty; import item metadata before outfit relationships")
     with database_session(database_path) as connection:
         run_id = start_import_run(
@@ -56,13 +58,17 @@ def import_outfits(
         for outfit_id, record in iter_json_object(outfit_path):
             outfit = normalize_outfit(outfit_id, record)
             orphan_count = sum(
-                1 for item_id, _ in outfit.items if item_id not in catalog_item_ids
+                1 for item_id, _ in outfit.items if item_id not in dataset_to_uuid
             )
             if orphan_count:
                 skipped_incomplete_outfits += 1
                 skipped_orphan_relations += orphan_count
                 continue
-            batch.append(outfit)
+            mapped = tuple(
+                (dataset_to_uuid[item_id], description)
+                for item_id, description in outfit.items
+            )
+            batch.append(replace(outfit, items=mapped))
             if len(batch) >= batch_size:
                 with database_session(database_path) as connection:
                     imported, relations = upsert_outfits(connection, batch, source_revision)
