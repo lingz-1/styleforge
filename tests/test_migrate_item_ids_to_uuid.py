@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import re
-import uuid as uuid_module
 
 from styleforge.pipelines.migrate_item_ids_to_uuid import migrate_item_ids_to_uuid
 from styleforge.repositories.catalog_repository import upsert_items

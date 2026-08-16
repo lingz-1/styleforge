@@ -1,0 +1,172 @@
+{
+  "schema_version": "styleforge.extend-eval.v1",
+  "created": "2026-08-14",
+  "note": "新增三块真实评估用例（数据素材来自 p_outfit 官方基准 100 例真实搭配）。单项用例=锚定指定单品做单品搭配推荐，由独立 LLM 裁判评美观度；多轮用例=第一输入为寻求搭配意见（推荐），第二/三轮为用户要求的单品替换与整体调整，验证替换正确性并给最后套装打分；记忆随多轮链观察不评分。",
+  "item_advice": [
+    {
+      "id": "item-001",
+      "case_id": "poutfit-0001",
+      "anchor_item_id": "201181532",
+      "anchor_type": "dress",
+      "request": "这条蕾丝连衣裙怎么搭，想出席婚礼场合，帮我配齐鞋子和合适的配饰",
+      "expected_route": "item_advice",
+      "pass_criteria": {"min_judge_overall": 60, "anchor_in_outfit": true},
+      "note": "锚点=one_piece 蕾丝裙；生成套必须含锚点，裁判评整体协调"
+    },
+    {
+      "id": "item-002",
+      "case_id": "poutfit-0003",
+      "anchor_item_id": "86628380",
+      "anchor_type": "shoes",
+      "request": "这双棕色牛仔靴怎么搭，想要西部复古的感觉，配好上衣和下装",
+      "expected_route": "item_advice",
+      "pass_criteria": {"min_judge_overall": 60, "anchor_in_outfit": true},
+      "note": "锚点=footwear 牛仔靴；生成套=靴+上装+下装"
+    },
+    {
+      "id": "item-003",
+      "case_id": "poutfit-0005",
+      "anchor_item_id": "151616863",
+      "anchor_type": "dress",
+      "request": "这条真丝吊带裙怎么搭，晚上约会想穿得优雅一点，配什么鞋和外套",
+      "expected_route": "item_advice",
+      "pass_criteria": {"min_judge_overall": 60, "anchor_in_outfit": true},
+      "note": "锚点=one_piece 真丝吊带裙"
+    },
+    {
+      "id": "item-004",
+      "case_id": "poutfit-0014",
+      "anchor_item_id": "140467944",
+      "anchor_type": "pants",
+      "request": "这条水洗蓝紧身牛仔裤怎么搭，周末休闲出街，配什么上衣和鞋",
+      "expected_route": "item_advice",
+      "pass_criteria": {"min_judge_overall": 60, "anchor_in_outfit": true},
+      "note": "锚点=bottom 牛仔裤"
+    },
+    {
+      "id": "item-005",
+      "case_id": "poutfit-0016",
+      "anchor_item_id": "194727484",
+      "anchor_type": "top",
+      "request": "这件花卉蕾丝衬衫怎么搭，想在春日通勤穿，配什么下装和鞋子",
+      "expected_route": "item_advice",
+      "pass_criteria": {"min_judge_overall": 60, "anchor_in_outfit": true},
+      "note": "锚点=top 蕾丝衬衫"
+    },
+    {
+      "id": "item-006",
+      "case_id": "poutfit-0059",
+      "anchor_item_id": "190818872",
+      "anchor_type": "top",
+      "request": "这件高领毛衣怎么搭，秋冬想要温暖又显瘦，配什么裤子和鞋",
+      "expected_route": "item_advice",
+      "pass_criteria": {"min_judge_overall": 60, "anchor_in_outfit": true},
+      "note": "锚点=top 高领毛衣"
+    },
+    {
+      "id": "item-007",
+      "case_id": "poutfit-0028",
+      "anchor_item_id": "208592546",
+      "anchor_type": "skirt",
+      "request": "这条格纹半身裙怎么搭，想在正式场合穿，配什么上衣和鞋子",
+      "expected_route": "item_advice",
+      "pass_criteria": {"min_judge_overall": 60, "anchor_in_outfit": true},
+      "note": "锚点=bottom 格纹半身裙"
+    },
+    {
+      "id": "item-008",
+      "case_id": "poutfit-0053",
+      "anchor_item_id": "214717862",
+      "anchor_type": "shoes",
+      "request": "这双珍珠凉鞋怎么搭，夏天想去度假，配什么裙子合适",
+      "expected_route": "item_advice",
+      "pass_criteria": {"min_judge_overall": 60, "anchor_in_outfit": true},
+      "note": "锚点=footwear 珍珠凉鞋"
+    }
+  ],
+  "multiturn": [
+    {
+      "id": "chain-001",
+      "case_id": "poutfit-0001",
+      "turn1": {
+        "request": "下个月我姐结婚，帮我搭一身，想正式一点，最好穿连衣裙，鞋要舒服点的",
+        "expected_route": "outfit_recommend"
+      },
+      "swap_priority": [
+        {"slot": "outerwear", "slot_word": "外套", "style": "白色短西装"},
+        {"slot": "footwear", "slot_word": "鞋子", "style": "白色尖头"},
+        {"slot": "bottom", "slot_word": "裤子", "style": "深色西裤"},
+        {"slot": "top", "slot_word": "上衣", "style": "浅色衬衫"}
+      ],
+      "adjust": {"request": "整体再正式一点", "expected_route": "outfit_modify"},
+      "note": "婚礼连衣裙→优先换外套(若无则换鞋)→整体再正式；记忆应沉淀婚礼/正式等偏好"
+    },
+    {
+      "id": "chain-002",
+      "case_id": "poutfit-0007",
+      "turn1": {
+        "request": "下礼拜上班要见客户，帮我搭套休闲又不邋遢的，我平时走简单风",
+        "expected_route": "outfit_recommend"
+      },
+      "swap_priority": [
+        {"slot": "outerwear", "slot_word": "外套", "style": "深色西装"},
+        {"slot": "footwear", "slot_word": "鞋子", "style": "黑色乐福鞋"},
+        {"slot": "top", "slot_word": "上衣", "style": "白色衬衫"},
+        {"slot": "bottom", "slot_word": "裤子", "style": "黑色西裤"}
+      ],
+      "adjust": {"request": "整体再简约一点", "expected_route": "outfit_modify"},
+      "note": "通勤休闲→换外套/鞋→整体再简约；记忆应沉淀通勤/简约/黑白色系"
+    },
+    {
+      "id": "chain-003",
+      "case_id": "poutfit-0014",
+      "turn1": {
+        "request": "周末和闺蜜去逛街，帮我配身舒服的休闲装，我有条牛仔裤想穿",
+        "expected_route": "outfit_recommend"
+      },
+      "swap_priority": [
+        {"slot": "footwear", "slot_word": "鞋子", "style": "白色板鞋"},
+        {"slot": "top", "slot_word": "上衣", "style": "白色T恤"},
+        {"slot": "bottom", "slot_word": "裤子", "style": "卡其色休闲裤"},
+        {"slot": "outerwear", "slot_word": "外套", "style": "牛仔外套"}
+      ],
+      "adjust": {"request": "整体再休闲一点", "expected_route": "outfit_modify"},
+      "note": "周末牛仔→换鞋/上衣→整体再休闲；记忆应沉淀休闲/牛仔偏好"
+    },
+    {
+      "id": "chain-004",
+      "case_id": "poutfit-0005",
+      "turn1": {
+        "request": "晚上有个晚宴要出席，帮我搭套有气质点的，想穿裙子，配双细高跟",
+        "expected_route": "outfit_recommend"
+      },
+      "swap_priority": [
+        {"slot": "footwear", "slot_word": "鞋子", "style": "黑色细高跟"},
+        {"slot": "top", "slot_word": "上衣", "style": "黑色真丝衬衫"},
+        {"slot": "bottom", "slot_word": "裤子", "style": "黑色阔腿裤"},
+        {"slot": "outerwear", "slot_word": "外套", "style": "黑色西装外套"}
+      ],
+      "adjust": {"request": "整体再高级一点", "expected_route": "outfit_modify"},
+      "note": "晚宴丝质裙→换鞋→整体再高级；记忆应沉淀晚宴/优雅/黑色"
+    },
+    {
+      "id": "chain-005",
+      "case_id": "poutfit-0008",
+      "turn1": {
+        "request": "明天公司有个轻松点的活动，帮我搭套白衬衫阔腿裤那种清爽的",
+        "expected_route": "outfit_recommend"
+      },
+      "swap_priority": [
+        {"slot": "top", "slot_word": "上衣", "style": "浅蓝色衬衫"},
+        {"slot": "footwear", "slot_word": "鞋子", "style": "米色平底鞋"},
+        {"slot": "bottom", "slot_word": "裤子", "style": "白色阔腿裤"},
+        {"slot": "outerwear", "slot_word": "外套", "style": "米色风衣"}
+      ],
+      "adjust": {"request": "整体再正式一点", "expected_route": "outfit_modify"},
+      "note": "春日通勤衬衫→换上衣/鞋→整体再正式"
+    }
+  ],
+  "memory_check": {
+    "note": "记忆模块不评分。随多轮链每次 execute 自动提炼（语言证据 extraction + 替换行为 item_replaced），链结束后导出现有 preference_evidence 与 preference_model，人工核对是否符合各链用户意图。"
+  }
+}

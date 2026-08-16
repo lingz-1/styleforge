@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>p-outfit 独立 LLM 评估 · 用例展示</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --border: #e3e6ea; --text: #1f2430;
+    --muted: #7a8494; --accent: #3b6ef5; --ok: #16a34a; --bad: #dc2626;
+    --warn: #d97706;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { background: linear-gradient(135deg, #22305c, #3b6ef5); color: #fff;
+           padding: 18px 28px; }
+  header h1 { font-size: 20px; font-weight: 600; }
+  header .sub { font-size: 12.5px; opacity: .85; margin-top: 4px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 18px 20px 60px; }
+
+  /* controls */
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+              margin-bottom: 14px; }
+  .seg { display: inline-flex; background: #e9ecf1; border-radius: 8px; padding: 3px; gap: 2px; }
+  .seg button { border: 0; background: transparent; padding: 6px 14px; border-radius: 6px;
+                font-size: 13px; cursor: pointer; color: var(--muted); }
+  .seg button.active { background: #fff; color: var(--accent); font-weight: 600;
+                       box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  .seg button.opt { font-size: 12px; }
+  .search { flex: 1; min-width: 220px; padding: 8px 12px; border: 1px solid var(--border);
+            border-radius: 8px; font-size: 13px; }
+  .stat { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
+  .stat .box { background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+               padding: 10px 16px; min-width: 130px; }
+  .stat .box .k { font-size: 11.5px; color: var(--muted); }
+  .stat .box .v { font-size: 17px; font-weight: 700; margin-top: 2px; }
+  .stat .box .v.ok { color: var(--ok); } .stat .box .v.bad { color: var(--bad); }
+
+  /* case card */
+  .case { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+          margin-bottom: 16px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+  .case-head { padding: 12px 16px; display: flex; align-items: center; gap: 10px;
+               border-bottom: 1px solid var(--border); }
+  .case-head .id { font-weight: 700; color: var(--accent); font-size: 13.5px; }
+  .case-head .title { font-size: 13.5px; color: var(--muted); flex: 1; overflow: hidden;
+                      text-overflow: ellipsis; white-space: nowrap; }
+  .badge { font-size: 11px; padding: 3px 9px; border-radius: 20px; font-weight: 600; }
+  .badge.pass { background: #dcfce7; color: var(--ok); }
+  .badge.fail { background: #fee2e2; color: var(--bad); }
+  .case-req { padding: 10px 16px; background: #fafbfd; border-bottom: 1px solid var(--border);
+              font-size: 13px; color: #33405a; }
+  .case-req .lbl { color: var(--muted); font-size: 11.5px; margin-right: 6px; }
+  .case-body { padding: 14px 16px; }
+
+  .grid { display: grid; gap: 14px; }
+  .grid.compare { grid-template-columns: 1fr 1fr; }
+  .grid.compare .golden-col { grid-column: 1 / -1; border-top: 1px dashed var(--border);
+                              padding-top: 12px; }
+  .col-title { font-size: 12.5px; font-weight: 700; color: var(--muted); margin-bottom: 8px;
+               display: flex; align-items: center; gap: 8px; }
+  .col-title .score { margin-left: auto; font-size: 12px; font-weight: 600; }
+  .col-title .score.pass { color: var(--ok); } .col-title .score.fail { color: var(--bad); }
+
+  .items { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; }
+  .item { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #fff; }
+  .item .thumb { width: 100%; aspect-ratio: 1/1; background: #eef0f4; position: relative; }
+  .item .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .item .thumb .noimg { position: absolute; inset: 0; display: flex; align-items: center;
+                        justify-content: center; color: var(--muted); font-size: 11px; }
+  .item .meta { padding: 6px 8px; font-size: 11px; line-height: 1.45; }
+  .item .meta .cat { color: var(--accent); font-weight: 600; font-size: 11px; }
+  .item .meta .name { color: var(--text); overflow: hidden; text-overflow: ellipsis;
+                      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .item .meta .raw { color: var(--muted); font-size: 10px; margin-top: 2px; }
+
+  /* judge dimensions */
+  .dims { margin-top: 12px; display: grid; gap: 5px; grid-template-columns: repeat(5, 1fr); }
+  .dim { font-size: 11px; }
+  .dim .row { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 2px; }
+  .dim .bar { height: 6px; background: #edf0f4; border-radius: 3px; overflow: hidden; }
+  .dim .bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+  .foot { padding: 8px 16px 12px; font-size: 11.5px; color: var(--muted);
+          border-top: 1px solid var(--border); display: flex; gap: 14px; flex-wrap: wrap; }
+  .empty { text-align: center; color: var(--muted); padding: 40px; }
+  .n { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 12px; background: #eef0f4; }
+  .input-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+               border-bottom: 1px solid #f0f2f5; font-size: 13px; }
+  .input-row:last-child { border-bottom: 0; }
+  .input-row .id { font-weight: 700; color: var(--accent); font-size: 12px; min-width: 54px; }
+  .input-row .req { flex: 1; color: #33405a; }
+  .input-row .exp { color: var(--ok); font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+  .input-row .rule { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>p-outfit 独立 LLM 评估 · 100 用例展示</h1>
+  <div class="sub" id="meta-line">加载中…</div>
+</header>
+
+<div class="wrap">
+  <div class="controls">
+    <div class="seg" id="tab-seg">
+      <button data-tab="eval" class="active">评估用例（生成套+图）</button>
+      <button data-tab="multiturn">多轮对话</button>
+      <button data-tab="routing">任务路由</button>
+      <button data-tab="memory">记忆提炼</button>
+    </div>
+  </div>
+
+  <div id="eval-controls">
+    <div class="controls">
+      <div class="seg" id="mode-seg">
+        <button data-mode="compare" class="active">对比</button>
+        <button data-mode="order">订单模式</button>
+        <button data-mode="image">图片模式</button>
+      </div>
+      <div class="seg" id="pass-seg">
+        <button data-pass="all" class="active">全部</button>
+        <button data-pass="pass" class="opt">已通过</button>
+        <button data-pass="fail" class="opt">未通过</button>
+      </div>
+      <input class="search" id="search" placeholder="搜索请求文本 / 标题…">
+      <span class="n" id="count"></span>
+    </div>
+    <div class="stat" id="stat-row"></div>
+    <div id="cases"></div>
+  </div>
+
+  <div id="input-cases" style="display:none"></div>
+  <div class="empty" id="empty" style="display:none">无匹配用例</div>
+</div>
+
+<script>
+const DIM_NAMES = {
+  request_specificity: "需求具体性",
+  request_relevance: "需求相关性",
+  outfit_coordination: "搭配协调性",
+  freshness: "新颖性",
+  wearability: "实穿性",
+};
+const DECISION_ZH = {
+  accept: "接受", recompose: "重组", retrieve_more: "补充检索", wardrobe_gap: "衣橱缺口",
+};
+
+let DATA = null;
+let state = { tab: "eval", mode: "compare", pass: "all", q: "" };
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function imgHtml(item) {
+  if (!item) return "";
+  const cls = item.has_img ? "" : "noimg";
+  const inner = item.has_img
+    ? `<img src="/img/${encodeURIComponent(item.raw)}.jpg" loading="lazy" onerror="this.outerHTML='<div class=noimg>图不可用</div>'">`
+    : `<div class="noimg">无图</div>`;
+  return `<div class="thumb">${inner}</div>
+          <div class="meta">
+            <div class="cat">${esc(item.category)}</div>
+            <div class="name">${esc(item.name)}</div>
+            <div class="raw">#${esc(item.raw)}</div>
+          </div>`;
+}
+
+function dimsHtml(dims) {
+  if (!dims) return "";
+  return `<div class="dims">${Object.keys(DIM_NAMES).map(k => `
+    <div class="dim">
+      <div class="row"><span>${DIM_NAMES[k]}</span><span>${dims[k] ?? "-"}</span></div>
+      <div class="bar"><i style="width:${(dims[k] ?? 0) * 10}%"></i></div>
+    </div>`).join("")}</div>`;
+}
+
+function scoreLabel(rec) {
+  if (!rec) return "";
+  const pass = rec.passed ? "pass" : "fail";
+  return `<span class="score ${pass}">judge ${rec.judge_overall ?? "-"} · ${rec.passed ? "通过" : "未过"}</span>`;
+}
+
+function colHtml(modeLabel, rec) {
+  if (!rec) return `<div class="col"><div class="col-title">${modeLabel}</div><div class="empty">无数据</div></div>`;
+  return `<div class="col">
+    <div class="col-title">${modeLabel} ${scoreLabel(rec)}</div>
+    <div class="items">${rec.generated.map(imgHtml).join("")}</div>
+    ${dimsHtml(rec.judge_dimensions)}
+  </div>`;
+}
+
+function goldenHtml(c) {
+  return `<div class="col golden-col">
+    <div class="col-title">真实搭配（golden）<span class="pill">${c.golden.length} 件</span></div>
+    <div class="items">${c.golden.map(imgHtml).join("")}</div>
+  </div>`;
+}
+
+function caseHtml(c) {
+  const o = c.modes.order, i = c.modes.image;
+  const rec = state.mode === "compare" ? null : (state.mode === "order" ? o : i);
+  const badge = (state.mode === "compare")
+    ? `<span class="badge ${o.passed && i.passed ? "pass" : "fail"}">${o.passed && i.passed ? "双通过" : "有未过"}</span>`
+    : (rec.passed ? `<span class="badge pass">通过</span>` : `<span class="badge fail">未通过</span>`);
+
+  let body;
+  if (state.mode === "compare") {
+    body = `<div class="grid compare">
+      <div class="col">
+        <div class="col-title">订单模式（文本）生成套 ${scoreLabel(o)}</div>
+        <div class="items">${o ? o.generated.map(imgHtml).join("") : ""}</div>
+        ${o ? dimsHtml(o.judge_dimensions) : ""}
+      </div>
+      <div class="col">
+        <div class="col-title">图片模式（图像）生成套 ${scoreLabel(i)}</div>
+        <div class="items">${i ? i.generated.map(imgHtml).join("") : ""}</div>
+        ${i ? dimsHtml(i.judge_dimensions) : ""}
+      </div>
+      ${goldenHtml(c)}
+    </div>`;
+  } else {
+    const foot = rec
+      ? `<span>决策：${DECISION_ZH[rec.decision] ?? rec.decision}</span>
+         <span>critic 分：${rec.critic_score ?? "-"}</span>
+         <span>LLM 调用：${rec.llm_call_count} 次</span>
+         <span>耗时：${rec.latency_seconds?.toFixed(1)}s</span>`
+      : "";
+    body = `<div class="grid">
+      ${colHtml(state.mode === "order" ? "系统生成套（订单模式）" : "系统生成套（图片模式）", rec)}
+      ${goldenHtml(c)}
+    </div>
+    <div class="foot">${foot}</div>`;
+  }
+
+  const req = c.user_request ? `${esc(c.user_request)}` : "";
+  return `<div class="case">
+    <div class="case-head">
+      <span class="id">${esc(c.id)}</span>
+      <span class="title">${esc(c.source_title)}</span>
+      ${badge}
+    </div>
+    <div class="case-req"><span class="lbl">用户请求</span>${req}</div>
+    <div class="case-body">${body}</div>
+  </div>`;
+}
+
+function render() {
+  const isEval = state.tab === "eval";
+  document.getElementById("eval-controls").style.display = isEval ? "" : "none";
+  document.getElementById("input-cases").style.display = isEval ? "none" : "";
+  if (!isEval) {
+    const set = (DATA.input_sets || []).find(s => s.type === state.tab);
+    document.getElementById("input-cases").innerHTML = set ? inputSetHtml(set) : "<div class='empty'>无数据</div>";
+    document.getElementById("count").textContent = set ? `${set.count} 例` : "";
+    return;
+  }
+  const cases = DATA.cases.filter(c => {
+    const rec = state.mode === "compare" ? c.modes : c.modes[state.mode];
+    if (state.pass === "pass") { if (state.mode === "compare" ? !(c.modes.order?.passed && c.modes.image?.passed) : !rec?.passed) return false; }
+    if (state.pass === "fail") { if (state.mode === "compare" ? !(!(c.modes.order?.passed && c.modes.image?.passed)) : rec?.passed) return false; }
+    if (state.q) {
+      const hay = `${c.user_request} ${c.source_title} ${c.id}`.toLowerCase();
+      if (!hay.includes(state.q)) return false;
+    }
+    return true;
+  });
+  document.getElementById("count").textContent = `${cases.length} / ${DATA.cases.length} 用例`;
+  document.getElementById("empty").style.display = cases.length ? "none" : "block";
+  document.getElementById("cases").innerHTML = cases.map(caseHtml).join("");
+}
+
+function inputSetHtml(set) {
+  return `<div class="case">
+    <div class="case-head">
+      <span class="id">${set.title}</span>
+      <span class="title">${set.source}</span>
+      <span class="badge pass">${set.count} 例</span>
+    </div>
+    <div class="case-req"><span class="lbl">说明</span>这些是分类/提炼评估集：含用户输入与期望标签，无生成套装与图片；真实生成结果需真实运行产生。</div>
+    <div class="case-body">
+      ${set.items.map(it => inputRowHtml(set.type, it)).join("")}
+    </div>
+  </div>`;
+}
+
+function inputRowHtml(type, it) {
+  const rule = it.rule
+    ? `<span class="pill rule">${esc(it.rule)}</span>` : "";
+  return `<div class="input-row">
+    <span class="id">${esc(it.id)}</span>
+    <span class="req">${esc(it.request)}</span>
+    <span class="exp">→ ${esc(it.expected)}</span>
+    ${rule}
+  </div>`;
+}
+
+function statHtml() {
+  const m = DATA.meta;
+  const mk = (label, v, cls = "") => `<div class="box"><div class="k">${label}</div><div class="v ${cls}">${v}</div></div>`;
+  const mo = m.modes_metrics.order, mi = m.modes_metrics.image;
+  const cmp = m.comparison || {};
+  const d = cmp.delta_image_minus_order;
+  return [
+    mk("订单模式 judge 均分", (mo.mean_judge_overall ?? "-").toFixed ? mo.mean_judge_overall.toFixed(1) : "-"),
+    mk("图片模式 judge 均分", (mi.mean_judge_overall ?? "-").toFixed ? mi.mean_judge_overall.toFixed(1) : "-", "ok"),
+    mk("order 通过率", `${((mo.pass_rate ?? 0) * 100).toFixed(0)}%`),
+    mk("image 通过率", `${((mi.pass_rate ?? 0) * 100).toFixed(0)}%`, "ok"),
+    mk("image−order 均差", d ? `+${d.toFixed(2)}` : "-", "ok"),
+    mk("配对 p 值", cmp.paired_t_test ? cmp.paired_t_test.p_value?.toFixed(4) : "-"),
+  ].join("");
+}
+
+document.querySelectorAll("#tab-seg button").forEach(b =>
+  b.onclick = () => { state.tab = b.dataset.tab; refreshTab(); refreshSeg(); render(); });
+function refreshTab() {
+  document.querySelectorAll("#tab-seg button").forEach(b =>
+    b.classList.toggle("active", b.dataset.tab === state.tab));
+}
+document.querySelectorAll("#mode-seg button").forEach(b =>
+  b.onclick = () => { state.mode = b.dataset.mode; refreshSeg(); render(); });
+document.querySelectorAll("#pass-seg button").forEach(b =>
+  b.onclick = () => { state.pass = b.dataset.pass; refreshSeg(); render(); });
+document.getElementById("search").oninput = e => { state.q = e.target.value.trim().toLowerCase(); render(); };
+
+function refreshSeg() {
+  document.querySelectorAll("#mode-seg button").forEach(b =>
+    b.classList.toggle("active", b.dataset.mode === state.mode));
+  document.querySelectorAll("#pass-seg button").forEach(b =>
+    b.classList.toggle("active", b.dataset.pass === state.pass));
+}
+
+fetch("data.json").then(r => r.json()).then(d => {
+  DATA = d;
+  document.getElementById("meta-line").textContent =
+    `judge prompt ${d.meta.judge_prompt_version} · schema ${d.meta.schema_version} · 运行时间 ${d.meta.generated_at}`;
+  document.getElementById("stat-row").innerHTML = statHtml();
+  render();
+}).catch(err => {
+  document.getElementById("meta-line").textContent = "data.json 加载失败，请先运行 build_data.py";
+  console.error(err);
+});
+</script>
+</body>
+</html>

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Sequence
 if TYPE_CHECKING:
     import numpy as np
     from PIL import Image
+    from transformers import CLIPModel
 
 
 SUPPORTED_PRECISIONS = {"float32", "float16", "bfloat16"}
@@ -25,7 +26,7 @@ class FashionClipEncoder:
         precision: str = "float16",
     ) -> None:
         import torch
-        from transformers import AutoProcessor, CLIPModel
+        from transformers import AutoProcessor
 
         model_dir = model_dir.resolve()
         if not (model_dir / "config.json").is_file():
@@ -49,13 +50,38 @@ class FashionClipEncoder:
             local_files_only=True,
             use_fast=False,
         )
-        self.model = CLIPModel.from_pretrained(
-            model_dir,
-            local_files_only=True,
-            use_safetensors=True,
-        ).eval()
-        self.model.to(self.device)
+        self.model = self._load_model(model_dir).to(self.device)
         self.dimension = int(self.model.config.projection_dim)
+
+    @staticmethod
+    def _load_model(model_dir: Path) -> "CLIPModel":
+        """Load FashionCLIP weights deterministically, bypassing the
+        transformers meta-device loading path.
+
+        transformers >= 4.57 constructs the model on the meta device and copies
+        each parameter out of a meta-mapped safetensors slice; under memory
+        pressure a parameter can be left unmaterialized, and the later
+        ``.to(device)`` raises ``NotImplementedError: Cannot copy out of meta
+        tensor``. Building the model from its saved config and copying the
+        checkpoint into a CPU state dict instead never touches the meta device,
+        so the load is deterministic and the residual-meta failure cannot occur.
+        """
+        import torch
+        from safetensors import safe_open
+        from transformers import CLIPConfig, CLIPModel
+
+        config = CLIPConfig.from_pretrained(model_dir, local_files_only=True)
+        model = CLIPModel(config)
+        state: dict[str, torch.Tensor] = {}
+        with safe_open(str(model_dir / "model.safetensors"), framework="pt", device="cpu") as handle:
+            for key in handle.keys():
+                state[key] = handle.get_tensor(key)
+        missing, _unexpected = model.load_state_dict(state, strict=False)
+        if missing:
+            raise RuntimeError(
+                f"FashionCLIP checkpoint is missing weights: {sorted(missing)[:5]}"
+            )
+        return model.eval()
 
     def _autocast_context(self):
         import torch
@@ -65,19 +91,28 @@ class FashionClipEncoder:
         dtype = torch.float16 if self.precision == "float16" else torch.bfloat16
         return torch.autocast(device_type="cuda", dtype=dtype)
 
-    def encode_images(self, images: Sequence["Image.Image"]) -> "np.ndarray":
-        """Encode an image batch into normalized float32 NumPy vectors."""
+    def encode_images(self, images: Sequence["Image.Image"], batch_size: int = 64) -> "np.ndarray":
+        """Encode an image batch into normalized float32 NumPy vectors.
+
+        Images are encoded in fixed-size batches so a large wardrobe (~900
+        photos) never materializes the whole vision batch on the GPU at once.
+        """
+        import numpy as np
         import torch
         import torch.nn.functional as functional
 
         if not images:
             raise ValueError("images must not be empty")
-        inputs = self.processor(images=list(images), return_tensors="pt")
-        pixel_values = inputs["pixel_values"].to(self.device, non_blocking=True)
-        with torch.inference_mode(), self._autocast_context():
-            features = self.model.get_image_features(pixel_values=pixel_values)
-        features = functional.normalize(features.float(), p=2, dim=-1)
-        return features.cpu().numpy()
+        chunks: list["np.ndarray"] = []
+        for start in range(0, len(images), batch_size):
+            batch = list(images[start:start + batch_size])
+            inputs = self.processor(images=batch, return_tensors="pt")
+            pixel_values = inputs["pixel_values"].to(self.device, non_blocking=True)
+            with torch.inference_mode(), self._autocast_context():
+                features = self.model.get_image_features(pixel_values=pixel_values)
+            features = functional.normalize(features.float(), p=2, dim=-1)
+            chunks.append(features.cpu().numpy())
+        return np.concatenate(chunks, axis=0)
 
     def encode_texts(self, texts: Sequence[str]) -> "np.ndarray":
         """Encode text queries into the same normalized FashionCLIP space."""

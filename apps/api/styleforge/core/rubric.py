@@ -106,3 +106,23 @@ def rubric_text(weights: dict[str, float] | None = None) -> str:
             f"- {zh_name}（{en_name}，权重 {weight * 100:.0f}%）：{question}"
         )
     return "\n".join(lines)
+
+
+def aggregate_score(
+    dimension_scores: dict[str, Any] | None,
+    weights: dict[str, Any] | None = None,
+) -> float:
+    """Weighted five-dimension score on a 0-100 scale (0 when unscored).
+
+    Matches ``workflow.graph._critic_score`` byte-for-byte so the runtime critic
+    and the offline evaluation share one aggregation formula; unscored/missing
+    dimensions fall back to the neutral 5.
+    """
+    if not dimension_scores:
+        return 0.0
+    resolved = normalize_weights(weights)
+    weighted = sum(
+        resolved[key] * float(dimension_scores.get(key, 5))
+        for key in dimension_keys()
+    )
+    return round(weighted * 10, 2)
