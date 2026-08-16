@@ -496,3 +496,183 @@ LLM 证据（`llm/memory_schema.py` / `memory_prompts.py` / `services/memory_ext
 - 真实 LLM 评估集 33 例，v2.4 连续 3 次运行分布：F1 **0.847 / 0.911 / 0.921**（run3 精确复现文档记录的 v2.3 基线 0.9213，证实当前内容与基线一致）；Precision 0.837~0.872、Recall 0.857~0.976、极性一致率 1.00、scope 一致率 0.972~0.976。run2/run3 空案例零误报，run1 有 1 例空误报——符合 LLM 非确定性（temperature 0.2），单次结果在 F1 ~0.91 附近波动。
 - 用户报告的三个确定性问题在 v2.4 均被规则覆盖：mem-05（scope 漂移）修复为 global 确定性、mem-08（正式→occasion）/mem-11（牛仔→category）/mem-09（花花绿绿→style）归类修复、mem-02（西装裤还好）弱信号不再提炼、mem-07（配饰多）不翻转极性。
 
+## 14. p-outfit 官方基准独立 LLM 评估：订单 vs 图片衣柜对照（2026-08-14，已实现）
+
+### 14.1 需求与背景
+
+用官方 Polyvore Outfits 基准（`E:\01-style-dataset\p-outfit`，HF ArtmeScienceLab/Polyvore-Outfits）构建**独立 LLM 裁判**评估生成质量：`IndependentJudge`（纯文本 DeepSeek，五维 R/S/C/W/F 评分）对**同一批 100 个真实搭配 + 同一个人工请求**，分别在两类衣柜数据形态下评估——
+
+- **实验 A：订单导入式**（弱数据）：仅官方文本字段 + 文字嵌入，`image_status=unbound`
+- **实验 B：图片导入式**（强数据）：官方文本 + 图像嵌入，`image_status=available`
+
+两模式**互不混合**（独立 schema + 独立用户 + 独立 embedding_dir），共享同一裁判、同一批 case、同一套指标。核心产出 = order-vs-image 配对对照。
+
+### 14.2 实现清单
+
+- **数据层** `apps/api/styleforge/data/p_outfit.py`：`SEMANTIC_TO_ITEM_TYPE` 粗映射（11 类 semantic_category → 项目词表，保证 `infer_slot != "other"`）+ `REFINE_RULES` 桶内细化 + `select_eval_cases`（种子抽样 100 完整搭配）+ `draft_user_request`（自动起草中文请求初稿，P3 逐条人工审查润色后冻结）+ `normalize_p_outfit_item`。
+- **裁判** `llm/judge_prompts.py` + `agents/judge.py`：`build_judge_prompt` 只含用户请求 + 单品文本块 + rubric（不含 reasoning/决策 → 独立性）；`IndependentJudge.score_outfit` 失败返回 degraded 不掩盖。
+- **runner** `evals/runners/evaluate_p_outfit.py`：建 scoped schema → 衣柜快照 → 嵌入 → `StyleForgeWorkflow.recommend_payload`（weather off）→ 裁判打 top-1 + golden → 聚合报告。
+- **分析层** `evals/analysis/analyze_p_outfit.py`（纯 Python 无 scipy）：paired t / Wilcoxon / Cohen's d（t 区间）/ 精确 McNemar。
+- **门禁** `tests/test_p_outfit_eval.py`（A-F 六组 29 例）+ `tests/test_p_outfit_analysis.py`（7 例已知值），全离线锁确定性。
+- **持久化重构**：`--env` 固定 schema `eval_order`/`eval_image` + 固定用户 + 缓存衣柜快照/嵌入 + **per-case journal**（边测边写、断点续跑零 API 重放）+ `--prepare-only`（零 LLM 预建环境）；无 `--env` 时保留旧临时 schema 行为。
+
+### 14.3 遇到的问题（同源双崩溃，均已修复）
+
+1. **image 模式构造 encoder 连续两次崩溃**：先 `NotImplementedError: Cannot copy out of meta tensor`（transformers 4.57 经 meta 设备加载权重，显存紧张时残留 meta 参数），后 `CUDA OOM`（PyTorch 虚存预留 30+ GiB）。根因是 **`_run_cases_parallel` 每 case 一个 workflow，而每个 `StyleForgeWorkflow` 懒加载自己的 `FashionClipEncoder`（~1.2 GB）→ 100 个 encoder 并发驻留 GPU**。修复：改为 **每 worker 一个 workflow**（`max_workers` 个 encoder），实测显存 3.4→5.8 GB 有界。
+2. **崩溃丢全部结果**：报告仅在全部模式跑完后一次写入，order 100 例结果两次随崩溃丢失。修复：per-case journal（每例完成即落盘，重跑只补在飞 case）+ 环境持久化复用。重跑 3/3 命中 journal 时 1 秒完成、零 API 调用。
+3. **900 图单批前向 OOM 风险**：`encode_images` 改为 batch_size=64 分批。
+
+### 14.4 验证证据
+
+- **全量真实运行**（deepseek-chat + CUDA，`--mode both --parallel 4`，100 例 × 2 模式，597 次 LLM 调用）→ `artifacts/evaluation/p_outfit.json` + 配对分析 `p_outfit_analysis.json`：
+
+  | 指标 | order（订单/文本） | image（图片） |
+  |---|---|---|
+  | 生成套 judge 均分 | 58.57 | **63.09** |
+  | golden 锚点均分 | 48.14 | 47.90 |
+  | pass 率 | 50% | **65%** |
+  | 硬违规 / gap / 裁判失败 | 0 / 0 / 0 | 0 / 0 / 0 |
+  | critic-judge pearson | 0.331 | -0.045 |
+
+  **配对检验（n=100）**：image−order 均差 **+4.52**（SD 12.56），**paired t p=0.0005**、**Wilcoxon p=0.001**、**Cohen's d=0.36**；五维 delta 全正（request_specificity +0.68 最大，wearability +0.18 最小）；**McNemar pass 差异 p=0.024**（39 对不一致，27 例 image 胜出）。→ 图片导入式（强数据）衣橱生成质量**统计显著优于**订单文本（弱数据）衣橱，符合实验假设；裁判独立性成立（双模式 pearson < 0.4）。
+
+- **门禁**：`tests/test_p_outfit_eval.py` 29 例 + `test_p_outfit_analysis.py` 7 例全绿；全量回归 **498 passed**；Ruff clean。
+- **环境**：固定 schema `eval_order`/`eval_image` + 用户 `eval-order`/`eval-image` + 570 件唯一单品衣柜持久驻留测试库（非主库）；`env/` 目录含快照/嵌入/journal 可复现与增量扩展。
+
+## 15. 单品搭配 + 多轮对话真实 LLM 评估（2026-08-14，已验证）
+
+### 15.1 需求与背景
+
+第 14 节的 p-outfit 评估覆盖主推荐链路（fresh brief，无 follow-up 词、无记忆）。本节把**独立裁判评估横向扩展到单品搭配与多轮对话**两条生产链路：单品搭配锚定指定单品由裁判评美观度；多轮对话从自然人话（寻求搭配意见）出发，验证用户要求的槽位替换是否命中、最后套装得分。用户已确认两个设计约束：**turn1 走 `StyleForgeWorkflow.recommend_payload`（LLM 三 Agent 链），全程不碰确定性 `parse_request`**；多轮首输入是自然人话（非直接换单品）。
+
+### 15.2 实现清单
+
+- **用例** `evals/cases/extend_advice.json`：8 个单品搭配（锚定 one_piece/footwear/bottom/top 真实单品）+ 5 条多轮链（turn1 推荐 → 4 槽位 swap_priority → adjust 全局调整），数据素材来自 p-outfit 100 例真实搭配。
+- **runner** `evals/runners/evaluate_extend.py`：
+  - `make_pipeline` 把 MultiTaskWorkflow 的 `recommendation_runner` 接到 `StyleForgeWorkflow.recommend_payload`（LLM 链），确定性解析器永不触达。
+  - 单品：`TaskExecutionInput(item_id=anchor_uuid)` → 判 top sample_outfit 含锚点 → 独立裁判评 top 套。
+  - 多轮：turn1 推荐 → 逐 swap 校验（`outfit_context_from_payload` 逐轮更新 session_context）→ adjust；**槽位不存在则 skip 并记原因**（系统"当前搭配中没有 X 单品"是正确澄清，不是缺陷）；**all-skipped 链标记 infeasible 不计入 pass 率**。
+  - **越界标注并重试一次**（`_execute_with_retry`）：agent2 产出越出 agent1 候选的 alternatives 或 replaced_item_ids 不一致触发 `_validate_modify` ValueError 时，标注首错并重试一次；仍失败标记 failed。
+  - **全过程记录**：`_persist_raw` 把每轮完整 payload（trace/agent_outputs）剥离写入 `env/order/logs/{case_id}.json`；`findings` 自动检测可复现系统行为写入报告。
+  - journal 断点续跑（冒烟 + 全量共享，重跑零 API 重放）。
+- **门禁** `tests/test_extended_tasks.py`（15 passed）：新增 `test_modify_missing_slot_returns_clarification_not_failure`（无外套+换外套 → needs_clarification，断言含 outerwear）。
+
+### 15.3 遇到的问题
+
+1. **冒烟 chain-001 adjust 失败**：turn1 生成连衣裙套（无外套/裤/上衣槽），swap 按 skip 逻辑跳过 3 个不存在的槽位，adjust 触发越界 ValueError 重试仍失败 → 链 failed。确认 skip + retry 机制按设计工作，adjust 崩溃是本批暴露的系统缺陷（见下）。
+2. **全量 5/5 adjust 崩溃（EXT-001，核心缺陷）**："整体再正式一点"等无明确槽位请求被 `is_follow_up`（task_workflow.py:439）重定向到 OUTFIT_MODIFY，`_analyze_modify` 无 target_slot，agent1/agent2 对替换事实产生不一致（alternatives 越出 40 候选或 replaced_item_ids 不一致），`_validate_modify` 硬抛 ValueError，重试一次仍失败。**用户决策：不修系统，如实记缺陷**。→ runner 增加 `_detect_findings` 自动提炼 findings 写报告。
+3. **单品 one_piece 缺附加槽（EXT-002）**：锚定连衣裙只补鞋不补配饰/外套，item-001（要配饰）judge 32.0 全组最低。
+4. **记忆过度归纳（EXT-003）**：category_induction 从多次替换归纳出 shoes/tops/bottoms 负面偏好（"换鞋≠讨厌鞋"）。
+
+### 15.4 验证证据
+
+- **全量真实运行**（deepseek-chat，冒烟 1 例 1 链 + 全量 8 item + 5 chain，~90 次调用）→ `artifacts/evaluation/extend_advice.json`（含 findings）+ 全程日志 `artifacts/evaluation/env/order/logs/`（13 个文件）。
+
+  | 链路 | 指标 | 结果 |
+  |---|---|---|
+  | 单品搭配 | 锚定率 / 裁判均分 / pass(≥60) | 100% / 55.9 / 50%（4/8） |
+  | 多轮替换 | swap_correct_rate / swap_skip_rate | **1.0**（全部命中请求槽位）/ 0.4（槽位缺失正确跳过） |
+  | 多轮 adjust | 成功率 | **0/5 崩溃**（EXT-001） |
+  | 记忆核对 | 证据 / 模型行 | 54 / 43，各链意图正确沉淀；EXT-003 归纳噪音 |
+
+- **门禁**：`tests/test_extended_tasks.py` 15 passed；全量回归 **499 passed**（2026-08-14 实测，116.62s，含本次新增 missing-slot→澄清单测）。
+- **报告 findings**：EXT-001（high，adjust 崩溃）、EXT-002（medium，one_piece 缺配饰/外套）、EXT-003（low，记忆过度归纳）；按用户决策如实记录不修，供人工复核报告与全程日志定位系统 bug。**EXT-001 已于 2026-08-16 修复，见第 16 节。**
+
+## 16. EXT-001 修复：flexible 自主重排（2026-08-16）
+
+### 16.1 需求背景
+
+用户复核评估报告后要求：**"整体修改性意见就由 agent 自主理解用户意图，按照用户需求去重新调整搭配，灵活性高一点不要那么死"**。即全局调整请求（如"整体再正式一点"）不应走死板的单槽位替换链路，而应由 LLM 自主理解方向、按需重排整套；带槽位但当前搭配缺失该槽位的请求（如"加配饰"而当前无配饰）也应由 agent 自主重建整套以容纳该槽位，而非反问澄清。
+
+### 16.2 根因（为何 5/5 崩溃）
+
+- 路由正确：`is_follow_up`（task_workflow.py:439）把无槽位全局调整重定向 OUTFIT_MODIFY，符合设计。
+- LLM 端已按"灵活重排"理解：prompt 已有 `_OVERALL_ADJUST_RULE`。
+- **数据端停留单槽位语义**：
+  - `_analyze_modify` overall 分支候选池 = 衣柜外任意前 40 件（与调整方向无关，硬截断）。
+  - `_validate_modify`（extension_validation.py）仍按单槽位逐字比对 `replaced_item_ids == agent1.replaced(=[ ])`，agent2 只要真的动手换就硬抛 ValueError（EXT-001 实测报错"局部修改结果的被替换单品与 Agent 1 事实不一致；候选替换范围外"）。
+  - agent1 LLM 被 prompt 禁止改写候选范围，无法缓解。
+
+### 16.3 修复方案（flexible 模式）
+
+统一无槽位整体调整与槽位缺失两类请求为 **flexible 模式**，把语义自由度交给 LLM，硬校验只守数据边界：
+
+1. **`tools/extension_analysis.py`**：`_analyze_modify` 无槽位或槽位缺失（`target_slot not in current_slots`）时走 `_flexible_adjustment`：
+   - 候选池 = **required_slot 槽位单品（如"加配饰"时的 accessory 候选，优先）→ 知识方向匹配单品（`retriever.search(kind="style")` + `_knowledge_matches`，解释"更正式"等方向）→ 全衣柜兜底**，去除 40 件硬截断。
+   - 标记 `adjustment_mode="flexible"`；槽位缺失时带 `required_slot` + `required_slot_item_ids`。
+   - `analyze_extension_task` 把 retriever 传入（原签名无）。
+2. **`tools/extension_validation.py`**：`_validate_modify` 按 `adjustment_mode=="flexible"` 分支——跳过 replaced/locked 逐字比对（替换集由 LLM 决定），只守：alternatives 引用 ⊆ 候选池∪当前套装、与当前套装确有差异、required_slot 必从 `required_slot_item_ids` 落位。单槽位分支保持严格不变。
+3. **`llm/extension_prompts.py`**：`_OVERALL_ADJUST_RULE` 升级为 `_FLEXIBLE_ADJUST_RULE`（含 required_slot 落位说明），`completion_rule_for` 分支改判 `"flexible"`。
+4. **`evals/runners/evaluate_extend.py`**：swap 环节槽位缺失从"跳过"改为"先尝试执行 insert"（成功则计入 executed；失败保留 skip 语义并标记 `insert_attempted`）。
+5. 结果模型 `OutfitModifyResult` 不变（completed 需 alternatives 的既有约束保留）。
+
+### 16.4 验证
+
+- **门禁**：`tests/test_extended_tasks.py` 更新 `test_modify_missing_slot_*`（缺槽位不再澄清→断言 flexible + required_slot + 候选含该槽位单品）、新增 `test_flexible_adjust_accepts_llm_choice_of_replaced_and_locked`（回归 EXT-001：非空 replaced/locked + 池内引用不再硬抛）；`test_session_multiturn.py` 断言标记 `overall`→`flexible`。
+- **全量回归**：**500 passed**（2026-08-16 实测，110.46s）、ruff 全清（含清理 evaluate_extend.py 两处历史未使用 import）。
+- **真实 LLM 冒烟**（order env 570 件衣柜）：
+  - 场景 A 整体调整："整体再正式一点" → `adjustment_mode=flexible`，status=completed，产出 **2 套**完整重排（replaced 全部 3 件=连衣裙套整体正式化），不崩溃。
+  - 场景 B 槽位缺失：连衣裙+鞋的 outfit 请求"加一个配饰" → `required_slot=accessory`，候选列出全部 accessory 单品，产出 `one_piece+footwear+accessory`，**配饰成功落位**。
+- **遗留**：EXT-002（one_piece 缺配饰，item_advice 场景）、EXT-003（记忆过度归纳）仍待产品优化。
+
+## 17. PG 恢复 + 3 个回归失败修复：REPLACE subject 捕获语义（2026-08-16）
+
+### 17.1 需求背景
+
+用户指出 PostgreSQL 实际安装在 `E:\PostgreSQL`（此前认为不可用）。`pg_ctl -D /e/PostgreSQL/data` 启动成功，`styleforge` 库 23 表 / 2084 catalog_items 完好。PG 恢复后全量回归 **532 通过 / 3 失败**，全部是 EXT-001 flexible 改造引入的脚本 LLM 序列错位（critic 硬校验失败 → recompose → composer 拿到记忆提取响应 `{'evidence': []}`）。
+
+### 17.2 三个失败的确切根因
+
+| 测试 | 根因 | 类别 |
+|---|---|---|
+| `test_local_modification_locks_non_target_items` | `_validate_flexible` 要求 ≥3 套备选，脚本只有 1 套 | 测试数据过期（EXT-001 契约） |
+| `test_three_round_modify_chain_keeps_latest_outfit` | 同上，`ROUND3_MODIFY_BOTTOM` 只有 1 套 | 测试数据过期 |
+| `test_mixed_chain_fresh_scene_does_not_rewrite` | **REPLACE 语义缺口**：`interpret_request` 只产出 REPLACE target，无法定位"被换掉的当前单品" | 真实架构缺口 |
+
+前两个是上一会话确立的 min-3 契约的测试数据遗漏：脚本备选分别扩到 3 套（`boots`/`leather` 变体、`heels-1`/去衬衫变体）。第三个是真实语义缺口，按用户"禁 case-specific patch"原则做了通用修复。
+
+### 17.3 REPLACE subject 捕获（把字句 + X换Y 裸主谓）
+
+"把这件大衣换成西装" 此前解析为 `REPLACE target=suit` + 一条误生的 `PREFER 大衣` 约束。问题有三层：
+
+1. **`大衣` 被当成"推荐包含"约束**，实际它是"被换掉的当前单品"（subject）。
+2. **`_partition_current` 无法定位当前大衣**：`_replace_matches_current` 用 target 派生槽位（`infer_slot("suit")=one_piece`）匹配，外套对不上。
+3. **anaphora 一律 NEEDS_CLARIFICATION**，即使会话上下文中当前搭配确实有件大衣。
+
+通用修复（不改动任何 case 专用分支）：
+
+- **`core/request_spec.py`**：
+  - `Change` 增加 `subject: EntityRef | None`——动作作用的对象（被换掉/被移除的实体）。
+  - `_collect_subject_spans` 识别两类主语位置：(a) **把/将字句**"把这件大衣换成西装"；(b) **实体后紧跟 REPLACE 算子**"外套换件西装"。仅限 REPLACE，避免"X，不要红色"（颜色否定，非实体移除）误判。
+  - `_parse_semantics` 消费 subject：不再产出误生的 include 约束；`_subject_for_change` 把最近的 preceding subject 绑到 REPLACE/REMOVE change。
+  - anaphora 仍在 `unresolved_fields` 如实记录（解析器不猜测）。
+- **`core/candidate_service.py`**：
+  - `_partition_current`：REPLACE 有 subject 时**只用 subject 匹配**当前单品（subject 明确指名被换掉的件；不再回退 target 派生槽位，避免 `suit→one_piece` 误替换连衣裙）。
+  - `_subject_anaphor_resolved` + `_assess_feasibility`：会话中 subject 命中了当前单品 → anaphor 已解析 → `EXACT`（不再 NEEDS_CLARIFICATION）；无 subject 实体（"把那个换掉"）仍 NEEDS_CLARIFICATION。
+- 候选检索不变：REPLACE target 仍按自己的 target 检索（`西装` 通过宽松文本锚定命中"深蓝西装外套" blazer-1）。
+
+### 17.4 验证证据
+
+- **回归测试**（新增 5 例锁定语义）：`test_ba_construction_captures_subject_and_skips_constraint`、`test_bare_entity_before_replace_is_subject`、`test_colour_negation_after_entity_is_not_a_subject`（防"X，不要红色"误判）、`test_ba_subject_anchors_replace_to_current_item`（EXACT + replaced=coat + 候选含 blazer）、`test_entity_before_replace_is_subject_not_constraint`。
+- **全量回归**：**540 passed**（2026-08-16 实测）、Ruff clean。既有"鞋换运动鞋"测试在新 subject 语义下结果不变（更精确）。
+- 三个原失败测试全部转绿；临时调试探针（`artifacts/_probe_*.py`）已清理。
+
+### 17.5 提交前核对：Relaxation 由 constraint strength 决定 + resolved subject 不再残留 unresolved（同日）
+
+按用户"提交前重点确认两个问题"核对验收 case「不要帽子，要粉色系发夹」在衣橱无粉色发夹时的行为，发现两个缺口并修复：
+
+**Concern A —— PREFER 颜色未被追踪（"pink 不可满足"从未被报告）**。
+
+- 原 `build_relaxation_plan` 只处理 MUST 颜色与品类放宽，PREFER 是软约束，exact 本就不拦截它（`_build_coverage` 里 PREFER 只排序不把关），于是"想要粉色但衣橱只有金色发夹"被静默吞掉——Agent 2 无从得知偏好被放弃，只能当 exact 处理。
+- 修复（`core/relaxation.py` + `core/candidate_service.py`）：
+  - `ConstraintCoverage` 新增 `prefer_missed_ids`（exact 候选中缺 ≥1 个 PREFER 色的）与 `unmet_prefer_colors`（`all_target_ids` 里一个都没有的 PREFER 色）。
+  - `build_relaxation_plan` 放宽链重编号为 **L0 exact → L1 放弃 PREFER 色 → L2 放弃 MUST 色 → L3 品类拓宽到槽位**；`RelaxationOption` 新增 `unmet_prefer_colors` 显式报告偏好缺口。
+  - **MUST/MUST_NOT 永不自动放宽**：L1 只动 PREFER；REMOVE 排除在所有 level 生效（帽子始终进不来）；MUST 只"解锁自己 target 的更多候选"，绝不整体换 target。color→type→slot 只是允许放宽项之间的优先级。
+- 验收 case 现在的报告：`ADD_OR_REPLACE-0` L0 exact=`[gold_clip]`（hairwear MUST 未放宽）、L1 放弃偏好色粉色、`unmet_prefer_colors=["pink"]`、无帽子进入候选。Agent 2 据此只放松 pink、不放松 hairwear（PR4A 决策）。
+
+**Concern B —— 会话内已解析的 subject 不应残留 effective unresolved**。
+
+- `_structured_modify` 此前直接把 `spec.model_dump()` 写进 facts，`unresolved_fields` 里的 `anaphoric_reference` 原样保留；即便 CandidateService 已把「大衣」锚到会话当前单品（feasibility 非 NEEDS_CLARIFICATION），Agent 2 仍看到一条过期的澄清义务，可能无谓地回问。
+- 修复（`tools/extension_analysis.py`）：当 `pool.feasibility` 非 `NEEDS_CLARIFICATION` 且 spec 含 `anaphoric_reference` 时，用 `spec.model_copy(update={"unresolved_fields": [...]})` 生成 effective spec 再 dump，resolved subject 不再双重状态。
+- 回归：`test_prefer_color_gap_reported_pink_not_must_relaxed`（pink 缺口显式报告 + MUST_NOT 帽子全 level 生效）、`test_resolved_anaphor_not_kept_as_effective_unresolved`（effective spec 移除 anaphor + replaced=coat）；`test_relaxation.py` 的 level 断言随重编号更新（minimal 1→2、2→3）。
+- 全量回归 **542 passed**（540 + 新增 2）、Ruff clean。

@@ -18,6 +18,10 @@
 
 > 2026-08-14 评估基准数据集确认：`E:\01-style-dataset\p-outfit` 为官方 **Polyvore Outfits** 评测基准（HF ArtmeScienceLab/Polyvore-Outfits，cc-by-4.0，Maryland LSTM / Type Spaces 论文同款）。Compatibility 任务 train/valid/test = 33,990 / 6,000 / 30,290（正负平衡对）；FITB 留一件任务 16,995 / 3,000 / 15,145 题 + Maryland hardneg 3,076 题；disjoint 图片 71,967 / 14,657 / 70,035 张，FITB test 74,262 个 item 引用 100% 有图；映射链 `set_id_index → test.json(set_id→items→item_id) → images/{split}/{item_id}.jpg` 已验证 0 缺失；test 70,035 个 item_id 100% 带 `semantic_category` 品类标签。据此完成评估计划（计划书 v4 §16.3/16.4）可行性分析：图片门禁阻塞解除，兼容性 5 基线中随机排序 / 品类共现 / Fashion embedding / 学习型模型可直接跑，规则评分需适配（官方基准无颜色/正式度字段）。下一步：第一段离线基线（随机/共现/FashionCLIP → `artifacts/evaluation/polyvore_baselines.json`）+ 单品搭配真实 LLM 端到端验证。
 
+> 2026-08-14 单品搭配 + 多轮对话真实 LLM 评估：在 p-outfit order 衣柜（570 件持久 env）上真实跑通三条链路（`evals/cases/extend_advice.json`：8 单品搭配 + 5 多轮链，deepseek-chat ~90 次调用）。**单品搭配**：锚定率 100%，独立裁判均分 55.9、pass 50%（阈值 60）；锚定 one_piece（连衣裙）时仅配 2 件（裙+鞋），用户要求的配饰/外套未补齐（item-001 最低 32.0）。**多轮对话**：明确槽位替换 100% 命中（swap_correct_rate=1.0），槽位缺失正确跳过（40%，连衣裙套无外套/裤槽时按设计回澄清）；但 **adjust 全局微调（"整体再正式一点"）5/5 触发 extension 链 `_validate_modify` 硬抛 ValueError 崩溃**（is_follow_up 重定向 OUTFIT_MODIFY 后 agent2 产出越出 agent1 候选，重试一次仍失败），final_judge 全缺失。**记忆核对**：54 证据 / 43 模型行导出，各链意图（婚礼/正式/通勤/黑色/清爽等）正确沉淀；category_induction 把"换掉某双鞋"过度归纳为"不喜欢鞋"（shoes/tops/bottoms 负面）。三处缺陷如实记录于报告 `findings`（EXT-001/002/003，**按用户决策不修系统，如实记录**），供明日后查报告与全程日志定位系统 bug。详见[开发过程记录](DEVELOPMENT_LOG.md)第 15 节。
+
+> 2026-08-16 **EXT-001 修复（flexible 自主重排）**：多轮 adjust 全局微调（"整体再正式一点"）5/5 崩溃已解决。`_analyze_modify` 无槽位/槽位缺失请求统一走 **flexible 模式**：候选池=知识方向匹配 + 全衣柜兜底（去除 40 件硬截断），agent 自主决定替换/锁定集并按用户需求重排整套；`_validate_modify` 按 `adjustment_mode=="flexible"` 分支只守数据边界（引用在池内、确有所调整、required_slot 必落位），不再硬抛；prompt 完成规则改为 `_FLEXIBLE_ADJUST_RULE`。槽位缺失（如"加配饰"而当前无配饰）由 agent 自主重建整套以容纳该槽位，不再回澄清。真实 LLM 冒烟：整体调整产出 2 套重排不崩溃；连衣裙套自主补 accessory 槽位成功（one_piece+footwear→+accessory）。评估 runner 同步：槽位缺失从"跳过"改为"先尝试 insert"。全量回归 **500 passed**、ruff 全清。详见[开发过程记录](DEVELOPMENT_LOG.md)第 16 节。
+
 > 历史统计口径修正：2026-08-06真实API的8类请求全部`accept`且100%衣柜归属；其中7类无回退，“高考”请求的Critic发生一次瞬时API失败并按标准推荐策略降级。文中旧的“8请求0回退”摘要以本说明为准。
 
 ## 1. 当前结论
@@ -70,6 +74,8 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 | 记忆提炼 LLM 评估（2026-08-13） | 已验证 | `memory_prompts.py` v2.4：确定性 scope/消歧/单件不提炼/弱信号 + 6 few-shot；33 例口语化评估集 3 次运行 F1 0.847/0.911/0.921（v2.0 基线 0.63）、极性一致率 1.00、scope 一致率 0.97+ |
 | 官方 Polyvore 评测基准（2026-08-14） | 数据集就位 | `E:\01-style-dataset\p-outfit`：Compatibility 30,290 正负对 + FITB 15,145 题 + Maryland hardneg 3,076 题 + disjoint 图片 156,659 张；映射链与品类标签 100% 验证 |
 | 兼容性 / FITB 离线评测 | 已规划，未执行 | 随机/品类共现/FashionCLIP 基线 → `polyvore_baselines.json`；规则评分需适配品类/颜色字段 |
+| 单品搭配真实 LLM 评估（2026-08-14） | 已验证 | 8 例锚定率 100%、独立裁判均分 55.9、pass 50%；发现锚定连衣裙缺配饰/外套（EXT-002），已如实记录 |
+| 多轮对话真实 LLM 评估（2026-08-14） | 已验证（含缺陷） | 明确槽位替换 100% 命中 + 槽位缺失正确跳过；adjust 全局微调 5/5 崩溃（EXT-001）**2026-08-16 已修复**为 flexible 自主重排 |
 
 ## 3. 已验证证据
 
@@ -231,6 +237,14 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 - `POST /tasks/execute` 和运行查询接口保持统一；Web 与小程序移除独立任务选择页，所有自然语言从主推荐入口自动路由。
 - 严格三 Agent、Schema v8 与任务完成契约 v3.1 验收：编译通过、Ruff clean、Pytest 183 passed；Vue Vite 生产构建成功（1674 modules），小程序主推荐脚本和 JSON 配置检查通过。单品 `completed` 必须含锚点、兼容分组、完整样例与组合理由；缺口结果必须等于 Agent 1 的 `missing_elements`；Agent 3 可反馈 Agent 2 有限重做，不使用确定性结果降级。`/health` 暴露启动时间和契约版本用于排除旧进程。
 
+### 4.9 单品搭配 + 多轮对话真实评估（2026-08-14，已验证）
+
+在 p-outfit order 衣柜持久 env（570 件）上新增真实 LLM 评估 runner，覆盖三条生产链路：
+
+- `evals/runners/evaluate_extend.py`：turn1 走 `StyleForgeWorkflow.recommend_payload`（LLM 三 Agent 链，全程不碰确定性 `parse_request`）；单品搭配锚定 `item_id`、独立裁判评 top 套；多轮 swap 校验命中请求槽位 + 槽位缺失按澄清 skip + 越界标注并重试一次 + journal 断点续跑 + `findings` 自动检测。
+- 用例 `evals/cases/extend_advice.json`（8 单品 + 5 多轮链）+ 门禁 `tests/test_extended_tasks.py`（15 passed，含 missing-slot→澄清单测）。
+- 结果与三处系统缺陷（EXT-001 adjust 崩溃 / EXT-002 one_piece 缺配饰 / EXT-003 记忆过度归纳）见状态表与[开发过程记录](DEVELOPMENT_LOG.md)第 15 节；报告 `artifacts/evaluation/extend_advice.json`，全程日志 `artifacts/evaluation/env/order/logs/`。EXT-001 已于 2026-08-16 修复（flexible 自主重排，见第 16 节）。
+
 ## 5. 尚未验证或未完成
 
 以下事项不能在简历、README 或面试中描述为已经稳定完成：
@@ -255,6 +269,9 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 - Mytheresa 只有商品目录，没有本地搭配关系；不能把目录顺序解释为搭配监督信号。
 - Polyvore 严格子集只覆盖引用完整的搭配，存在数据选择偏差。
 - 个人订单商品通常无原始图片，初始语义能力依赖商品标题和规格文本。
+- ~~**多轮对话 adjust 崩溃（2026-08-14 实测 5/5，EXT-001）**~~：无明确槽位的全局调整请求（如"整体再正式一点"）被 `is_follow_up` 重定向到 OUTFIT_MODIFY 后，因无 target_slot，agent2 产出越出 agent1 候选范围的 alternatives，`_validate_modify` 硬抛 ValueError，重试一次仍失败。**2026-08-16 已修复**：无槽位/槽位缺失请求统一走 flexible 模式，agent 自主理解意图灵活重排整套，校验按模式分支不再硬抛；真实冒烟通过。
+- **锚定连衣裙缺附加槽（EXT-002）**：单品搭配锚定 one_piece 时只补鞋，用户要求的配饰/外套不填充，拉低协调分。
+- **记忆 category 过度归纳（EXT-003）**：category_induction 把单次替换行为归纳为类别级负面偏好（shoes/tops/bottoms negative），可能污染长期画像。
 
 ## 7. 下一验收门槛
 

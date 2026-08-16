@@ -1,6 +1,6 @@
 # 后续工作
 
-> 更新时间：2026-08-10  
+> 更新时间：2026-08-14  
 > 原则：先验证最新代码，再预览真实订单，最后才允许提交衣柜或导入 Mytheresa 主库。
 
 ## P1：用户长期记忆系统与多轮对话（✅ 2026-08-12 已完成）
@@ -134,11 +134,14 @@ D:\anaconda\envs\style\python.exe -m styleforge.pipelines.import_wardrobe_orders
 
 ## P1：推荐质量
 
-- 建立 100～300 条代表性中文穿搭请求集。
-- 对正式度、子类、颜色、配饰数量和无解路径分别建立断言。
-- 人工抽样标注 300～500 件商品的子类和正式度。
-- 把关键词规则与 FashionCLIP 零样本分类进行对比。
-- 将“搭配兼容性”和“检索品类正确性”分开评估。
+- ✅ **单品搭配 + 多轮对话真实 LLM 验证（2026-08-14）**：`evals/cases/extend_advice.json` 8 单品 + 5 多轮链，独立裁判评估完成——锚定率 100%、裁判均分 55.9、pass 50%；多轮槽位替换 100% 命中 + 缺失正确跳过。产物 `artifacts/evaluation/extend_advice.json` + 全程日志 `artifacts/evaluation/env/order/logs/`。
+- ✅ **EXT-001 已修复（2026-08-16）**：多轮 adjust 全局微调（”整体再正式一点”）5/5 崩溃已解决——无槽位/槽位缺失请求走 **flexible 模式**，由 agent 自主理解意图、灵活重排整套（候选池=知识方向匹配+全衣柜兜底），`_validate_modify` 按模式分支不再硬抛。真实冒烟：整体调整产出 2 套重排不崩溃；连衣裙套自主补 accessory 槽位成功。全量回归 500 passed。详见[开发过程记录](DEVELOPMENT_LOG.md)第 16 节。
+- ⚠️ **遗留缺陷待修（EXT-002/003，已如实记录）**：
+  - **EXT-002**：锚定 one_piece 缺配饰/外套（item-001 judge 32.0）。
+  - **EXT-003**：记忆 category_induction 过度归纳（shoes/tops/bottoms 负面）。
+- **待办：基线对比评估**：把关键词规则（`evaluation/rule_baseline.py`）与 FashionCLIP 零样本分类（`evaluation/visual_retrieval.py`）统一口径对比；确认二者共享同一天真集、能否统一比较（正式度/子类/颜色/配饰数量/无解路径五类断言）；随机/品类共现/FashionCLIP 基线 → `artifacts/evaluation/polyvore_baselines.json`。
+- 建立 100～300 条代表性中文穿搭请求集；人工抽样标注 300～500 件商品的子类和正式度（后续）。
+- 将”搭配兼容性”和”检索品类正确性”分开评估（p-outfit 兼容性/FITB 离线评测随基线对比一并落地）。
 
 ## P2：真实 LLM Agent
 
