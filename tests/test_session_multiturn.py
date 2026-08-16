@@ -92,11 +92,28 @@ ROUND3_MODIFY = {
                 "outfit_id": "outfit-3",
                 "item_ids": ["dress-1", "heels-1"],
                 "reasoning": "换上连衣裙与高跟鞋，整体更正式",
-            }
+            },
+            {
+                "outfit_id": "outfit-3b",
+                "item_ids": ["dress-1", "heels-1", "blazer-1"],
+                "reasoning": "连衣裙搭配高跟鞋，再披深蓝西装外套，正式感更强",
+            },
+            {
+                "outfit_id": "outfit-3c",
+                "item_ids": ["top-1", "bottom-1", "coat-1", "heels-1"],
+                "reasoning": "白衬衫配黑西裤与灰色大衣，脚踩高跟鞋，通勤偏正式",
+            },
         ],
         "message": "已调整为更正式的搭配",
     },
-    "used_item_ids": ["dress-1", "heels-1"],
+    "used_item_ids": [
+        "dress-1",
+        "heels-1",
+        "blazer-1",
+        "top-1",
+        "bottom-1",
+        "coat-1",
+    ],
     "evidence_source_ids": [],
 }
 
@@ -191,7 +208,7 @@ def test_session_multiturn_reuses_outfit_context(db_dsn: str) -> None:
     assert payload3["task_type"] == "outfit_modify"
     assert payload3["route"]["reason"] == "session_follow_up"
     agent1_facts = payload3["agent_outputs"]["agent1"]["facts"]
-    assert agent1_facts["adjustment_mode"] == "overall"
+    assert agent1_facts["adjustment_mode"] == "flexible"
     assert agent1_facts["locked_item_ids"] == []
     assert agent1_facts["replaced_item_ids"] == []
     assert payload3["result"]["target_slot"] == ""
@@ -236,11 +253,21 @@ ROUND3_MODIFY_BOTTOM = {
                 "outfit_id": "outfit-2",
                 "item_ids": ["blazer-1", "top-1", "dark-pants-2", "shoes-1"],
                 "reasoning": "换成深色西裤，保持通勤正式感",
-            }
+            },
+            {
+                "outfit_id": "outfit-2b",
+                "item_ids": ["blazer-1", "top-1", "dark-pants-2", "heels-1"],
+                "reasoning": "深色西裤配黑色高跟鞋，正式度更高",
+            },
+            {
+                "outfit_id": "outfit-2c",
+                "item_ids": ["blazer-1", "dark-pants-2", "shoes-1"],
+                "reasoning": "去掉白衬衫，深色西裤加西装外套更利落",
+            },
         ],
         "message": "已为你更换裤子",
     },
-    "used_item_ids": ["blazer-1", "top-1", "dark-pants-2", "shoes-1"],
+    "used_item_ids": ["blazer-1", "top-1", "dark-pants-2", "shoes-1", "heels-1"],
     "evidence_source_ids": [],
 }
 
@@ -315,7 +342,7 @@ def test_three_round_modify_chain_keeps_latest_outfit(db_dsn: str) -> None:
     )
     assert payload4["task_type"] == "outfit_modify"
     assert payload4["route"]["reason"] == "session_follow_up"
-    assert payload4["agent_outputs"]["agent1"]["facts"]["adjustment_mode"] == "overall"
+    assert payload4["agent_outputs"]["agent1"]["facts"]["adjustment_mode"] == "flexible"
     assert payload4["result"]["target_slot"] == ""
 
 
@@ -417,7 +444,7 @@ def test_mixed_chain_fresh_scene_does_not_rewrite(db_dsn: str) -> None:
     )
     assert payload4["task_type"] == "outfit_modify"
     assert payload4["result"]["target_slot"] == ""
-    assert payload4["agent_outputs"]["agent1"]["facts"]["adjustment_mode"] == "overall"
+    assert payload4["agent_outputs"]["agent1"]["facts"]["adjustment_mode"] == "flexible"
 
 
 def test_negative_feedback_then_footwear_swap(db_dsn: str) -> None:
@@ -458,7 +485,7 @@ def test_negative_feedback_then_footwear_swap(db_dsn: str) -> None:
     assert payload2["task_type"] == "outfit_modify"
     assert payload2["route"]["reason"] == "session_follow_up"
     assert payload2["result"]["target_slot"] == ""
-    assert payload2["agent_outputs"]["agent1"]["facts"]["adjustment_mode"] == "overall"
+    assert payload2["agent_outputs"]["agent1"]["facts"]["adjustment_mode"] == "flexible"
     ctx2 = outfit_context_from_payload(payload2)
     assert ctx2["current_item_ids"] == ["dress-1", "heels-1"]
 

@@ -7,8 +7,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from styleforge.core.candidate_service import FeasibilityState, build_candidate_pool
 from styleforge.core.categories import infer_slot
 from styleforge.core.garment_attributes import item_matches_subtype
+from styleforge.core.relaxation import build_relaxation_plan
+from styleforge.core.request_spec import ChangeAction, RequestSpec, interpret_request
 from styleforge.knowledge.retriever import KnowledgeRetriever
 from styleforge.models.agent_tasks import Agent1TaskOutput
 from styleforge.models.context import ContextPack
@@ -26,6 +29,35 @@ from styleforge.tools.extension_items import (
     matching_subtypes,
     resolve_anchor_items,
 )
+
+# How many candidate UUIDs resolve to named item cards in Agent 1 facts. Agent 2
+# sees bare UUIDs everywhere else, so the named prefix lets it match a concrete
+# request word ("帽子"/戒指/项链) instead of guessing blind.
+_CANDIDATE_TEXT_LIMIT = 120
+
+
+def _candidate_item_texts(
+    wardrobe, item_ids: list[str], limit: int | None = None
+) -> list[dict[str, str]]:
+    """Resolve candidate UUIDs to visible item cards (name + type) for Agent 2.
+
+    The cards carry exactly what bare UUIDs hide: the item type and name the
+    composer needs to pick a hat when the user says "帽子" or a necklace when
+    the user says "项链". Order follows ``item_ids`` (already prioritised by the
+    caller), capped by ``limit`` to bound prompt tokens.
+    """
+    by_id = {item.item_id: item for item in wardrobe}
+    cards: list[dict[str, str]] = []
+    for uid in item_ids:
+        item = by_id.get(uid)
+        if item is None:
+            continue
+        cards.append(
+            {"item_id": uid, "name": item.name or "", "item_type": item.item_type}
+        )
+        if limit is not None and len(cards) >= limit:
+            break
+    return cards
 
 
 SLOT_ALIASES = {
@@ -88,6 +120,57 @@ def _knowledge_match_score(item, entry: dict[str, Any]) -> tuple[float, list[str
     return score, reasons
 
 
+def _bounded_balanced_candidates(
+    wardrobe,
+    current_ids: list[str],
+    priority_ids: list[str],
+    *,
+    limit: int = _CANDIDATE_TEXT_LIMIT,
+    priority_budget: int = 40,
+) -> list[str]:
+    """Bound the flexible-rebuild pool while keeping every core slot covered.
+
+    The full wardrobe can be thousands of items; dumping every UUID into the
+    Agent 2 prompt blows the context window (two copies of the same bare list
+    alone were ~166k chars, far over the DeepSeek 64k limit). ``priority_ids``
+    (required-slot + direction-matched items) come first, then the rest of the
+    wardrobe is filled slot-balanced up to ``limit`` so the composer can rebuild
+    a complete outfit without starving any slot. Current-outfit items are
+    excluded here; Agent 2 sees them separately as ``current_item_ids``.
+    """
+    seen: set[str] = set(current_ids)
+    chosen: list[str] = []
+    for uid in priority_ids:
+        uid = str(uid)
+        if uid in seen:
+            continue
+        chosen.append(uid)
+        seen.add(uid)
+        if len(chosen) >= priority_budget:
+            break
+    if len(chosen) >= limit:
+        return chosen[:limit]
+    # Bucket the remaining wardrobe by slot, preserving wardrobe order.
+    by_slot: dict[str, list[str]] = {}
+    for item in wardrobe:
+        uid = item.item_id
+        if uid in seen:
+            continue
+        by_slot.setdefault(infer_slot(item.item_type), []).append(uid)
+    # Round-robin across slots so no slot is starved within the budget.
+    slots = list(by_slot)
+    while len(chosen) < limit and slots:
+        for slot in list(slots):
+            bucket = by_slot[slot]
+            if not bucket:
+                slots.remove(slot)
+                continue
+            chosen.append(bucket.pop(0))
+            if len(chosen) >= limit:
+                break
+    return chosen[:limit]
+
+
 def _knowledge_matches(wardrobe, entries: list[dict[str, Any]], limit: int = 12):
     ranked: list[tuple[float, str, dict[str, Any]]] = []
     for item in wardrobe:
@@ -144,96 +227,270 @@ def _resolve_current_outfit(
     return row["outfit_id"], list(json.loads(row["item_ids_json"]))
 
 
-def _analyze_modify(
-    database_path: str,
-    task_input: TaskExecutionInput,
-    route: TaskRoute,
+def _flexible_adjustment(
+    outfit_id: str,
     wardrobe,
+    current_ids: list[str],
+    request: str,
+    route: TaskRoute,
+    retriever: KnowledgeRetriever | None,
+    *,
+    required_slot: str,
 ) -> Agent1TaskOutput:
-    outfit_id, current_ids = _resolve_current_outfit(database_path, task_input)
-    raw_slot = task_input.target_slot.strip().lower() or str(route.extracted.get("target_slot", ""))
-    target_slot = SLOT_ALIASES.get(raw_slot, raw_slot)
-    if not current_ids:
-        return Agent1TaskOutput(
-            task_type=route.task_type,
-            intent_summary="在保持其他单品不变的前提下修改当前搭配",
-            resolved_target={"target_slot": target_slot},
-            constraints={"locked_non_target_items": True},
-            facts={"current_outfit_id": outfit_id, "current_item_ids": current_ids},
-            needs_clarification=True,
-            clarification_question="请补充当前搭配。",
-        )
-    if not target_slot:
-        # Overall adjustment (e.g. "更正式一点"): rebuild a complete outfit in
-        # the requested direction.  Nothing is locked and every replacement
-        # candidate comes from the wardrobe outside the current outfit, so the
-        # existing locked/replaced validation passes unchanged.
-        replacement_ids = [
+    """Build the Agent 1 contract for a free-form rebuild of the current outfit.
+
+    Nothing is locked and the replaced set is the LLM's own choice: the composer
+    may keep or drop any current item and re-pick freely from the candidate
+    pool. When ``required_slot`` is set (a slot the current outfit lacks, e.g.
+    "加条项链" with no accessory), candidates for that slot are listed first so
+    the rebuilt outfit is expected to gain it; ``required_slot_item_ids`` makes
+    the guarantee checkable by the hard validator without a slot map.
+
+    Candidate ordering: required-slot items, then direction-matched wardrobe
+    items (the knowledge base explains what "更正式一点" etc. means), then the
+    rest of the wardrobe as fallback so the composer is never starved.
+    """
+    required_ids: list[str] = []
+    if required_slot:
+        required_ids = [
             item.item_id
             for item in wardrobe
-            if item.item_id not in current_ids
-        ][:40]
-        return Agent1TaskOutput(
-            task_type=route.task_type,
-            intent_summary="整体调整当前搭配（正式度/颜色/风格方向）",
-            resolved_target={"target_slot": "", "current_outfit_id": outfit_id},
-            constraints={
-                "locked_item_ids": [],
-                "replaced_item_ids": [],
-                "adjustment_mode": "overall",
-            },
-            facts={
-                "current_outfit_id": outfit_id,
-                "current_item_ids": current_ids,
-                "locked_item_ids": [],
-                "replaced_item_ids": [],
-                "replacement_item_ids": replacement_ids,
-                "adjustment_mode": "overall",
-            },
-            candidate_item_ids=replacement_ids,
-        )
-    wardrobe_by_id = {item.item_id: item for item in wardrobe}
-    missing_ids = sorted(set(current_ids) - set(wardrobe_by_id))
-    if missing_ids:
-        raise ValueError(f"Current outfit contains items outside the active wardrobe: {missing_ids[:3]}")
-    replaced_ids = [
-        item_id
-        for item_id in current_ids
-        if infer_slot(wardrobe_by_id[item_id].item_type) == target_slot
-    ]
-    if not replaced_ids:
-        return Agent1TaskOutput(
-            task_type=route.task_type,
-            intent_summary=f"只修改当前搭配中的 {target_slot}",
-            resolved_target={"target_slot": target_slot},
-            constraints={"locked_non_target_items": True},
-            facts={"current_outfit_id": outfit_id, "current_item_ids": current_ids},
-            needs_clarification=True,
-            clarification_question=f"当前搭配中没有 {target_slot} 单品，请重新指定修改位置。",
-        )
-    locked_ids = [item_id for item_id in current_ids if item_id not in replaced_ids]
-    replacement_ids = [
-        item.item_id
-        for item in wardrobe
-        if infer_slot(item.item_type) == target_slot and item.item_id not in current_ids
-    ][:40]
+            if infer_slot(item.item_type) == required_slot and item.item_id not in current_ids
+        ]
+    direction_ids: list[str] = []
+    if retriever is not None:
+        entries = retriever.search(request, kind="style", limit=6)[1]
+        if entries:
+            direction_ids = [str(item["item_id"]) for item in _knowledge_matches(wardrobe, entries)]
+    # Bound the pool: a full wardrobe of UUIDs blows the Agent 2 prompt context
+    # (two serialised copies alone were ~166k chars), so priority items come
+    # first and the remainder is a slot-balanced sample capped at the limit.
+    replacement_ids = _bounded_balanced_candidates(
+        wardrobe, current_ids, required_ids + direction_ids
+    )
+    if not replacement_ids:
+        replacement_ids = [item.item_id for item in wardrobe]
+    # Named cards let Agent 2 see what each candidate actually is (hat vs ring),
+    # so it can match a concrete request word rather than guess from UUIDs.
+    # Cover the whole bounded pool — when direction retrieval misses, the pool
+    # is the slot-balanced fallback, and the composer still needs names.
+    candidate_texts = _candidate_item_texts(
+        wardrobe, replacement_ids, limit=_CANDIDATE_TEXT_LIMIT
+    )
+    by_id = {item.item_id: item for item in wardrobe}
+    # Type map over the same pool + current outfit (bounded token cost); the
+    # validator uses it to reject duplicate core slots such as two pairs of
+    # shoes. Candidates without a card carry no type and are skipped there.
+    typed_ids = list(replacement_ids) + list(current_ids)
+    candidate_item_types = {
+        uid: by_id[uid].item_type for uid in typed_ids if uid in by_id
+    }
+    facts: dict[str, Any] = {
+        "current_outfit_id": outfit_id,
+        "current_item_ids": current_ids,
+        "locked_item_ids": [],
+        "replaced_item_ids": [],
+        "replacement_item_ids": replacement_ids,
+        "adjustment_mode": "flexible",
+        "candidate_item_texts": candidate_texts,
+        "current_item_texts": _candidate_item_texts(wardrobe, current_ids),
+        "candidate_item_types": candidate_item_types,
+    }
+    if required_slot:
+        facts["required_slot"] = required_slot
+        facts["required_slot_item_ids"] = [str(item_id) for item_id in required_ids]
+        intent_summary = f"当前搭配缺少 {required_slot}，自主重建整套以补充该槽位"
+    else:
+        intent_summary = "整体调整当前搭配（正式度/颜色/风格方向）"
     return Agent1TaskOutput(
         task_type=route.task_type,
-        intent_summary=f"只替换当前搭配的 {target_slot}，其余单品硬锁定",
-        resolved_target={"target_slot": target_slot, "current_outfit_id": outfit_id},
+        intent_summary=intent_summary,
+        resolved_target={"target_slot": "", "current_outfit_id": outfit_id},
+        constraints={
+            "locked_item_ids": [],
+            "replaced_item_ids": [],
+            "adjustment_mode": "flexible",
+        },
+        facts=facts,
+        candidate_item_ids=replacement_ids,
+    )
+
+
+def _describe_changes(spec: RequestSpec) -> str:
+    """One-line intent summary derived from the parsed change set."""
+    verb = {
+        ChangeAction.ADD: "补充",
+        ChangeAction.REMOVE: "移除",
+        ChangeAction.REPLACE: "替换为",
+        ChangeAction.ADD_OR_REPLACE: "补充或替换为",
+        ChangeAction.KEEP: "保持",
+    }
+    parts: list[str] = []
+    for change in spec.changes:
+        target = change.target
+        label = (
+            change.source_text
+            or target.item_type
+            or target.subtype
+            or target.slot
+            or "该单品"
+        )
+        parts.append(f"{verb.get(change.action, change.action.value)}{label}")
+    for lock in spec.locks:
+        parts.append(f"锁定{lock.source_text}")
+    return "；".join(parts)
+
+
+def _structured_modify(
+    outfit_id: str,
+    current_ids: list[str],
+    wardrobe,
+    pool,
+    spec: RequestSpec,
+    route: TaskRoute,
+) -> Agent1TaskOutput:
+    """Agent 1 contract for a change-set-driven modify.
+
+    The user expressed explicit changes (add/remove/replace/lock); CandidateService
+    turned those into facts: which current items stay locked/kept, which are
+    replaced, and a constraint-aware candidate pool (REMOVE targets excluded
+    pool-wide, positive changes retrieved by their own target).  ``target_slot``
+    no longer decides what is searched or locked -- the change set does.
+    """
+    locked_ids = pool.lock_ids + pool.keep_ids
+    replacement_ids = pool.candidate_item_ids
+    by_id = {item.item_id: item for item in wardrobe}
+    candidate_texts = _candidate_item_texts(
+        wardrobe, replacement_ids, limit=_CANDIDATE_TEXT_LIMIT
+    )
+    typed_ids = list(replacement_ids) + list(current_ids)
+    candidate_item_types = {
+        uid: by_id[uid].item_type for uid in typed_ids if uid in by_id
+    }
+    relaxation = build_relaxation_plan(pool, spec, wardrobe)
+    feasibility_report = {
+        "state": pool.feasibility.value,
+        "unmet_constraints": pool.unmet_constraints,
+        "excluded_item_types": pool.excluded_type_subtypes,
+        "excluded_colors": pool.excluded_colors,
+        "per_change_candidates": pool.add_change_candidates,
+        "coverage": [
+            {
+                "change_id": cov.change_id,
+                "action": cov.action.value,
+                "strength": cov.strength.value,
+                "source_text": cov.source_text,
+                "target": cov.target.model_dump(),
+                "exact_ids": cov.exact_ids,
+                "relaxed_ids": cov.relaxed_ids,
+                "all_target_ids": cov.all_target_ids,
+                "prefer_missed_ids": cov.prefer_missed_ids,
+                "unmet_prefer_colors": cov.unmet_prefer_colors,
+            }
+            for cov in pool.coverage
+        ],
+        # Generic relaxation policy for every MUST positive change: which levels
+        # (exact -> drop PREFER -> drop MUST colour -> broaden type) unlock
+        # which candidates, and which change is cheapest to satisfy. Facts for
+        # Agent 2's decision; nothing is relaxed here.
+        "relaxation_plan": relaxation.model_dump(mode="json"),
+    }
+    # Concern B: an anaphor CandidateService anchored to a concrete current item
+    # ("把这件大衣换成西装" hitting the session's coat) is no longer an open
+    # question from the caller's perspective.  Dump the *effective* spec --
+    # without the resolved anaphor -- so Agent 2 does not see a stale
+    # clarification obligation next to a resolved subject.
+    effective_spec = spec
+    if (
+        pool.feasibility is not FeasibilityState.NEEDS_CLARIFICATION
+        and "anaphoric_reference" in spec.unresolved_fields
+    ):
+        effective_spec = spec.model_copy(
+            update={
+                "unresolved_fields": [
+                    field
+                    for field in spec.unresolved_fields
+                    if field != "anaphoric_reference"
+                ]
+            }
+        )
+    return Agent1TaskOutput(
+        task_type=route.task_type,
+        intent_summary=_describe_changes(spec),
+        resolved_target={"target_slot": "", "current_outfit_id": outfit_id},
         constraints={
             "locked_item_ids": locked_ids,
-            "replaced_item_ids": replaced_ids,
-            "only_edit_target_slot": True,
+            "replaced_item_ids": pool.replace_ids,
+            "feasibility": pool.feasibility.value,
         },
         facts={
             "current_outfit_id": outfit_id,
             "current_item_ids": current_ids,
             "locked_item_ids": locked_ids,
-            "replaced_item_ids": replaced_ids,
+            "replaced_item_ids": pool.replace_ids,
             "replacement_item_ids": replacement_ids,
+            "adjustment_mode": "structured",
+            # The parsed intent plus its feasibility facts so Agent 2 can see
+            # exactly what was asked and what the pool can offer.
+            "request_spec": effective_spec.model_dump(mode="json"),
+            "feasibility_report": feasibility_report,
+            "candidate_item_texts": candidate_texts,
+            "current_item_texts": _candidate_item_texts(wardrobe, current_ids),
+            "candidate_item_types": candidate_item_types,
         },
         candidate_item_ids=replacement_ids,
+        needs_clarification=pool.feasibility is FeasibilityState.NEEDS_CLARIFICATION,
+        clarification_question=(
+            "你提到要替换的那件单品缺少具体指向，请补充品类，或从衣橱中指定一件。"
+        ),
+    )
+
+
+def _analyze_modify(
+    database_path: str,
+    task_input: TaskExecutionInput,
+    route: TaskRoute,
+    wardrobe,
+    retriever: KnowledgeRetriever | None = None,
+) -> Agent1TaskOutput:
+    outfit_id, current_ids = _resolve_current_outfit(database_path, task_input)
+    if not current_ids:
+        return Agent1TaskOutput(
+            task_type=route.task_type,
+            intent_summary="在保持其他单品不变的前提下修改当前搭配",
+            resolved_target={"target_slot": ""},
+            constraints={"locked_non_target_items": True},
+            facts={"current_outfit_id": outfit_id, "current_item_ids": current_ids},
+            needs_clarification=True,
+            clarification_question="请补充当前搭配。",
+        )
+    wardrobe_by_id = {item.item_id: item for item in wardrobe}
+    missing_ids = sorted(set(current_ids) - set(wardrobe_by_id))
+    if missing_ids:
+        raise ValueError(f"Current outfit contains items outside the active wardrobe: {missing_ids[:3]}")
+
+    spec = interpret_request(task_input.request)
+    if spec.changes:
+        # Explicit change set: retrieval is constraint-aware, and the router's
+        # target_slot no longer decides what is searched or locked.
+        pool = build_candidate_pool(spec, wardrobe, current_ids)
+        return _structured_modify(outfit_id, current_ids, wardrobe, pool, spec, route)
+
+    # No explicit change (e.g. "更正式一点"): the LLM understands the requested
+    # direction and freely rebuilds the whole outfit. Nothing is locked; the
+    # pool is direction-matched items with wardrobe fallback.
+    raw_slot = task_input.target_slot.strip().lower() or str(route.extracted.get("target_slot", ""))
+    target_slot = SLOT_ALIASES.get(raw_slot, raw_slot)
+    if target_slot:
+        # Rare legacy path: a slot was routed/extracted without a parsed change
+        # (e.g. a slot the current outfit lacks). Rebuild so it gains that slot.
+        return _flexible_adjustment(
+            outfit_id, wardrobe, current_ids, task_input.request, route, retriever,
+            required_slot=target_slot,
+        )
+    return _flexible_adjustment(
+        outfit_id, wardrobe, current_ids, task_input.request, route, retriever,
+        required_slot="",
     )
 
 
@@ -499,7 +756,7 @@ def analyze_extension_task(
         else KnowledgeRetriever(knowledge_root)
     )
     if route.task_type is TaskType.OUTFIT_MODIFY:
-        return _analyze_modify(database_path, task_input, route, wardrobe)
+        return _analyze_modify(database_path, task_input, route, wardrobe, retriever)
     if route.task_type in {TaskType.STYLE_ADVICE, TaskType.ITEM_ADVICE}:
         return _analyze_style_or_item(task_input, route, wardrobe, retriever)
     if route.task_type is TaskType.WARDROBE_COMPATIBILITY:

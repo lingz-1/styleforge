@@ -121,11 +121,17 @@ class ComposerAgent:
         agent1_output: Agent1TaskOutput,
         llm: Any,
         critic_feedback: str = "",
+        repair_feedback: str = "",
     ) -> tuple[Agent2TaskOutput, dict[str, Any], LlmCallDiagnostics]:
-        """Run Agent 2 strictly for an extension task, without fallback."""
+        """Run Agent 2 strictly for an extension task, without fallback.
+
+        ``repair_feedback`` carries a hard-validation failure from a later node
+        (duplicate core slots, too few alternatives) so a retry here can fix it;
+        it is folded into the prompt alongside any internal schema-repair note.
+        """
         if llm is None:
             raise LlmUnavailable("extension Agent 2 requires a configured LLM client")
-        repair_feedback = ""
+        repair = repair_feedback or ""
         call_diagnostics: list[LlmCallDiagnostics] = []
         for attempt in range(2):
             system, user = build_extension_agent2_prompt(
@@ -133,7 +139,7 @@ class ComposerAgent:
                 context_pack=context_pack,
                 agent1_output=agent1_output,
                 critic_feedback=critic_feedback,
-                repair_feedback=repair_feedback,
+                repair_feedback=repair,
             )
             payload, diagnostics = llm.chat_json(
                 system=system,
@@ -163,11 +169,16 @@ class ComposerAgent:
                     output = output.model_copy(update={"result": result})
                 except (ValidationError, ValueError) as error:
                     if attempt == 0:
-                        repair_feedback = (
-                            "上次草稿引用了 Agent 1 候选范围外的单品 ID，清理后无法满足完成条件。"
-                            "请严格只使用 Agent 1 的 candidate_item_ids 中的单品，"
-                            "不得联想同系列或同款不同色的单品。"
-                            f"校验失败：{error}"
+                        repair = "\n".join(
+                            part
+                            for part in (
+                                repair_feedback or "",
+                                "上次草稿引用了 Agent 1 候选范围外的单品 ID，清理后无法满足完成条件。"
+                                "请严格只使用 Agent 1 的 candidate_item_ids 中的单品，"
+                                "不得联想同系列或同款不同色的单品。"
+                                f"校验失败：{error}",
+                            )
+                            if part
                         )
                         continue
                     raise LlmSchemaViolation(
@@ -176,7 +187,14 @@ class ComposerAgent:
                 break
             except (ValidationError, ValueError, KeyError) as error:
                 if attempt == 0:
-                    repair_feedback = f"上次草稿未满足任务完成契约：{error}"
+                    repair = "\n".join(
+                        part
+                        for part in (
+                            repair_feedback or "",
+                            f"上次草稿未满足任务完成契约：{error}",
+                        )
+                        if part
+                    )
                     continue
                 raise LlmSchemaViolation(
                     f"extension Agent 2 schema violation after repair: {error}"

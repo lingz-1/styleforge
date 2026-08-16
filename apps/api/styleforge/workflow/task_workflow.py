@@ -305,6 +305,58 @@ class MultiTaskWorkflow:
             ),
         }
 
+    def _critic_with_repair(
+        self,
+        *,
+        task_input: TaskExecutionInput,
+        critic_context: ContextPack,
+        composer_context: ContextPack,
+        state: TaskWorkflowState,
+        wardrobe_ids: set[str],
+    ) -> tuple[Agent3TaskOutput, dict[str, Any], Agent2TaskOutput, int]:
+        """Run Agent 3, recomposing once when hard validation fails.
+
+        The hard validator lives inside ``critic.run_extension``; its
+        ``ValueError`` (duplicate core slots, too few alternatives, …) used to
+        propagate straight into a failed task run with no repair. Catch it here,
+        hand the exact validator message to Agent 2 as ``repair_feedback``, and
+        re-critic. Returns ``(critic_output, info, agent2, agent3_calls)`` where
+        ``agent3_calls`` counts the LLM calls this phase spent: 1 on the happy
+        path, ``1 + composer_calls`` when a repair recompose ran. A second
+        failure propagates so a hopeless draft still surfaces as an error
+        instead of looping forever.
+        """
+        try:
+            output, info, _ = self.critic.run_extension(
+                user_query=task_input.request,
+                context_pack=critic_context,
+                agent1_output=state["agent1_output"],
+                agent2_output=state["agent2_output"],
+                wardrobe_ids=wardrobe_ids,
+                llm=self.llm_client,
+            )
+            return output, info, state["agent2_output"], 1
+        except ValueError as error:
+            repaired, composer_info, _ = self.composer.run_extension(
+                user_query=task_input.request,
+                context_pack=composer_context,
+                agent1_output=state["agent1_output"],
+                llm=self.llm_client,
+                repair_feedback=f"上次草稿未通过硬校验：{error}",
+            )
+            output, retry_info, _ = self.critic.run_extension(
+                user_query=task_input.request,
+                context_pack=critic_context,
+                agent1_output=state["agent1_output"],
+                agent2_output=repaired,
+                wardrobe_ids=wardrobe_ids,
+                llm=self.llm_client,
+            )
+            return output, {
+                **retry_info,
+                "agent2_repair": composer_info,
+            }, repaired, 1 + int(composer_info.get("call_count", 1))
+
     def _agent3_node(self, state: TaskWorkflowState) -> dict[str, Any]:
         task_input = state["task_input"]
         with database_session(self.database_path) as connection:
@@ -319,16 +371,15 @@ class MultiTaskWorkflow:
         self._apply_memory_pack(
             composer_context, AGENT_COMPOSER, task_input.request, state.get("session_signals")
         )
-        output, info, _ = self.critic.run_extension(
-            user_query=task_input.request,
-            context_pack=critic_context,
-            agent1_output=state["agent1_output"],
-            agent2_output=state["agent2_output"],
+        output, info, final_agent2, agent3_calls = self._critic_with_repair(
+            task_input=task_input,
+            critic_context=critic_context,
+            composer_context=composer_context,
+            state=state,
             wardrobe_ids=wardrobe_ids,
-            llm=self.llm_client,
         )
         diagnostics = self._merge_diagnostics(state, "agent3_initial", info)
-        llm_call_count = state.get("llm_call_count", 0) + 1
+        llm_call_count = state.get("llm_call_count", 0) + agent3_calls
         trace = _trace(
             state,
             "critic_agent",
@@ -339,7 +390,6 @@ class MultiTaskWorkflow:
             approved=output.approved,
             grounded=output.grounded,
         )
-        final_agent2 = state["agent2_output"]
         if not output.approved or not output.grounded:
             feedback = "；".join(output.issues) or output.summary or "草稿未通过语义审校"
             final_agent2, composer_info, _ = self.composer.run_extension(

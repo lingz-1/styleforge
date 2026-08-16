@@ -21,7 +21,10 @@ EXTENSION_PROMPT_VERSION = "extension-three-agent-v3.2"
 TASK_COMPLETION_RULES: dict[TaskType, str] = {
     TaskType.OUTFIT_MODIFY: (
         "completed 时 alternatives 至少一套；每套必须包含所有 locked_item_ids，"
-        "移除 replaced_item_ids，且只使用 replacement_item_ids 替换目标槽位。"
+        "移除 replaced_item_ids，且只使用 replacement_item_ids 替换目标槽位；"
+        "优先依据 Agent 1 facts.candidate_item_texts（含单品名称与类型）挑选替换单品，"
+        "用户指名具体单品或类型时（如\"帽子\"），必须选名称/类型匹配该词的候选，"
+        "不得用同槽位的其他单品替代。"
     ),
     TaskType.STYLE_ADVICE: (
         "completed 时 principles 至少一条，并说明如何用 wardrobe_matches 落地；"
@@ -48,20 +51,28 @@ TASK_COMPLETION_RULES: dict[TaskType, str] = {
 }
 
 
-_OVERALL_ADJUST_RULE = (
-    "completed 时 alternatives 至少一套，且每套是一套完整可穿搭配；"
-    "target_slot 为空、无锁定单品；每套只可从 Agent 1 candidate_item_ids 中选择单品，"
+_FLEXIBLE_ADJUST_RULE = (
+    "completed 时 alternatives 至少 3 套，每套风格/单品组合应有差异，且每套是一套完整可穿搭配；"
+    "target_slot 为空、无强制锁定单品；每套只可从 Agent 1 candidate_item_ids 中选择单品，"
     "至少更换或新增 1 件；整套朝向用户请求的正式度/颜色/风格方向调整；"
-    "若衣橱无法满足调整方向则返回 infeasible。"
+    "每套中鞋/下装/外套/连衣裙等核心槽位各至多 1 件，不得出现两双鞋、"
+    "两条下装或裤+裙同穿等重复核心槽位单品；上衣可叠穿多件，"
+    "耳饰/戒指/手链/项链等配饰可自由叠加，但帽子/包/眼镜/腰带等非叠加类型只能各 1 件；"
+    "若 Agent 1 facts 指定了 required_slot（当前搭配缺少该槽位），"
+    "每套必须从 required_slot_item_ids 中选择至少 1 件补齐该槽位；"
+    "优先依据 Agent 1 facts.candidate_item_texts（含单品名称与类型）挑选单品，"
+    "当用户指名具体单品或类型（如\"帽子\"\"项链\"）时，必须从名称/类型匹配该词的候选中选择，"
+    "不得用同槽位的其他单品替代（例如要帽子不能给戒指）；"
+    "若衣橱无法满足调整方向或缺少 required_slot 单品则返回 infeasible。"
 )
 
 
 def completion_rule_for(agent1_output: Agent1TaskOutput) -> str:
-    """Return the task-completion rule, branching for overall-adjust mode."""
+    """Return the task-completion rule, branching for flexible-adjust mode."""
     if agent1_output.task_type is TaskType.OUTFIT_MODIFY and agent1_output.facts.get(
         "adjustment_mode"
-    ) == "overall":
-        return _OVERALL_ADJUST_RULE
+    ) == "flexible":
+        return _FLEXIBLE_ADJUST_RULE
     return TASK_COMPLETION_RULES[agent1_output.task_type]
 
 
@@ -112,6 +123,23 @@ def build_extension_agent2_prompt(
         "只有 Agent 1 明确 needs_clarification=true 时才允许输出 needs_clarification。"
         "可选场合或偏好缺失时，必须基于现有衣橱给出通用方案。只输出 JSON。"
     )
+    if (
+        agent1_output.task_type is TaskType.OUTFIT_MODIFY
+        and agent1_output.facts.get("adjustment_mode") == "flexible"
+    ):
+        # Flexible rebuilds are where the LLM most often packs a duplicated core
+        # slot into one outfit. State the rule at system level so it is followed
+        # up front instead of relying on a post-hoc repair pass.
+        system += (
+            "\n\n硬性搭配约束（每套备选方案都必须逐条满足，违反任一条件即整轮失败）："
+            "\n- 核心槽位（下装/鞋/连衣裙/外套）在每套中至多出现 1 件；"
+            "不得出现两双鞋、两条下装、或裤+裙同穿等重复。"
+            "\n- 非可叠加单品类型（帽子/包/眼镜/腰带等）每套各至多 1 件。"
+            "\n- 上衣可叠穿多件；耳饰/戒指/手链/项链等配饰可自由叠加。"
+            "\n- 备选方案至少 3 套，每套都是一套完整可穿搭配，且各套之间应有差异。"
+            "\n- 每套单品只能从 Agent 1 candidate_item_ids 中选择，不得重复同一单品，"
+            "也不得从其他任务复用与当前请求无关的单品。"
+        )
     user = (
         f"提示词版本：{EXTENSION_PROMPT_VERSION}\n"
         f"任务类型：{task_type.value}\n"

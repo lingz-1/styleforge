@@ -5,10 +5,32 @@ These checks enforce data boundaries only. They never create or repair advice.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
+from styleforge.core.categories import infer_slot
 from styleforge.models.agent_tasks import Agent1TaskOutput, Agent2TaskOutput
 from styleforge.orchestration.task_router import TaskType
+
+# Dressing-core slots that must appear at most once per outfit, even across
+# sub-types: a pair of trousers plus a skirt (both bottom) is as wrong as two
+# pairs of shoes. Accessory slots are not here — a hat plus a ring stays legal.
+_CORE_SLOTS = {"bottom", "footwear", "one_piece", "outerwear"}
+
+# Item types that may legitimately repeat: layered tops (shirt + cardigan) and
+# stacked jewellery (earrings + rings + bracelet). Everything else is one per
+# outfit — two hats or two bags never pass.
+_STACKABLE_TYPES = {
+    "top",
+    "earrings",
+    "rings",
+    "bracelet",
+    "necklace",
+    "jewellery",
+    "brooch",
+}
+
+_MIN_FLEXIBLE_ALTERNATIVES = 3
 
 
 def _item_ids(items: list[dict[str, Any]]) -> set[str]:
@@ -39,7 +61,68 @@ def _validate_used_ids(
     return issues
 
 
+def _validate_flexible(agent1: Agent1TaskOutput, result: dict[str, Any]) -> list[str]:
+    """Data-boundary checks for free-form rebuilds (overall / missing-slot).
+
+    The replaced and locked sets are the LLM's own choice in flexible mode, so
+    the single-slot equality checks below do not apply. What must still hold:
+    every alternative stays inside the candidate scope, actually changes the
+    outfit, and (when a missing slot was requested) gains that slot.
+    """
+    issues: list[str] = []
+    current = set(agent1.facts.get("current_item_ids", []))
+    allowed = set(agent1.candidate_item_ids) | current
+    required_ids = set(agent1.facts.get("required_slot_item_ids", []))
+    required_slot = str(agent1.facts.get("required_slot", ""))
+    type_map = {
+        **dict(agent1.facts.get("candidate_item_types") or {}),
+        **{
+            card["item_id"]: card["item_type"]
+            for card in agent1.facts.get("current_item_texts") or []
+        },
+    }
+    alternatives = result.get("alternatives", [])
+    if len(alternatives) < _MIN_FLEXIBLE_ALTERNATIVES:
+        issues.append(
+            f"整体调整备选方案至少需要 {_MIN_FLEXIBLE_ALTERNATIVES} 套供选择"
+        )
+    for alternative in alternatives:
+        item_ids = set(alternative.get("item_ids", []))
+        if not item_ids <= allowed:
+            issues.append("整体调整备选方案包含候选范围外单品")
+        if item_ids == current:
+            issues.append("整体调整备选方案未做任何调整")
+        if required_ids and not (item_ids & required_ids):
+            issues.append(f"整体调整备选方案缺少目标槽位 {required_slot} 的单品")
+        # Reject duplicate core slots and duplicate non-stackable item types.
+        # Two pairs of shoes fail on the slot; two hats fail on the item type;
+        # a layered shirt + cardigan (both top) and stacked earrings + rings
+        # pass because their types are stackable. Named cards carry types;
+        # untyped fallback candidates are skipped, not guessed.
+        slot_counts: Counter = Counter()
+        type_counts: Counter = Counter()
+        for uid in item_ids:
+            item_type = type_map.get(str(uid))
+            if not item_type:
+                continue
+            slot_counts[infer_slot(item_type)] += 1
+            type_counts[item_type] += 1
+        dupes = sorted(slot for slot in _CORE_SLOTS if slot_counts[slot] > 1)
+        if dupes:
+            issues.append(f"备选方案重复核心槽位: {dupes}")
+        dup_types = sorted(
+            item_type
+            for item_type, count in type_counts.items()
+            if count > 1 and item_type not in _STACKABLE_TYPES
+        )
+        if dup_types:
+            issues.append(f"备选方案重复单品类型: {dup_types}")
+    return issues
+
+
 def _validate_modify(agent1: Agent1TaskOutput, result: dict[str, Any]) -> list[str]:
+    if agent1.facts.get("adjustment_mode") == "flexible":
+        return _validate_flexible(agent1, result)
     issues: list[str] = []
     locked = set(agent1.facts.get("locked_item_ids", []))
     replaced = set(agent1.facts.get("replaced_item_ids", []))
@@ -189,6 +272,56 @@ def _sanitize_item_advice_result(
     return pruned
 
 
+def _prune_flexible_duplicates(
+    agent1: Agent1TaskOutput,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Drop duplicate core-slot and non-stackable items from a flexible draft.
+
+    Pure cleanup for LLM drafts that repeat a core slot (two pairs of trousers)
+    or a non-stackable type (two hats) inside one alternative. Layered tops and
+    stacked jewellery keep their duplicates because those types are stackable.
+    The first occurrence of each slot/type wins; items whose type is unknown are
+    never guessed, so they stay untouched. Mirrors the counting rule in
+    ``_validate_flexible`` so a pruned draft passes the hard validator.
+    """
+    type_map = {
+        **dict(agent1.facts.get("candidate_item_types") or {}),
+        **{
+            card["item_id"]: card["item_type"]
+            for card in agent1.facts.get("current_item_texts") or []
+        },
+    }
+    alternatives = result.get("alternatives") or []
+    pruned: list[dict[str, Any]] = []
+    for alternative in alternatives:
+        seen_slots: set[str] = set()
+        seen_types: set[str] = set()
+        kept: list[str] = []
+        for uid in alternative.get("item_ids", []):
+            item_type = type_map.get(str(uid))
+            if not item_type:
+                kept.append(uid)
+                continue
+            slot = infer_slot(item_type)
+            if slot in _CORE_SLOTS and slot in seen_slots:
+                continue
+            if item_type not in _STACKABLE_TYPES and item_type in seen_types:
+                continue
+            kept.append(uid)
+            seen_slots.add(slot)
+            seen_types.add(item_type)
+        if kept == alternative.get("item_ids", []):
+            pruned.append(alternative)
+        else:
+            copy = dict(alternative)
+            copy["item_ids"] = kept
+            pruned.append(copy)
+    if pruned == alternatives:
+        return result
+    return {**result, "alternatives": pruned}
+
+
 def sanitize_extension_references(
     agent1: Agent1TaskOutput,
     agent2: Agent2TaskOutput,
@@ -200,7 +333,9 @@ def sanitize_extension_references(
     completing same-series variant IDs) no longer hard-fail the extension
     validator. Shared ``used_item_ids`` / ``evidence_source_ids`` are
     intersected for every task type; ITEM_ADVICE additionally prunes the result
-    body. Returns the same object when nothing needed cleaning.
+    body, and flexible OUTFIT_MODIFY drafts drop duplicate core-slot /
+    non-stackable items the LLM packed into one alternative. Returns the same
+    object when nothing needed cleaning.
     """
     wardrobe_scope = set(agent1.candidate_item_ids)
     wardrobe_scope.update(agent1.facts.get("current_item_ids", []))
@@ -216,6 +351,10 @@ def sanitize_extension_references(
         if anchor_id:
             allowed.add(anchor_id)
         result = _sanitize_item_advice_result(result, allowed, anchor_id)
+    elif agent1.task_type is TaskType.OUTFIT_MODIFY and agent1.facts.get(
+        "adjustment_mode"
+    ) == "flexible":
+        result = _prune_flexible_duplicates(agent1, result)
 
     changed = (
         used_kept != sorted(agent2.used_item_ids)
