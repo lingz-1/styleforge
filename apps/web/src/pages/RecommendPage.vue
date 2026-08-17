@@ -43,6 +43,13 @@
           <span class="anchor-hint">选择衣柜内任意单品，三位 Agent 会以它为锚点生成整套搭配</span>
         </section>
 
+        <div v-if="activeOutfit || selectedItemId" class="grounding-bar">
+          <span class="grounding-label">已定位</span>
+          <span v-if="activeOutfit">在「{{ activeOutfit.outfit_id }}」这套的基础上修改</span>
+          <span v-if="selectedItemId">单品「{{ selectedItemId }}」（仅消歧辅助）</span>
+          <el-button size="small" text type="primary" @click="clearGrounding">清除定位</el-button>
+        </div>
+
         <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="block" />
 
         <section v-if="store.messages.length" class="chat-history" aria-label="会话记录">
@@ -69,7 +76,12 @@
                     <span class="step-status">{{ agent.done ? '完成' : '未执行' }}</span>
                   </div>
                 </section>
-                <TaskResultView :payload="message.payload" :user-id="userId" />
+                <TaskResultView
+                  :payload="message.payload"
+                  :user-id="userId"
+                  @select-item="onSelectItem"
+                  @modify-here="onModifyHere"
+                />
               </template>
             </template>
           </div>
@@ -80,6 +92,7 @@
 
         <section class="prompt-card">
           <el-input
+            ref="promptInput"
             v-model="request"
             type="textarea"
             :rows="4"
@@ -167,6 +180,28 @@ const { loading, error } = storeToRefs(store)
 const route = useRoute()
 const router = useRouter()
 
+// --- Stage 1: InteractionContext grounding ---
+// 点击单品 = 只设 selected_item_id（消歧辅助，不产生操作）；"在此基础上修改"
+// 设 active_outfit（会话内定位）。两者都只是帮 Agent 消歧，用户随后输入文字。
+const promptInput = ref(null)
+const activeOutfit = ref(null) // { outfit_id, item_ids, ... }，保留到清除或换会话
+const selectedItemId = ref('') // 一次性消歧，提交后即清
+
+function onSelectItem(itemId) {
+  selectedItemId.value = itemId
+  promptInput.value?.focus()
+}
+
+function onModifyHere(outfit) {
+  activeOutfit.value = outfit
+  promptInput.value?.focus()
+}
+
+function clearGrounding() {
+  activeOutfit.value = null
+  selectedItemId.value = ''
+}
+
 // --- 首页「从衣柜选单品搭配」：以衣橱内某件单品为锚点直达 item_advice ---
 const TYPE_LABELS = {
   top: '上装', pants: '裤装', skirt: '半身裙', dress: '连衣裙', jumpsuit: '连体装',
@@ -242,6 +277,7 @@ function newSession() {
   localStorage.removeItem(sessionStorageKey())
   store.newConversation()
   request.value = ''
+  clearGrounding()
 }
 
 async function removeSession(session) {
@@ -295,8 +331,13 @@ async function run({ itemId = '', label = '' } = {}) {
   await store.run(userId.value, requestText, 3, deviceLocation.value, sid, {
     itemId,
     requestedTaskType: itemId ? 'item_advice' : undefined,
+    // Stage 1 请求通道：active_outfit_id 复用后端 current_outfit_id 字段，
+    // selected_item_id 为新增字段。两者都由 Agent 端消费，不影响旧路由。
+    activeOutfitId: activeOutfit.value?.outfit_id || '',
+    selectedItemId: selectedItemId.value,
   })
   request.value = ''
+  selectedItemId.value = '' // 本次消歧已消费，单击定位只对下一次输入生效
   void refreshSessions()
 }
 
@@ -305,6 +346,7 @@ function onUserIdChange(value) {
   localStorage.removeItem(sessionStorageKey())
   store.newConversation()
   request.value = ''
+  clearGrounding()
   void refreshSessions()
 }
 
@@ -502,6 +544,7 @@ h1 { margin: 0; max-width: 720px; font-family: Georgia, 'Noto Serif SC', serif; 
 .step-status { color: var(--moss); font-size: 12px; }
 .location-bar { display: flex; align-items: center; gap: 10px; margin-top: 12px; }.location-msg { font-size: 12px; color: #7c8580; }.location-msg.ready { color: var(--moss); }.location-msg.denied { color: #a86138; }.location-msg.error { color: #a83a38; }
 .anchor-bar { display: flex; align-items: center; gap: 14px; margin-top: 20px; }.anchor-hint { color: #7c8580; font-size: 13px; }
+.grounding-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 14px; padding: 10px 14px; border-left: 3px solid var(--copper); background: #f3f1ea; font-size: 13px; color: #5e6863; }.grounding-bar .grounding-label { color: var(--copper); font-size: 11px; letter-spacing: .08em; font-weight: 700; }
 .pick-header { margin-bottom: 14px; }
 .pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 12px; max-height: 56vh; overflow: auto; padding: 4px; }
 .pick-card { display: block; width: 100%; padding: 8px; border: 1px solid #d9ded9; border-radius: 6px; background: #fff; cursor: pointer; text-align: left; transition: border-color .15s, box-shadow .15s; }

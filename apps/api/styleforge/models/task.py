@@ -29,6 +29,7 @@ class TaskExecutionInput(BaseModel):
     current_item_ids: list[str] = Field(default_factory=list, max_length=12)
     target_slot: str = Field(default="", max_length=32)
     item_id: str = Field(default="", max_length=128)
+    selected_item_id: str = Field(default="", max_length=128)
     candidate_item: CandidateItem | None = None
     location_context: DeviceLocationContext | None = None
     session_id: str = Field(default="", max_length=128)

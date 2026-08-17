@@ -100,5 +100,12 @@ export const forgetMemory = (userId, preferenceId) =>
 export const recordBehaviorEvent = (userId, payload) =>
   http.post(`/users/${userId}/events`, payload)
 
+// Saved outfits (Agentic contract Stage 1: SaveOutfit 命令)
+export const saveOutfit = (payload) => http.post('/outfits/save', payload)
+export const listSavedOutfits = (userId) =>
+  http.get(`/users/${userId}/saved-outfits`)
+export const deleteSavedOutfit = (userId, outfitId) =>
+  http.delete(`/users/${userId}/saved-outfits/${outfitId}`)
+
 // Item image URL helper
 export const imageUrl = (path) => `/api${path}`

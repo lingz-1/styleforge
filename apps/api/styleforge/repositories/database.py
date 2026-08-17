@@ -345,6 +345,15 @@ CREATE TABLE IF NOT EXISTS candidate_outfits (
     FOREIGN KEY (run_id) REFERENCES styling_runs(run_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS saved_outfits (
+    user_id TEXT NOT NULL,
+    outfit_id TEXT NOT NULL,
+    item_ids_json TEXT NOT NULL DEFAULT '[]',
+    source_run_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, outfit_id)
+);
+
 CREATE TABLE IF NOT EXISTS request_memory (
     memory_id BIGSERIAL PRIMARY KEY,
     user_id TEXT NOT NULL,

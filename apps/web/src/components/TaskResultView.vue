@@ -65,17 +65,22 @@
         <article v-for="(outfit, index) in recommendOutfits" :key="outfit.outfit_id" class="outfit-card">
           <header><span>LOOK {{ String(index + 1).padStart(2, '0') }}</span><strong>{{ fmtScore(outfit.score) }}</strong></header>
           <div class="image-grid">
-            <div v-for="itemId in outfit.item_ids" :key="itemId" class="image-cell">
+            <div
+              v-for="itemId in outfit.item_ids"
+              :key="itemId"
+              class="image-cell clickable"
+              title="点击定位这件单品（只是辅助，不直接换掉）"
+              @click="emit('select-item', itemId)"
+            >
               <el-image :src="itemImage(itemId)" fit="cover">
                 <template #error><div class="image-empty">无图</div></template>
               </el-image>
-              <button type="button" class="replace-item" @click="report('item_replaced', outfit, itemId)">换掉这件</button>
             </div>
           </div>
           <p v-for="reason in outfit.reasons || []" :key="reason">{{ reason }}</p>
           <div class="outfit-actions">
-            <el-button size="small" type="success" plain :loading="sending" @click="report('outfit_selected', outfit)">采纳这套</el-button>
-            <el-button size="small" type="danger" plain :loading="sending" @click="report('outfit_rejected', outfit)">换掉这套</el-button>
+            <el-button size="small" type="success" plain :loading="savingOutfit" @click="saveAsOutfit(outfit)">添加至穿搭集</el-button>
+            <el-button size="small" plain @click="emit('modify-here', outfit)">在此基础上修改</el-button>
             <el-button size="small" plain :loading="sending" @click="report('feedback_submitted', outfit, 'positive')">👍 好评</el-button>
             <el-button size="small" plain :loading="sending" @click="report('feedback_submitted', outfit, 'negative')">👎 差评</el-button>
           </div>
@@ -111,15 +116,20 @@
         <article v-for="(outfit, index) in result.alternatives || []" :key="outfit.outfit_id || index" class="outfit-card">
           <header><span>替换方案 {{ index + 1 }}</span><strong>{{ fmtScore(outfit.score) }}</strong></header>
           <div class="image-grid">
-            <div v-for="itemId in outfitIds(outfit)" :key="itemId" class="image-cell">
+            <div
+              v-for="itemId in outfitIds(outfit)"
+              :key="itemId"
+              class="image-cell clickable"
+              title="点击定位这件单品（只是辅助，不直接换掉）"
+              @click="emit('select-item', itemId)"
+            >
               <el-image :src="itemImage(itemId)" fit="cover" />
-              <button type="button" class="replace-item" @click="report('item_replaced', outfit, itemId)">换掉这件</button>
             </div>
           </div>
           <p>{{ outfit.reasoning || outfit.reason || '' }}</p>
           <div class="outfit-actions">
-            <el-button size="small" type="success" plain :loading="sending" @click="report('outfit_selected', outfit)">采纳这套</el-button>
-            <el-button size="small" type="danger" plain :loading="sending" @click="report('outfit_rejected', outfit)">换掉这套</el-button>
+            <el-button size="small" type="success" plain :loading="savingOutfit" @click="saveAsOutfit(outfit)">添加至穿搭集</el-button>
+            <el-button size="small" plain @click="emit('modify-here', outfit)">在此基础上修改</el-button>
             <el-button size="small" plain :loading="sending" @click="report('feedback_submitted', outfit, 'positive')">👍 好评</el-button>
             <el-button size="small" plain :loading="sending" @click="report('feedback_submitted', outfit, 'negative')">👎 差评</el-button>
           </div>
@@ -192,7 +202,7 @@
 <script setup>
 import { computed, defineComponent, h, ref } from 'vue'
 import { ElImage, ElMessage } from 'element-plus'
-import { imageUrl, recordBehaviorEvent } from '../services/api'
+import { imageUrl, recordBehaviorEvent, saveOutfit } from '../services/api'
 import { useTempUnit, weatherHint, weatherIcon } from '../utils/weather'
 
 const props = defineProps({
@@ -200,10 +210,43 @@ const props = defineProps({
   userId: { type: String, default: '' },
 })
 
-const sending = ref(false)
+// Stage 1 grounding events:
+//   select-item  点击某件单品（仅消歧辅助，不产生操作）
+//   modify-here  在某一套的基础上修改（InteractionContext.active_outfit_id）
+const emit = defineEmits(['select-item', 'modify-here'])
 
-// Report a user behavior event to the preference-memory pipeline. Every button
-// is a fact: adopting/rejecting an outfit, replacing one piece, or thumbs.
+const sending = ref(false)
+const savingOutfit = ref(false)
+
+// SaveOutfit 命令：把当前这套持久化为 saved_outfit，同时由后端落
+// outfit_selected 行为事件（偏好记忆管道）。保存不是会话状态。
+async function saveAsOutfit(outfit) {
+  if (!props.userId) {
+    ElMessage.warning('请先在右上角设置用户 ID')
+    return
+  }
+  const itemIds = outfitIds(outfit)
+  if (!itemIds.length) {
+    ElMessage.warning('这套搭配没有可保存的单品')
+    return
+  }
+  savingOutfit.value = true
+  try {
+    await saveOutfit({
+      user_id: props.userId,
+      outfit_id: outfit.outfit_id || `saved_${props.payload?.run_id || 'outfit'}`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+      item_ids: itemIds,
+      source_run_id: props.payload?.run_id || '',
+    })
+    ElMessage.success('已添加至穿搭集')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message || '保存失败')
+  } finally {
+    savingOutfit.value = false
+  }
+}
+
+// Report a thumbs feedback to the preference-memory pipeline.
 async function report(eventType, outfit, arg = null) {
   if (!props.userId) {
     ElMessage.warning('请先在右上角设置用户 ID')
@@ -211,12 +254,9 @@ async function report(eventType, outfit, arg = null) {
   }
   if (!outfit) return
   sending.value = true
-  let features = {}
-  if (eventType === 'item_replaced' && arg) {
-    features = { replaced_item_ids: [arg] }
-  } else if (eventType === 'feedback_submitted' && arg) {
-    features = { feedback: arg === 'negative' ? 'negative' : 'positive' }
-  }
+  const features = eventType === 'feedback_submitted' && arg
+    ? { feedback: arg === 'negative' ? 'negative' : 'positive' }
+    : {}
   try {
     await recordBehaviorEvent(props.userId, {
       event_type: eventType,
@@ -227,7 +267,7 @@ async function report(eventType, outfit, arg = null) {
       },
       features,
     })
-    ElMessage.success({ outfit_selected: '已记住：你采纳了这套', outfit_rejected: '已记住：你不喜欢这套', item_replaced: '已记住：你想换掉这件', feedback_submitted: '已收到反馈' }[eventType] || '已上报')
+    ElMessage.success({ feedback_submitted: '已收到反馈' }[eventType] || '已上报')
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || e.message || '上报失败')
   } finally {
@@ -335,7 +375,7 @@ const recommendationLabel = (value) => ({ recommended: '建议', consider: '可�
 .carry-recommendations { margin-top: 8px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }.carry-recommendations strong { color: var(--moss); font-size: 12px; }.carry-chip { padding: 3px 8px; border: 1px solid #cbd2cc; border-radius: 999px; font-size: 12px; color: #4b5751; }
 .outfit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }.outfit-card { padding: 14px; border: 1px solid #d5dbd6; background: #fff; }
 .outfit-card header { display: flex; justify-content: space-between; margin-bottom: 10px; color: #69736e; font-size: 12px; letter-spacing: .08em; }.outfit-card header strong { color: var(--copper); font-size: 16px; }
-.image-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }.image-cell { min-width: 0; }.image-grid :deep(.el-image) { width: 100%; height: 150px; background: #ecefea; }.image-empty { height: 150px; display: grid; place-items: center; color: #9ba39f; }.replace-item { display: block; width: 100%; margin-top: 4px; padding: 3px 0; border: 1px solid #d5dbd6; border-radius: 3px; background: #fff; color: #78827c; font-size: 11px; line-height: 1.5; cursor: pointer; }.replace-item:hover { border-color: var(--copper); color: var(--copper); }.outfit-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e3e7e2; }
+.image-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }.image-cell { min-width: 0; }.image-grid :deep(.el-image) { width: 100%; height: 150px; background: #ecefea; }.image-empty { height: 150px; display: grid; place-items: center; color: #9ba39f; }.image-cell.clickable { cursor: pointer; }.image-cell.clickable:hover :deep(.el-image) { outline: 2px solid var(--copper); outline-offset: -2px; }.outfit-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e3e7e2; }
 .outfit-card p { color: #5e6863; font-size: 13px; line-height: 1.6; }.knowledge-layout { display: grid; grid-template-columns: .9fr 1.1fr; gap: 28px; }.summary { font-size: 16px; line-height: 1.8; color: #4f5a54; }
 .principle { padding: 13px 0; border-top: 1px solid #e0e4e0; }.principle p { margin-bottom: 0; color: #68726d; }.item-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }.item-tile { min-width: 0; }.item-tile :deep(.el-image) { width: 100%; height: 130px; background: #edf0ec; }.item-tile strong, .item-tile span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.item-tile strong { margin-top: 7px; font-size: 13px; }.item-tile span { color: #818984; font-size: 11px; }
 .anchor { display: flex; gap: 14px; width: fit-content; min-width: 300px; margin: 16px 0 28px; padding: 10px; border: 1px solid #d6dbd6; }.anchor :deep(.el-image) { width: 96px; height: 110px; }.anchor div { display: flex; flex-direction: column; justify-content: center; }.anchor small { color: var(--copper); }.anchor strong { margin: 6px 0; }.anchor span, .muted { color: #7c8580; font-size: 12px; }.slot-group { margin-top: 26px; }

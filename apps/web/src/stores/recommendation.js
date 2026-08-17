@@ -27,7 +27,7 @@ export const useRecommendationStore = defineStore('recommendation', () => {
     if (loading.value) return // already generating
     loading.value = true
     error.value = ''
-    const key = `${userId}|${maxResults}|${request}|${locationContext ? JSON.stringify(locationContext) : ''}|${sid}|${opts.itemId || ''}|${opts.requestedTaskType || ''}`
+    const key = `${userId}|${maxResults}|${request}|${locationContext ? JSON.stringify(locationContext) : ''}|${sid}|${opts.itemId || ''}|${opts.requestedTaskType || ''}|${opts.activeOutfitId || ''}|${opts.selectedItemId || ''}`
     requestKey = key
     // Optimistically show the user turn; the backend also persists it on send.
     const userMessage = { role: 'user', content: request }
@@ -42,6 +42,10 @@ export const useRecommendationStore = defineStore('recommendation', () => {
         // 衣柜点选单品直达：精确锁定锚点并显式路由到 item_advice
         ...(opts.itemId ? { item_id: opts.itemId } : {}),
         ...(opts.requestedTaskType ? { requested_task_type: opts.requestedTaskType } : {}),
+        // Agentic 契约 Stage 1：InteractionContext grounding
+        // （active_outfit_id 复用旧 current_outfit_id 通道，不动后端路由）
+        ...(opts.activeOutfitId ? { current_outfit_id: opts.activeOutfitId } : {}),
+        ...(opts.selectedItemId ? { selected_item_id: opts.selectedItemId } : {}),
       })
       if (requestKey === key) {
         payload.value = res.data

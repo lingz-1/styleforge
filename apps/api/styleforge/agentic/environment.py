@@ -1,0 +1,383 @@
+"""Deterministic Environment for the Agentic loop (Stage 2 minimal loop).
+
+The Environment supplies facts and executes tools; it never decides *what the
+user wants*. It owns:
+  - building ``EnvironmentFacts`` from a pre-legacy snapshot (the input state
+    is frozen before the legacy graph runs, so an A/B comparison is fair),
+  - the four loop tools (inspect / search / modify / check), where
+    ``modify_outfit`` applies a plan to the Agent's *draft*, validates the
+    complete resulting state physically, and only then updates the draft.
+
+The draft never touches real session state — the whole Stage 2 loop is shadow.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any
+
+from styleforge.models.agentic_contract import (
+    CheckEnvironmentResult,
+    EnvironmentFacts,
+    GarmentLayer,
+    InteractionContext,
+    ItemSnapshot,
+    ModifyOp,
+    ModifyOutcome,
+    ModifyPlan,
+    OutfitSnapshot,
+    WardrobeSearchResult,
+)
+from styleforge.models.context import ContextPack
+from styleforge.models.task import TaskExecutionInput
+from styleforge.repositories.catalog_repository import fetch_items_by_ids
+
+from styleforge.agentic.structure import (
+    PlacedItem,
+    check_structure,
+    placement_error,
+    structure_for,
+)
+
+
+@dataclass
+class Draft:
+    """The Agent's working copy of the outfit under edit.
+
+    ``outfit.items`` carries each item's physical structure; ``layers`` records
+    the layer each added/replaced item was placed on (the Agent's decision).
+    Both live inside the shadow — nothing here is ever committed.
+    """
+
+    outfit: OutfitSnapshot
+    layers: dict[str, GarmentLayer] = field(default_factory=dict)
+
+
+def _item_snapshot_from_row(row: Any) -> ItemSnapshot:
+    return ItemSnapshot(
+        item_id=row["item_id"],
+        name=row["name"] or "",
+        item_type=row["item_type"] or "",
+        color=row["color"] or "",
+        structure=structure_for(row["item_type"] or ""),
+    )
+
+
+def _item_snapshot_from_catalog(item: Any) -> ItemSnapshot:
+    return ItemSnapshot(
+        item_id=item.item_id,
+        name=item.name or "",
+        item_type=item.item_type or "",
+        color=item.color or "",
+        structure=structure_for(item.item_type or ""),
+    )
+
+
+def _load_items(connection: Any, item_ids: list[str]) -> list[ItemSnapshot]:
+    if not item_ids:
+        return []
+    rows = fetch_items_by_ids(connection, item_ids)
+    by_id = {row["item_id"]: row for row in rows}
+    return [_item_snapshot_from_row(by_id[item_id]) for item_id in item_ids if item_id in by_id]
+
+
+def _wardrobe_summary(items: list[Any]) -> dict[str, Any]:
+    by_slot: dict[str, list[str]] = {}
+    for item in items:
+        slot = item.item_type or "other"
+        by_slot.setdefault(slot, []).append(item.item_id)
+    return {
+        slot: {
+            "count": len(ids),
+            "sample_colors": sorted({item.color for item in items if item.item_id in ids and item.color})[:8],
+        }
+        for slot, ids in sorted(by_slot.items())
+    }
+
+
+def resolve_active_outfit(
+    connection: Any,
+    task_input: TaskExecutionInput,
+    context_pack: ContextPack | None,
+) -> OutfitSnapshot | None:
+    """Resolve the outfit the user is editing from task input + session context.
+
+    ``current_item_ids`` travels with the request (the frontend session keeps
+    it); when only an ``outfit_id`` is given, the environment falls back to the
+    latest stored candidate outfit with that id.
+    """
+    outfit_id = task_input.current_outfit_id or (
+        (context_pack.outfit_context.current_outfit_id if context_pack else "")
+    )
+    item_ids = list(task_input.current_item_ids) or list(
+        (context_pack.outfit_context.current_item_ids if context_pack else [])
+    )
+    if not item_ids and outfit_id:
+        row = connection.execute(
+            """
+            SELECT c.item_ids_json
+            FROM candidate_outfits AS c
+            JOIN styling_runs AS s ON s.run_id = c.run_id
+            WHERE c.outfit_id = %s AND s.user_id = %s
+            ORDER BY s.created_at DESC
+            LIMIT 1
+            """,
+            (outfit_id, task_input.user_id),
+        ).fetchone()
+        if row is not None:
+            item_ids = json.loads(row["item_ids_json"] or "[]")
+    if not outfit_id and not item_ids:
+        return None
+    return OutfitSnapshot(
+        outfit_id=outfit_id or "active_outfit",
+        item_ids=item_ids,
+        items=_load_items(connection, item_ids),
+    )
+
+
+def recent_visible_outfits(connection: Any, user_id: str, limit: int = 4) -> list[OutfitSnapshot]:
+    """The user's most recently generated candidate outfits (conversation view)."""
+    rows = connection.execute(
+        """
+        SELECT c.outfit_id, c.item_ids_json
+        FROM candidate_outfits AS c
+        JOIN styling_runs AS s ON s.run_id = c.run_id
+        WHERE s.user_id = %s AND s.status = 'completed'
+        ORDER BY s.created_at DESC, c.rank NULLS LAST
+        LIMIT %s
+        """,
+        (user_id, limit),
+    ).fetchall()
+    outfits: list[OutfitSnapshot] = []
+    for row in rows:
+        item_ids = json.loads(row["item_ids_json"] or "[]")
+        outfits.append(
+            OutfitSnapshot(
+                outfit_id=row["outfit_id"],
+                item_ids=item_ids,
+                items=_load_items(connection, item_ids),
+            )
+        )
+    return outfits
+
+
+def build_facts(
+    connection: Any,
+    task_input: TaskExecutionInput,
+    context_pack: ContextPack | None,
+    wardrobe_items: list[Any],
+) -> EnvironmentFacts:
+    """Freeze the EnvironmentFacts the Agent may rely on.
+
+    ``context_pack`` must be the *pre-legacy* snapshot (built before the legacy
+    graph runs) so the shadow sees the same world the legacy saw.
+    """
+    interaction = InteractionContext(
+        active_outfit_id=task_input.current_outfit_id or None,
+        selected_item_id=task_input.selected_item_id or None,
+    )
+    active_outfit = resolve_active_outfit(connection, task_input, context_pack)
+    selected_item = None
+    if task_input.selected_item_id:
+        row = connection.execute(
+            "SELECT item_id, name, item_type, color FROM catalog_items WHERE item_id = %s",
+            (task_input.selected_item_id,),
+        ).fetchone()
+        if row is not None:
+            selected_item = _item_snapshot_from_row(row)
+    weather = None
+    memory_profile: dict[str, Any] = {}
+    if context_pack is not None:
+        weather = context_pack.environment_context.weather
+        preferences = context_pack.user_context.preferences or {}
+        memory_profile = preferences.get("memory_profile") or {}
+    return EnvironmentFacts(
+        interaction=interaction,
+        visible_outfits=recent_visible_outfits(connection, task_input.user_id),
+        active_outfit=active_outfit,
+        selected_item=selected_item,
+        wardrobe_summary=_wardrobe_summary(wardrobe_items),
+        weather=weather,
+        memory_profile=memory_profile,
+    )
+
+
+class Environment:
+    """Deterministic tools over the shadow draft. Facts only, no decisions."""
+
+    def __init__(
+        self,
+        connection: Any,
+        wardrobe_items: list[Any],
+        facts: EnvironmentFacts,
+        *,
+        search_limit: int = 12,
+    ) -> None:
+        self.connection = connection
+        self.wardrobe_items = wardrobe_items
+        self.facts = facts
+        self.search_limit = search_limit
+        self._wardrobe_by_id = {item.item_id: item for item in wardrobe_items}
+
+    # --- helpers ---------------------------------------------------------
+
+    def _snapshot_for(self, item_id: str) -> ItemSnapshot | None:
+        item = self._wardrobe_by_id.get(item_id)
+        if item is not None:
+            return _item_snapshot_from_catalog(item)
+        row = self.connection.execute(
+            "SELECT item_id, name, item_type, color FROM catalog_items WHERE item_id = %s",
+            (item_id,),
+        ).fetchone()
+        if row is not None:
+            return _item_snapshot_from_row(row)
+        return None
+
+    def _placed(self, draft: Draft) -> list[PlacedItem]:
+        return [
+            PlacedItem(
+                item_id=item.item_id,
+                structure=item.structure,
+                assigned_layer=draft.layers.get(item.item_id),
+            )
+            for item in draft.outfit.items
+        ]
+
+    # --- tools -----------------------------------------------------------
+
+    def inspect_outfit(self, outfit_id: str) -> OutfitSnapshot | None:
+        """Read a snapshot; only facts that are already grounded."""
+        candidates = []
+        if self.facts.active_outfit is not None and self.facts.active_outfit.outfit_id == outfit_id:
+            candidates.append(self.facts.active_outfit)
+        candidates.extend(
+            outfit for outfit in self.facts.visible_outfits if outfit.outfit_id == outfit_id
+        )
+        return candidates[0] if candidates else None
+
+    def search_wardrobe(self, query: str, limit: int | None = None) -> WardrobeSearchResult:
+        """Keyword search over the user's wardrobe, always capped at top-K.
+
+        An empty result is a fact — the Agent decides what it means. The user
+        may never demand "give me everything": the result is hard-capped.
+        """
+        cap = self.search_limit
+        if limit is not None and limit > 0:
+            cap = min(limit, cap)
+        tokens = [token for token in query.lower().split() if token]
+        scored: list[tuple[int, Any]] = []
+        for item in self.wardrobe_items:
+            hay = " ".join(
+                [
+                    item.name or "",
+                    item.item_type or "",
+                    item.main_category or "",
+                    item.color or "",
+                    item.description or "",
+                ]
+            ).lower()
+            score = sum(1 for token in tokens if token in hay)
+            if score > 0:
+                scored.append((score, item))
+        scored.sort(key=lambda pair: (-pair[0], pair[1].item_id))
+        results = [
+            _item_snapshot_from_catalog(item)
+            for _, item in scored[:cap]
+        ]
+        return WardrobeSearchResult(
+            results=results,
+            matched=len(scored),
+            query=query,
+        )
+
+    def modify_outfit(
+        self,
+        draft: Draft,
+        plan: ModifyPlan,
+    ) -> tuple[Draft | None, list[str]]:
+        """Apply a plan to the draft; on physical failure the draft is untouched.
+
+        Validation is on the *complete resulting state* (never step-wise), so a
+        replace (remove+add) is not falsely killed mid-way. Returns the new
+        draft when legal, otherwise ``None`` plus the issues for the Agent to
+        replan on.
+        """
+        if not plan.ops:
+            return Draft(outfit=draft.outfit, layers=dict(draft.layers)), []
+
+        item_ids = list(draft.outfit.item_ids)
+        items = list(draft.outfit.items)
+        layers = dict(draft.layers)
+        for op in plan.ops:
+            if op.action == "remove":
+                if op.item_id not in item_ids:
+                    return None, [f"无法移除 {op.item_id}：不在当前搭配中"]
+                item_ids = [item_id for item_id in item_ids if item_id != op.item_id]
+                items = [item for item in items if item.item_id != op.item_id]
+                layers.pop(op.item_id, None)
+            elif op.action == "add":
+                if op.item_id in item_ids:
+                    return None, [f"无法添加 {op.item_id}：已在搭配中"]
+                snapshot = self._snapshot_for(op.item_id)
+                if snapshot is None:
+                    return None, [f"无法添加 {op.item_id}：衣橱中不存在该单品"]
+                if op.placement is not None:
+                    error = placement_error(snapshot.structure, op.placement)
+                    if error is not None:
+                        return None, [f"单品 {op.item_id}：{error}"]
+                    layers[op.item_id] = op.placement.layer
+                item_ids.append(op.item_id)
+                items.append(snapshot)
+            elif op.action == "replace":
+                if op.item_id not in item_ids:
+                    return None, [f"无法替换 {op.item_id}：不在当前搭配中"]
+                replacement = op.replacement_item_id or ""
+                if not replacement:
+                    return None, ["replace 需要 replacement_item_id"]
+                snapshot = self._snapshot_for(replacement)
+                if snapshot is None:
+                    return None, [f"无法替换为 {replacement}：衣橱中不存在该单品"]
+                if op.placement is not None:
+                    error = placement_error(snapshot.structure, op.placement)
+                    if error is not None:
+                        return None, [f"替换单品 {replacement}：{error}"]
+                    layers[replacement] = op.placement.layer
+                item_ids = [replacement if item_id == op.item_id else item_id for item_id in item_ids]
+                items = [item for item in items if item.item_id != op.item_id]
+                items.append(snapshot)
+        item_ids = list(dict.fromkeys(item_ids))
+
+        check = check_structure(
+            [
+                PlacedItem(
+                    item_id=item.item_id,
+                    structure=item.structure,
+                    assigned_layer=layers.get(item.item_id),
+                )
+                for item in items
+            ]
+        )
+        if not check.valid:
+            return None, check.issues
+        next_draft = Draft(
+            outfit=OutfitSnapshot(
+                outfit_id=draft.outfit.outfit_id,
+                item_ids=item_ids,
+                items=items,
+                score=draft.outfit.score,
+                reasoning=plan.reasoning or draft.outfit.reasoning,
+            ),
+            layers=layers,
+        )
+        return next_draft, []
+
+    def check_environment(self, draft: Draft) -> CheckEnvironmentResult:
+        """Pure physical legality of the draft's complete resulting state."""
+        check = check_structure(self._placed(draft))
+        issues = list(check.issues)
+        if check.unknown_item_ids:
+            issues.append(
+                f"以下单品物理结构未知：{'、'.join(check.unknown_item_ids)}"
+            )
+        return CheckEnvironmentResult(valid=check.valid and not issues, issues=issues)

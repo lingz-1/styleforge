@@ -10,6 +10,7 @@ from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from styleforge.agentic.shadow import AgenticShadowRunner, shadow_enabled, shadow_exposed
 from styleforge.agents.composer import ComposerAgent
 from styleforge.agents.critic import CriticAgent
 from styleforge.agents.semantic_retriever import SemanticRetrieverAgent
@@ -103,6 +104,12 @@ class MultiTaskWorkflow:
         recommendation_runner: Callable[..., dict[str, Any]] | None = None,
         chroma_store: Any | None = None,
         text_embedder: Any | None = None,
+        # Stage 2 shadow mode. ``agentic_shadow`` runs the loop alongside the
+        # legacy path; ``expose_agentic_shadow`` additionally attaches the
+        # outcome to the API payload (tests / dev only). Both default to their
+        # env flags (AGENTIC_SHADOW / AGENTIC_SHADOW_EXPOSE).
+        agentic_shadow: bool | None = None,
+        expose_agentic_shadow: bool | None = None,
     ) -> None:
         self.database_path = database_path
         self.knowledge_root = knowledge_root.resolve()
@@ -122,6 +129,19 @@ class MultiTaskWorkflow:
         )
         initialize_database(self.database_path)
         self.graph = self._build_graph()
+        self.agentic_shadow_enabled = (
+            agentic_shadow if agentic_shadow is not None else shadow_enabled()
+        )
+        self.expose_agentic_shadow = (
+            expose_agentic_shadow
+            if expose_agentic_shadow is not None
+            else shadow_exposed()
+        )
+        self.agentic_shadow_runner = AgenticShadowRunner(
+            database_path,
+            llm_client,
+            enabled=self.agentic_shadow_enabled,
+        )
 
     def _build_graph(self):
         builder = StateGraph(TaskWorkflowState)
@@ -584,6 +604,10 @@ class MultiTaskWorkflow:
                 request=task_input.request,
             )
         initial_context = self.context_builder.build(task_input, route)
+        # Stage 2 shadow: freeze the *pre-legacy* context pack so the shadow
+        # sees the same world the legacy saw (logical parallelism; execution
+        # may be serial). `initial_context` is never mutated by the graph.
+        frozen_context = initial_context
         try:
             final = self.graph.invoke(
                 {
@@ -653,4 +677,12 @@ class MultiTaskWorkflow:
                 "llm_call_count": final.get("llm_call_count", 0),
             }
         )
+        if route.task_type is TaskType.OUTFIT_MODIFY:
+            shadow_result = self.agentic_shadow_runner.run(
+                task_input, frozen_context, session_context
+            )
+            if shadow_result and self.expose_agentic_shadow:
+                # Test / dev only: the shadow outcome rides the payload. The
+                # response contract is otherwise unchanged.
+                payload["agentic_shadow"] = shadow_result
         return payload

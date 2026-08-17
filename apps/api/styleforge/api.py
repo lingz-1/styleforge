@@ -54,6 +54,11 @@ from styleforge.repositories.chat_repository import (
     rename_chat_session,
 )
 from styleforge.repositories.interaction_event_repository import record_event
+from styleforge.repositories.saved_outfit_repository import (
+    delete_saved_outfit,
+    list_saved_outfits,
+    save_outfit,
+)
 from styleforge.repositories.preference_model_repository import (
     get_preference,
     get_preference_by_key,
@@ -115,6 +120,13 @@ class TaskRoutingRequest(BaseModel):
     current_outfit_id: str = Field(default="", max_length=128)
     has_candidate_item: bool = False
     task_type: TaskType | None = None
+
+
+class SaveOutfitRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    outfit_id: str = Field(min_length=1, max_length=128)
+    item_ids: list[str] = Field(default_factory=list, max_length=12)
+    source_run_id: str = Field(default="", max_length=128)
 
 
 class WardrobeItemRequest(BaseModel):
@@ -875,6 +887,58 @@ def execute_task(request: TaskExecutionInput) -> dict[str, Any]:
     payload["session_id"] = request.session_id
     payload["message_id"] = message_id
     return payload
+
+
+@app.post("/outfits/save", status_code=201)
+def save_outfit_endpoint(request: SaveOutfitRequest) -> dict[str, Any]:
+    """SaveOutfit command: persist an outfit snapshot into the saved collection.
+
+    Part of the Agentic contract (Stage 1 grounding): saving is a command/event,
+    not a long-lived ``confirmed_outfit`` state. The outfit is materialised as
+    its own row so it can be revisited later; the confirm event also feeds the
+    preference-memory pipeline (``outfit_selected``).
+    """
+    if not request.item_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="item_ids are required to materialise a saved outfit",
+        )
+    with database_session(settings.database_dsn) as connection:
+        save_outfit(
+            connection,
+            request.user_id,
+            request.outfit_id,
+            request.item_ids,
+            request.source_run_id,
+        )
+    _try_behavior_event(
+        user_id=request.user_id,
+        event_type="outfit_selected",
+        context={
+            "request": "",
+            "outfit_id": request.outfit_id,
+            "item_ids": request.item_ids,
+        },
+    )
+    return {
+        "status": "saved",
+        "outfit_id": request.outfit_id,
+        "item_ids": request.item_ids,
+    }
+
+
+@app.get("/users/{user_id}/saved-outfits")
+def list_saved_outfits_endpoint(user_id: str) -> dict[str, Any]:
+    with database_session(settings.database_dsn) as connection:
+        outfits = list_saved_outfits(connection, user_id)
+    return {"outfits": outfits}
+
+
+@app.delete("/users/{user_id}/saved-outfits/{outfit_id}", status_code=204)
+def delete_saved_outfit_endpoint(user_id: str, outfit_id: str) -> None:
+    with database_session(settings.database_dsn) as connection:
+        delete_saved_outfit(connection, user_id, outfit_id)
+    return None
 
 
 @app.get("/tasks/{user_id}/{run_id}")
