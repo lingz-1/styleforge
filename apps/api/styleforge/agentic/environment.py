@@ -193,7 +193,15 @@ def build_facts(
     if context_pack is not None:
         weather = context_pack.environment_context.weather
         preferences = context_pack.user_context.preferences or {}
-        memory_profile = preferences.get("memory_profile") or {}
+        raw_memory = preferences.get("memory_profile")
+        # The legacy context pack stores preference evidence as a *list* of
+        # records (ContextPackBuilder -> list_preferences); EnvironmentFacts
+        # expects a dict snapshot. Normalise at the program boundary so a real
+        # user with memories does not trip the contract validation.
+        if isinstance(raw_memory, dict):
+            memory_profile = raw_memory
+        elif isinstance(raw_memory, list) and raw_memory:
+            memory_profile = {"preferences": raw_memory}
     return EnvironmentFacts(
         interaction=interaction,
         visible_outfits=recent_visible_outfits(connection, task_input.user_id),

@@ -336,6 +336,12 @@ async function run({ itemId = '', label = '' } = {}) {
     activeOutfitId: activeOutfit.value?.outfit_id || '',
     selectedItemId: selectedItemId.value,
   })
+  // Stage 4 多轮 grounding：修改成功后把最新候选设为 active outfit，下一轮
+  // 的 current_outfit_id 指向新候选（修复多轮修改回退到最初套的问题）。
+  const latest = store.payload?.result
+  if (latest?.status === 'completed' && latest.alternatives?.[0]) {
+    activeOutfit.value = latest.alternatives[0]
+  }
   request.value = ''
   selectedItemId.value = '' // 本次消歧已消费，单击定位只对下一次输入生效
   void refreshSessions()

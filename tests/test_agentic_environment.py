@@ -123,6 +123,51 @@ def test_build_facts_grounds_active_outfit_and_selected_item(seeded_conn: Any) -
     assert facts.memory_profile == {"style": "极简"}
 
 
+def test_build_facts_normalises_list_memory_profile(seeded_conn: Any) -> None:
+    """Real users carry preference evidence as a *list* (list_preferences);
+    the program boundary must snapshot it into the dict the contract expects
+    instead of tripping EnvironmentFacts validation."""
+    evidence = [
+        {"preference_id": 97, "preference": "不喜欢运动鞋", "created_at": "2026-08-17T00:00:00+00:00"},
+        {"preference_id": 98, "preference": "偏好深色系", "created_at": "2026-08-17T00:00:00+00:00"},
+    ]
+    pack = ContextPack(
+        request_context=RequestContext(
+            original_request="换双鞋",
+            task_type="OUTFIT_MODIFY",
+            route_reason="test",
+            route_confidence=1.0,
+        ),
+        user_context=UserContext(
+            user_id="u",
+            preferences={"memory_profile": evidence},
+        ),
+        environment_context=EnvironmentContext(weather={"summary": "sunny", "temp": 20}),
+    )
+    wardrobe_items = list_items(seeded_conn, "u")
+    facts = build_facts(seeded_conn, _input(), pack, wardrobe_items)
+
+    assert facts.memory_profile == {"preferences": evidence}
+
+
+def test_build_facts_empty_memory_profile_stays_dict(seeded_conn: Any) -> None:
+    """An empty list (no memories yet) must not produce a broken dict."""
+    pack = ContextPack(
+        request_context=RequestContext(
+            original_request="换双鞋",
+            task_type="OUTFIT_MODIFY",
+            route_reason="test",
+            route_confidence=1.0,
+        ),
+        user_context=UserContext(user_id="u", preferences={"memory_profile": []}),
+        environment_context=EnvironmentContext(weather={"summary": "sunny", "temp": 20}),
+    )
+    wardrobe_items = list_items(seeded_conn, "u")
+    facts = build_facts(seeded_conn, _input(), pack, wardrobe_items)
+
+    assert facts.memory_profile == {}
+
+
 def test_build_facts_wardrobe_summary_counts_by_type(seeded_conn: Any) -> None:
     facts = _env(seeded_conn, _input()).facts
     assert facts.wardrobe_summary["top"]["count"] == 1

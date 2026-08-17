@@ -35,6 +35,19 @@ def _test_dsn() -> str:
     return dsn
 
 
+@pytest.fixture(autouse=True)
+def _legacy_modify_mode_default() -> Iterator[None]:
+    """Keep the legacy OUTFIT_MODIFY chain the default for existing tests.
+
+    Stage 4 primary-mode tests opt in explicitly with ``modify_mode="agentic"``
+    (the explicit argument wins over the env flag); everything else keeps the
+    old three-agent chain so pre-切流 behaviour is unchanged.
+    """
+    os.environ["STYLEFORGE_MODIFY_MODE"] = "legacy"
+    yield
+    os.environ.pop("STYLEFORGE_MODIFY_MODE", None)
+
+
 @pytest.fixture()
 def db_schema(_test_dsn: str) -> Iterator[str]:
     """A throwaway schema, created before and dropped after the test."""

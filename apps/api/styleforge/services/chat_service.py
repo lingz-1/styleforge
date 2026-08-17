@@ -55,11 +55,23 @@ def outfit_context_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         if not recommendations:
             recommendations = result.get("recommendations")
         if isinstance(recommendations, list) and recommendations:
-            first = recommendations[0]
-            if isinstance(first, dict):
+            candidates = [
+                {
+                    "outfit_id": str(rec.get("outfit_id", "")),
+                    "item_ids": list(rec.get("item_ids", [])),
+                }
+                for rec in recommendations
+                if isinstance(rec, dict)
+            ]
+            if candidates:
+                first = candidates[0]
+                # ``current_candidates`` keeps the *whole* recommendation batch
+                # so a follow-up without an explicit outfit choice ("modify all
+                # three") can target every produced outfit, not just the first.
                 return {
-                    "current_outfit_id": str(first.get("outfit_id", "")),
-                    "current_item_ids": list(first.get("item_ids", [])),
+                    "current_outfit_id": first["outfit_id"],
+                    "current_item_ids": first["item_ids"],
+                    "current_candidates": candidates,
                 }
         return {"current_outfit_id": "", "current_item_ids": []}
     if task_type == TaskType.OUTFIT_MODIFY.value:
@@ -73,6 +85,14 @@ def outfit_context_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     "session_signals": session_signals_from_request(
                         str(payload.get("request", ""))
                     ),
+                    "current_candidates": [
+                        {
+                            "outfit_id": str(alt.get("outfit_id", "")),
+                            "item_ids": list(alt.get("item_ids", [])),
+                        }
+                        for alt in alternatives
+                        if isinstance(alt, dict)
+                    ],
                 }
         return {
             "current_outfit_id": "",

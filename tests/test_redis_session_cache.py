@@ -22,7 +22,11 @@ from styleforge.services.chat_service import (
     get_session_outfit_context,
 )
 
-OUTFIT_CONTEXT = {"current_outfit_id": "o-abc", "current_item_ids": ["i1", "i2"]}
+OUTFIT_CONTEXT = {
+    "current_outfit_id": "o-abc",
+    "current_item_ids": ["i1", "i2"],
+    "current_candidates": [{"outfit_id": "o-abc", "item_ids": ["i1", "i2"]}],
+}
 
 
 class FakeRedis:

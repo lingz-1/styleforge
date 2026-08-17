@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import uuid
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,19 +12,25 @@ from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from styleforge.agentic.agent import AgentLoop, LoopConfig
+from styleforge.agentic.environment import Environment, build_facts
 from styleforge.agentic.shadow import AgenticShadowRunner, shadow_enabled, shadow_exposed
 from styleforge.agents.composer import ComposerAgent
 from styleforge.agents.critic import CriticAgent
 from styleforge.agents.semantic_retriever import SemanticRetrieverAgent
 from styleforge.context.builder import ContextPackBuilder
+from styleforge.core.categories import infer_slot
 from styleforge.core.request_parser import parse_request
+from styleforge.core.schemas import OutfitCandidate, RecommendationResult, TaskSpec
 from styleforge.knowledge.retriever import KnowledgeRetriever
-from styleforge.llm.client import LlmSchemaViolation
+from styleforge.llm.client import LlmSchemaViolation, LlmUnavailable
 from styleforge.models.agent_tasks import Agent1TaskOutput, Agent2TaskOutput, Agent3TaskOutput
 from styleforge.models.context import ContextPack
 from styleforge.models.task import TaskExecutionInput
+from styleforge.models.task_results import validate_task_result
 from styleforge.orchestration.task_router import TaskRoute, TaskRouter, TaskType
 from styleforge.repositories.database import database_session, initialize_database
+from styleforge.repositories.run_repository import finish_run, save_candidates, start_run
 from styleforge.repositories.task_run_repository import (
     fail_task_run,
     finish_task_run,
@@ -64,6 +72,32 @@ def is_follow_up(request: str) -> bool:
     if any(word in text for word in _FRESH_SCENARIO_WORDS):
         return False
     return True
+
+
+_MODIFY_MODES = ("agentic", "legacy", "shadow")
+
+# Body regions the Agent writes in placement -> the legacy slot word the front
+# end shows (``target_slot``). Best-effort mapping only; empty when unknown.
+_REGION_TO_SLOT = {
+    "upper_body": "top",
+    "lower_body": "bottom",
+    "feet": "footwear",
+    "full_body": "dress",
+    "accessory": "accessory",
+}
+
+
+def _resolve_modify_mode(modify_mode: str | None) -> str:
+    """Resolve which OUTFIT_MODIFY chain is primary.
+
+    ``agentic`` (default) runs the Agent loop as the primary chain and skips the
+    legacy graph entirely; ``legacy`` keeps the old three-agent chain; ``shadow``
+    keeps the legacy chain primary with the agent loop as a non-committing
+    shadow. An explicit argument wins; otherwise the ``STYLEFORGE_MODIFY_MODE``
+    env flag is read; anything unrecognised falls back to ``agentic``.
+    """
+    mode = (modify_mode or os.environ.get("STYLEFORGE_MODIFY_MODE", "")).strip().lower()
+    return mode if mode in _MODIFY_MODES else "agentic"
 
 
 class TaskWorkflowState(TypedDict, total=False):
@@ -110,6 +144,12 @@ class MultiTaskWorkflow:
         # env flags (AGENTIC_SHADOW / AGENTIC_SHADOW_EXPOSE).
         agentic_shadow: bool | None = None,
         expose_agentic_shadow: bool | None = None,
+        # Stage 4: which OUTFIT_MODIFY chain is primary. ``agentic`` (default)
+        # runs the Agent loop as the primary chain (legacy graph skipped);
+        # ``legacy`` keeps the old three-agent chain; ``shadow`` keeps legacy
+        # primary with the agent loop alongside. Defaults to the
+        # STYLEFORGE_MODIFY_MODE env flag.
+        modify_mode: str | None = None,
     ) -> None:
         self.database_path = database_path
         self.knowledge_root = knowledge_root.resolve()
@@ -137,6 +177,7 @@ class MultiTaskWorkflow:
             if expose_agentic_shadow is not None
             else shadow_exposed()
         )
+        self.modify_mode = _resolve_modify_mode(modify_mode)
         self.agentic_shadow_runner = AgenticShadowRunner(
             database_path,
             llm_client,
@@ -506,17 +547,25 @@ class MultiTaskWorkflow:
         ]
         if not session_item_ids:
             return route0
+        # Under the agentic modify chain the Agent loop resolves its own targets
+        # from ``session_context`` (``_agentic_targets``); injecting the session
+        # outfit into ``task_input`` would mask "no explicit choice" and defeat
+        # "modify all three". The legacy / shadow chains still need the injection
+        # to ground their context pack.
+        inject_session = self.modify_mode != "agentic"
         if route0.task_type is TaskType.OUTFIT_RECOMMEND and is_follow_up(task_input.request):
-            task_input.current_outfit_id = session_outfit_id
-            task_input.current_item_ids = session_item_ids
+            if inject_session:
+                task_input.current_outfit_id = session_outfit_id
+                task_input.current_item_ids = session_item_ids
             route = self.router.route(
                 task_input.request,
                 current_outfit_id=session_outfit_id,
             )
             return dataclass_replace(route, reason="session_follow_up", confidence=0.9)
         if route0.task_type is TaskType.OUTFIT_MODIFY:
-            task_input.current_outfit_id = session_outfit_id
-            task_input.current_item_ids = session_item_ids
+            if inject_session:
+                task_input.current_outfit_id = session_outfit_id
+                task_input.current_item_ids = session_item_ids
         return route0
 
     def _extract_memories(self, task_input: TaskExecutionInput) -> None:
@@ -608,6 +657,13 @@ class MultiTaskWorkflow:
         # sees the same world the legacy saw (logical parallelism; execution
         # may be serial). `initial_context` is never mutated by the graph.
         frozen_context = initial_context
+        # Stage 4: with the Agent loop primary, OUTFIT_MODIFY never enters the
+        # legacy graph — the loop is the chain, and the legacy branch (incl. its
+        # shadow mount) is skipped entirely.
+        if route.task_type is TaskType.OUTFIT_MODIFY and self.modify_mode == "agentic":
+            return self._run_agentic_modify(
+                task_input, route, initial_context, run_id, session_context
+            )
         try:
             final = self.graph.invoke(
                 {
@@ -686,3 +742,455 @@ class MultiTaskWorkflow:
                 # response contract is otherwise unchanged.
                 payload["agentic_shadow"] = shadow_result
         return payload
+
+    # --- Stage 4: agentic primary chain ----------------------------------
+
+    def _run_agentic_modify(
+        self,
+        task_input: TaskExecutionInput,
+        route: TaskRoute,
+        initial_context: ContextPack,
+        run_id: str,
+        session_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run OUTFIT_MODIFY through the Agent loop as the primary chain.
+
+        Mirrors the shadow sequence (build_facts -> Environment -> AgentLoop)
+        but the outcome is the real result: it is validated against the
+        OutfitModifyResult contract, committed to task_runs, and (when it
+        produces a completed outfit) persisted to candidate_outfits so a later
+        turn can re-anchor on it by outfit_id.
+
+        The targets come from ``_agentic_targets``: an explicit
+        ``current_outfit_id`` means one outfit; otherwise every recent
+        recommendation candidate in the session context is a target ("modify
+        all three"). One loop runs per target, and the batch of outcomes is
+        wrapped into one result with one alternative per success.
+        """
+        if self.llm_client is None:
+            raise LlmUnavailable("OUTFIT_MODIFY requires an LLM client")
+        context_json = initial_context.model_dump(mode="json")
+        targets = self._agentic_targets(task_input, session_context)
+        try:
+            with database_session(self.database_path) as connection:
+                wardrobe_items = list_items(connection, task_input.user_id)
+                item_type_by_id = {
+                    item.item_id: item.item_type for item in wardrobe_items
+                }
+                outcomes: list[dict[str, Any]] = []
+                for target in targets:
+                    sub_input = task_input.model_copy(
+                        update={
+                            "current_outfit_id": target["outfit_id"],
+                            "current_item_ids": target["item_ids"],
+                        }
+                    )
+                    facts = build_facts(
+                        connection, sub_input, initial_context, wardrobe_items
+                    )
+                    environment = Environment(
+                        connection, wardrobe_items, facts, search_limit=12
+                    )
+                    loop = AgentLoop(
+                        self.llm_client,
+                        environment,
+                        task_input.request,
+                        config=LoopConfig(max_steps=8, search_limit=12),
+                    )
+                    outcomes.append(loop.run())
+            result = self._agentic_outcomes_to_result(
+                task_input, targets, outcomes, item_type_by_id
+            )
+            status = str(result.get("status", "infeasible"))
+            with database_session(self.database_path) as connection:
+                finish_task_run(
+                    connection,
+                    run_id=run_id,
+                    status=status,
+                    context_pack=context_json,
+                    result=result,
+                )
+            if status == "completed":
+                self._persist_agentic_candidate(task_input, result)
+            self._extract_memories(task_input)
+        except Exception as error:
+            with database_session(self.database_path) as connection:
+                fail_task_run(
+                    connection,
+                    run_id=run_id,
+                    error=error,
+                    context_pack=context_json,
+                )
+            raise
+        return {
+            "run_id": run_id,
+            "user_id": task_input.user_id,
+            "request": task_input.request,
+            "task_type": TaskType.OUTFIT_MODIFY.value,
+            "selected_subgraph": "agentic_loop",
+            "route": route.to_dict(),
+            "status": status,
+            "context_pack": context_json,
+            "result": result,
+            "trace": [],
+            "diagnostics": {},
+            "image_endpoint_template": "/items/{item_id}/image",
+            "agents": {"loop": "agentic_agent_loop"},
+            "agentic_outcome": outcomes[0] if len(outcomes) == 1 else outcomes,
+            "llm_enabled": True,
+            "llm_call_count": sum(
+                int(outcome.get("llm_call_count", 0)) for outcome in outcomes
+            ),
+        }
+
+    def _agentic_targets(
+        self,
+        task_input: TaskExecutionInput,
+        session_context: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """Resolve the outfit(s) a modify request applies to.
+
+        An explicit ``current_outfit_id`` is a single explicit target (the user
+        picked a card / the front end pinned it). Without one, the session's
+        recent recommendation batch (>= 2 candidates) becomes the target list —
+        "modify all three". Anything else degrades to the single current outfit
+        (possibly empty; the loop then asks for clarification).
+        """
+        if task_input.current_outfit_id:
+            return [
+                {
+                    "outfit_id": task_input.current_outfit_id,
+                    "item_ids": list(task_input.current_item_ids),
+                }
+            ]
+        candidates = (session_context or {}).get("current_candidates")
+        if isinstance(candidates, list) and candidates:
+            # A non-empty batch is the target set whether it holds one outfit
+            # (single) or several ("modify all three").
+            return [
+                {
+                    "outfit_id": str(candidate.get("outfit_id", "")),
+                    "item_ids": list(candidate.get("item_ids", [])),
+                }
+                for candidate in candidates
+            ]
+        # Single-target fallback: an explicit request outfit, else the session's
+        # current outfit (the same anchor the legacy chain would inject).
+        return [
+            {
+                "outfit_id": task_input.current_outfit_id
+                or (session_context or {}).get("current_outfit_id", ""),
+                "item_ids": list(task_input.current_item_ids)
+                or list((session_context or {}).get("current_item_ids", [])),
+            }
+        ]
+
+    def _agentic_outcomes_to_result(
+        self,
+        task_input: TaskExecutionInput,
+        targets: list[dict[str, Any]],
+        outcomes: list[dict[str, Any]],
+        item_type_by_id: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Wrap a batch of Agent loop outcomes (one per target outfit) into the
+        OutfitModifyResult contract.
+
+        Every successful outcome becomes one alternative; the batch completes
+        when at least one alternative survives. A single outcome delegates to
+        the single-outfit wrapper so Stage 4's one-card behaviour is unchanged.
+        """
+        if len(outcomes) == 1:
+            return self._agentic_outcome_to_result(
+                task_input, outcomes[0], item_type_by_id
+            )
+        item_type_by_id = item_type_by_id or {}
+        base_id = task_input.current_outfit_id or ""
+        alternatives: list[dict[str, Any]] = []
+        skipped = 0
+        first_failure: dict[str, Any] | None = None
+        first_success_outcome: dict[str, Any] | None = None
+        for target, outcome in zip(targets, outcomes):
+            agentic_status = str(outcome.get("status", "timeout"))
+            if agentic_status != "success":
+                if first_failure is None:
+                    first_failure = outcome
+                continue
+            candidate = outcome.get("candidate") or {}
+            item_ids = list(candidate.get("item_ids") or [])
+            base_outfit_id = str(
+                candidate.get("outfit_id") or target.get("outfit_id") or base_id
+            )
+            if len(item_ids) < 2:
+                # OutfitReference.item_ids requires at least two; drop the
+                # under-sized candidate instead of failing the whole batch.
+                skipped += 1
+                continue
+            new_outfit_id = f"{base_outfit_id or 'outfit'}-mod-{uuid.uuid4().hex[:6]}"
+            review = outcome.get("review") or {}
+            intent = outcome.get("intent") or {}
+            reasoning = str(
+                review.get("feedback") or intent.get("goal") or "已按你的要求修改搭配"
+            )
+            replaced, locked = self._extract_replaced_locked(
+                outcome, item_ids, list(target.get("item_ids") or [])
+            )
+            alternatives.append(
+                {
+                    "outfit_id": new_outfit_id,
+                    "item_ids": item_ids,
+                    "reasoning": reasoning,
+                    "replaced_item_ids": replaced,
+                    "locked_item_ids": locked,
+                }
+            )
+            if first_success_outcome is None:
+                first_success_outcome = outcome
+        if not alternatives:
+            if (
+                first_failure is not None
+                and str(first_failure.get("status")) == "ask_user"
+            ):
+                question = str(
+                    (first_failure.get("ask_user") or {}).get("question")
+                    or "需要你进一步说明"
+                )
+                return validate_task_result(
+                    TaskType.OUTFIT_MODIFY,
+                    {
+                        "status": "needs_clarification",
+                        "current_outfit_id": base_id,
+                        "target_slot": "",
+                        "replaced_item_ids": [],
+                        "locked_item_ids": [],
+                        "alternatives": [],
+                        "message": question,
+                        "clarification_question": question,
+                    },
+                )
+            return validate_task_result(
+                TaskType.OUTFIT_MODIFY,
+                {
+                    "status": "infeasible",
+                    "current_outfit_id": base_id,
+                    "target_slot": "",
+                    "replaced_item_ids": [],
+                    "locked_item_ids": [],
+                    "alternatives": [],
+                    "message": "修改超时，请换个说法重试",
+                },
+            )
+        all_replaced = [
+            item_id
+            for alternative in alternatives
+            for item_id in alternative.get("replaced_item_ids", [])
+        ]
+        all_locked = [
+            item_id
+            for alternative in alternatives
+            for item_id in alternative.get("locked_item_ids", [])
+        ]
+        assert first_success_outcome is not None
+        target_slot = self._extract_target_slot(
+            first_success_outcome, all_replaced, item_type_by_id
+        )
+        detail = (
+            f"已按你的要求修改 {len(alternatives)} 套"
+            if not skipped
+            else f"已修改 {len(alternatives)} 套，另有 {skipped} 套候选单品过少已跳过"
+        )
+        return validate_task_result(
+            TaskType.OUTFIT_MODIFY,
+            {
+                "status": "completed",
+                "current_outfit_id": alternatives[0]["outfit_id"],
+                "target_slot": target_slot,
+                "replaced_item_ids": all_replaced,
+                "locked_item_ids": all_locked,
+                "alternatives": alternatives,
+                "message": detail,
+            },
+        )
+
+    def _agentic_outcome_to_result(
+        self,
+        task_input: TaskExecutionInput,
+        outcome: dict[str, Any],
+        item_type_by_id: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Wrap an Agent loop outcome into the OutfitModifyResult contract.
+
+        Status mapping: success -> completed, ask_user -> needs_clarification,
+        timeout -> infeasible. Only a completed outcome produces an alternative
+        (a single candidate — the Stage 4 decision to show one card); the shape
+        is revalidated against the contract model so legacy consumers keep a
+        contract-clean result.
+        """
+        item_type_by_id = item_type_by_id or {}
+        base_id = task_input.current_outfit_id or ""
+        agentic_status = str(outcome.get("status", "timeout"))
+        ask_user = outcome.get("ask_user") or {}
+        review = outcome.get("review") or {}
+        intent = outcome.get("intent") or {}
+        candidate = outcome.get("candidate") or {}
+
+        if agentic_status == "ask_user":
+            question = str(ask_user.get("question") or "需要你进一步说明")
+            return validate_task_result(
+                TaskType.OUTFIT_MODIFY,
+                {
+                    "status": "needs_clarification",
+                    "current_outfit_id": base_id,
+                    "target_slot": "",
+                    "replaced_item_ids": [],
+                    "locked_item_ids": [],
+                    "alternatives": [],
+                    "message": question,
+                    "clarification_question": question,
+                },
+            )
+
+        if agentic_status != "success":
+            return validate_task_result(
+                TaskType.OUTFIT_MODIFY,
+                {
+                    "status": "infeasible",
+                    "current_outfit_id": base_id,
+                    "target_slot": "",
+                    "replaced_item_ids": [],
+                    "locked_item_ids": [],
+                    "alternatives": [],
+                    "message": "修改超时，请换个说法重试",
+                },
+            )
+
+        item_ids = list(candidate.get("item_ids") or [])
+        new_outfit_id = f"{base_id or 'outfit'}-mod-{uuid.uuid4().hex[:6]}"
+        reasoning = str(
+            review.get("feedback") or intent.get("goal") or "已按你的要求修改搭配"
+        )
+        replaced, locked = self._extract_replaced_locked(
+            outcome, item_ids, task_input.current_item_ids
+        )
+        result = {
+            "status": "completed",
+            "current_outfit_id": new_outfit_id,
+            "target_slot": self._extract_target_slot(
+                outcome, replaced, item_type_by_id
+            ),
+            "replaced_item_ids": replaced,
+            "locked_item_ids": locked,
+            "alternatives": [
+                {
+                    "outfit_id": new_outfit_id,
+                    "item_ids": item_ids,
+                    "reasoning": reasoning,
+                }
+            ],
+            "message": reasoning,
+        }
+        if len(item_ids) < 2:
+            # OutfitReference.item_ids requires at least two; a one-item
+            # "outfit" cannot satisfy the contract, surface it as a
+            # clarification instead of failing the whole run.
+            result["status"] = "needs_clarification"
+            result["message"] = "当前搭配单品过少，请补充想怎么调整"
+            result["alternatives"] = []
+            result["clarification_question"] = result["message"]
+            result["current_outfit_id"] = base_id
+        return validate_task_result(TaskType.OUTFIT_MODIFY, result)
+
+    def _extract_replaced_locked(
+        self,
+        outcome: dict[str, Any],
+        final_item_ids: list[str],
+        base_item_ids: list[str],
+    ) -> tuple[list[str], list[str]]:
+        """Best-effort replaced/locked ids from the loop's modify steps.
+
+        ``replaced`` collects every item the loop removed/replaced; ``locked``
+        is the intersection of the base outfit and the final one (kept as-is).
+        """
+        replaced: list[str] = []
+        for step in outcome.get("steps", []):
+            if step.get("action") != "modify_outfit":
+                continue
+            plan = (step.get("args") or {}).get("plan") or {}
+            for op in plan.get("ops") or []:
+                action = op.get("action")
+                if action in ("replace", "remove"):
+                    item_id = op.get("item_id")
+                    if item_id and item_id not in replaced:
+                        replaced.append(item_id)
+        final_set = set(final_item_ids)
+        locked = [item_id for item_id in base_item_ids if item_id in final_set]
+        return replaced, locked
+
+    def _extract_target_slot(
+        self,
+        outcome: dict[str, Any],
+        replaced_item_ids: list[str],
+        item_type_by_id: dict[str, str],
+    ) -> str:
+        """Best-effort target slot: the slot of a replaced item (by type),
+        falling back to the placement region words in the modify steps."""
+        for item_id in replaced_item_ids:
+            item_type = item_type_by_id.get(item_id)
+            if item_type:
+                slot = infer_slot(item_type)
+                if slot and slot != "other":
+                    return slot
+        for step in outcome.get("steps", []):
+            if step.get("action") != "modify_outfit":
+                continue
+            plan = (step.get("args") or {}).get("plan") or {}
+            for op in plan.get("ops") or []:
+                placement = op.get("placement") or {}
+                region = str(placement.get("region", ""))
+                slot = _REGION_TO_SLOT.get(region)
+                if slot:
+                    return slot
+        return ""
+
+    def _persist_agentic_candidate(
+        self,
+        task_input: TaskExecutionInput,
+        result: dict[str, Any],
+    ) -> None:
+        """Commit the completed candidate so a later turn can re-anchor on it.
+
+        resolve_active_outfit resolves ``current_outfit_id`` via
+        candidate_outfits JOIN styling_runs, so the primary chain must persist
+        here for multi-turn modifications to keep grounding on the latest outfit
+        (the front end re-sends the new outfit_id as current_outfit_id).
+        """
+        alternatives = result.get("alternatives") or []
+        candidates: list[OutfitCandidate] = []
+        for alternative in alternatives:
+            item_ids = list(alternative.get("item_ids") or [])
+            outfit_id = str(alternative.get("outfit_id", ""))
+            if len(item_ids) < 2 or not outfit_id:
+                continue
+            candidates.append(
+                OutfitCandidate(
+                    outfit_id=outfit_id,
+                    item_ids=tuple(item_ids),
+                    slot_items={},
+                    hard_valid=True,
+                    score=0.0,
+                )
+            )
+        if not candidates:
+            return
+        with database_session(self.database_path) as connection:
+            styling_run_id = start_run(
+                connection, TaskSpec(user_id=task_input.user_id, max_results=3)
+            )
+            save_candidates(connection, styling_run_id, candidates)
+            finish_run(
+                connection,
+                RecommendationResult(
+                    run_id=styling_run_id,
+                    status="completed",
+                    recommendations=tuple(candidates),
+                ),
+            )

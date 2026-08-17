@@ -98,14 +98,17 @@ SYSTEM_PROMPT = """\
 
 你可以使用的工具：
 - inspect_outfit {outfit_id}：查看某套穿搭的详情。不填或填 active 表示查看当前正在编辑的搭配
-- search_wardrobe {query}：在用户衣橱中搜索单品。结果有数量上限；空结果不代表衣柜里没有，可以换一个表达再搜
+- search_wardrobe {query}：在用户衣橱中搜索单品。结果有数量上限；空结果不代表衣柜里没有，可以换一个表达再搜。
+  注意：衣橱单品名称/描述是英文（如 sneakers、denim jacket、jeans），中文关键词通常搜不到。
+  搜索时应同时尝试中英文表达（先中文直觉词，若未找到就换英文词或中英混合再搜）
 - modify_outfit {plan}：修改当前穿搭。add/remove/replace 三种操作，可以一次提交多个。
   每步 placement 里 region 是身体部位（upper_body/lower_body/feet/full_body/accessory），
   layer 是层（base/mid/outer）；拿不准的字段可以留空，程序会按单品结构自动补全。
   程序会做物理校验，非法修改会被拒绝并返回原因
 - check_environment：检查当前穿搭的物理合法性（可选；最终提交时程序也会强制检查）
 - ask_user {question}：需要用户澄清时使用（例如用户要求明确，但衣柜里确实没有满足条件的单品）
-- finish：你认为修改完成时使用
+- finish：修改已满足用户目标时使用。提交后程序会自动做物理与风格审核；审核未通过会返回
+  原因，你再针对性调整后重新 finish 即可（不是一次性判死，不必反复试探、过度修改）
 
 操作纪律：
 1. 绝不编造单品 id。modify_outfit 里出现的 id 必须来自环境提供的衣橱 id 清单或
@@ -119,6 +122,15 @@ SYSTEM_PROMPT = """\
    原样重试。
 5. 满足即止：只要修改已满足用户目标（例如要求加一件上衣，你已经加了一件），就
    直接 finish 提交，不要继续添加或替换无关单品。
+6. 搜索语言：衣橱数据是英文（sneakers/denim/jeans/casual…），中文关键词基本搜不到。
+   优先用英文词搜索；拿不准时先用中文直觉词，看到「未找到」提示后再换英文（或中英文
+   混合）重试，不要连续换多个中文词空转。
+7. 模糊评价先澄清：用户只说「不好看」「不合适」「怪」之类而没有指明哪里不满意或想
+   怎么改时，先 inspect 当前穿搭；若仍无法推断具体修改方向，用 ask_user 问清楚
+   （例如“具体哪里不满意？想换成什么风格？”），不要反复搜索或凭感觉瞎改。
+8. 不要反复查看同一套而不行动：inspect_outfit 看过一次就记住内容；连续 2 次以上只
+   查看或搜索而没有任何 modify_outfit / finish，属于空转，应立即决定行动（修改、
+   finish 或 ask_user）。
 
 每次只输出一个 JSON 对象：
 {
@@ -403,7 +415,11 @@ class AgentLoop:
                     + "、".join(items),
                     draft,
                 )
-            return f"未找到匹配单品（共检索 {result.matched} 件）。可以换关键词或表达再搜。", draft
+            return (
+                f"未找到匹配单品（共检索 {result.matched} 件）。"
+                "衣橱单品名称/描述为英文，建议改英文关键词再试（如 sneakers、jeans）。",
+                draft,
+            )
         if step.action == "modify_outfit":
             if step.plan is None or not step.plan.ops:
                 return "modify_outfit 需要提供 plan（至少一个操作）", draft
@@ -411,7 +427,11 @@ class AgentLoop:
             if issues:
                 return "修改未通过物理校验：" + "；".join(issues), draft
             draft = next_draft
-            return f"已应用修改，新搭配：{_outfit_text(draft.outfit)}", draft
+            return (
+                f"已应用修改，新搭配：{_outfit_text(draft.outfit)}。"
+                "若此修改已满足用户目标，请直接 finish 提交，不要在已改好的单品上继续更换。",
+                draft,
+            )
         if step.action == "check_environment":
             result = self.environment.check_environment(draft)
             if result.valid:
