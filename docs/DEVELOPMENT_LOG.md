@@ -676,3 +676,22 @@ LLM 证据（`llm/memory_schema.py` / `memory_prompts.py` / `services/memory_ext
 - 修复（`tools/extension_analysis.py`）：当 `pool.feasibility` 非 `NEEDS_CLARIFICATION` 且 spec 含 `anaphoric_reference` 时，用 `spec.model_copy(update={"unresolved_fields": [...]})` 生成 effective spec 再 dump，resolved subject 不再双重状态。
 - 回归：`test_prefer_color_gap_reported_pink_not_must_relaxed`（pink 缺口显式报告 + MUST_NOT 帽子全 level 生效）、`test_resolved_anaphor_not_kept_as_effective_unresolved`（effective spec 移除 anaphor + replaced=coat）；`test_relaxation.py` 的 level 断言随重编号更新（minimal 1→2、2→3）。
 - 全量回归 **542 passed**（540 + 新增 2）、Ruff clean。
+
+### 17.6 PR4A：Agent 2 结构化决策（五类，不动 Critic / Router）（同日）
+
+按用户指示只改 Agent 2：让它消费 `RequestSpec + CandidatePool + FeasibilityReport`，输出结构化决策 `EXACT_MATCH / RELAX_PREFERENCE / RETRIEVE_MORE / ASK_USER / WARDROBE_GAP`。设计原则与用户此前敲定的方向一致——**LLM 决定内容、确定性程序执行分类**：决策是对可行性事实的分类（事实可查、与衣橱/意图无关的立场问题），绝不让 LLM 猜测。
+
+新增 `core/decision.py`（纯函数，无 DB / LLM）：
+
+- `DecisionType` 枚举（5 值）+ `Agent2Decision`（decision / rationale / relaxed_prefers / unmet_must / relaxed_must / clarification_reason）+ `Agent2DecisionFacts`（feasibility + relaxation_plan）。
+- `derive_decision(facts)` 基于**分解事实**而非粗 status：`unsatisfied_hard`（plan 里 `option.unmet`＝任一放宽层级都无候选）→ `WARDROBE_GAP`（`unmet_must` 带出缺口）；`relaxed_must`（`minimal_level≥2`，MUST 色放弃 / 品类拓宽到槽位才解锁）→ `RETRIEVE_MORE`（**MUST 任何维度**：颜色/品类/槽位都不自动放宽，需更宽检索或用户确认）；`unsatisfied_soft`（EXACT 下 `unmet_prefer_colors`）→ `RELAX_PREFERENCE`（只放弃 PREFER 色，`relaxed_prefers` 列出）；未解析指代 → `ASK_USER`；否则 `EXACT_MATCH`。**MUST / MUST_NOT / LOCK 一律不因决策自动放宽**。
+  - 关键点：`要发夹`但无发夹、只有同槽位耳环时，coarse status 是 UNSATISFIABLE，但 plan L3 仍有候选——此时应判 **RETRIEVE_MORE（覆盖存在、只是无 exact）** 而非 WARDROBE_GAP，故决策必须读 plan 而非只看 status。
+- `derive_decision_from_facts(facts)`：只读 `feasibility_report.state + relaxation_plan`（本就在 facts 里），**不 dump 整个候选池**（token 安全）；非 structured 模式或缺数据返回 `None`（不臆造）。
+
+接线（只动 Agent 2 链，Critic / Router 未触碰）：
+
+- `models/agent_tasks.py`：`Agent2TaskOutput` 新增 `decision: Agent2Decision | None = None`。
+- `llm/extension_prompts.py`：新增 `agent2_llm_schema()`（从 LLM 可见 schema 剔除 `decision`，保证 JSON-mode 约束与提示词一致）+ `_decision_guidance(decision)`（每种决策的硬性行为规则，RETRIEVE_MORE 明确"颜色/品类/槽位任何 MUST 维度放宽都要用户确认"）；`build_extension_agent2_prompt` 注入决策块。
+- `agents/composer.py`：`run_extension` 先 `derive_decision_from_facts(agent1_output.facts)`，注入 prompt，`chat_json` 用 `agent2_llm_schema()`，校验后把确定性 decision 挂回 output（覆盖 LLM 任何臆测值）。
+
+验收 case「不要帽子，要粉色系发夹 + 衣橱无粉色发夹」：`derive_decision` 得 **RELAX_PREFERENCE**、`relaxed_prefers=["pink"]`、hairwear MUST 仍 exact（候选 gold_clip）、帽子全 level 排除——只放松 pink、不放松 hairwear。测试 `tests/test_decision.py` 新增 9 例（五类决策 + MUST 色/品类两路 RETRIEVE_MORE + facts 还原 + composer 端到端：LLM schema/prompt 无 decision、输出带确定性 RELAX_PREFERENCE）。全量回归 **551 passed**（542 + 9）、Ruff clean。

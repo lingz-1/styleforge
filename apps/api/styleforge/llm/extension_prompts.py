@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from styleforge.core.decision import Agent2Decision, DecisionType
 from styleforge.models.agent_tasks import (
     Agent1TaskOutput,
     Agent2TaskOutput,
@@ -20,8 +21,11 @@ EXTENSION_PROMPT_VERSION = "extension-three-agent-v3.2"
 
 TASK_COMPLETION_RULES: dict[TaskType, str] = {
     TaskType.OUTFIT_MODIFY: (
-        "completed 时 alternatives 至少一套；每套必须包含所有 locked_item_ids，"
-        "移除 replaced_item_ids，且只使用 replacement_item_ids 替换目标槽位；"
+        "completed 时 alternatives 至少一套；result 的 locked_item_ids 与 "
+        "replaced_item_ids 由系统按 Agent 1 facts 自动回填，你无需填写这两项；"
+        "每套备选方案的 item_ids 必须原样包含 Agent 1 facts.locked_item_ids 中"
+        "的全部锁定单品（锁定单品绝不丢弃或替换），移除 facts.replaced_item_ids，"
+        "且只使用 facts.replacement_item_ids 替换目标槽位；"
         "优先依据 Agent 1 facts.candidate_item_texts（含单品名称与类型）挑选替换单品，"
         "用户指名具体单品或类型时（如\"帽子\"），必须选名称/类型匹配该词的候选，"
         "不得用同槽位的其他单品替代。"
@@ -80,6 +84,60 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
 
 
+def agent2_llm_schema() -> dict[str, Any]:
+    """Agent2TaskOutput schema as the LLM may fill it.
+
+    PR4A: ``decision`` is derived deterministically from the feasibility facts
+    and is excluded here so the LLM never guesses it -- the composer attaches
+    the decision after validation, overriding anything the model tried to write.
+    Both the prompt text and the ``chat_json(json_schema=...)`` argument use
+    this, so the JSON-mode constraint agrees with what the model was told.
+    """
+    schema = Agent2TaskOutput.model_json_schema()
+    schema.get("properties", {}).pop("decision", None)
+    schema.get("$defs", {}).pop("Agent2Decision", None)
+    return schema
+
+
+def _decision_guidance(decision: Agent2Decision) -> str:
+    """How Agent 2 must behave given the deterministic decision."""
+    decision_type = decision.decision
+    if decision_type is DecisionType.ASK_USER:
+        return (
+            f"决策：ASK_USER（{decision.rationale}）\n"
+            "Agent 1 需要澄清。必须输出 status=needs_clarification，"
+            "并在 summary 中用一句自然语言向用户提出澄清问题。不要组合方案。"
+        )
+    if decision_type is DecisionType.WARDROBE_GAP:
+        return (
+            f"决策：WARDROBE_GAP（{decision.rationale}）\n"
+            f"无法满足的 MUST 目标：{decision.unmet_must or '无'}。\n"
+            "必须输出 status=infeasible，并在 summary 中如实说明缺口"
+            "（缺失哪类单品、为何无法满足），不得用其他品类顶替硬目标，也不得虚构候选。"
+        )
+    if decision_type is DecisionType.RETRIEVE_MORE:
+        relaxed_must = decision.relaxed_must or ["（见决策）"]
+        return (
+            f"决策：RETRIEVE_MORE（{decision.rationale}）\n"
+            f"精确条件无法满足的 MUST 目标：{'、'.join(relaxed_must)}。\n"
+            "MUST/MUST_NOT/LOCK 都是硬条件，绝不能像偏好一样自行放宽——"
+            "无论颜色、品类还是槽位，任何 MUST 维度的放宽都必须由用户确认。"
+            "请优先使用现有候选中最接近的单品尽力组合，并在 summary 中如实说明"
+            "当前只能近似满足；若用户明确接受放宽再落实替换。"
+        )
+    if decision_type is DecisionType.RELAX_PREFERENCE:
+        return (
+            f"决策：RELAX_PREFERENCE（{decision.rationale}）\n"
+            f"你被允许放弃的偏好色（仅这些）：{decision.relaxed_prefers or '无'}。\n"
+            "你可以选择不含这些偏好色的候选中方案；但 MUST/MUST_NOT/LOCK 目标必须保持精确满足，"
+            "绝不放宽或替换成其他品类（例如必须给发夹，就不许换成其他配饰或移除）。"
+        )
+    return (
+        f"决策：EXACT_MATCH（{decision.rationale}）\n"
+        "当前候选精确满足所有硬条件与偏好，按常规完成组合，不需要放宽任何条件。"
+    )
+
+
 def build_extension_agent1_prompt(
     *,
     request: str,
@@ -112,6 +170,7 @@ def build_extension_agent2_prompt(
     agent1_output: Agent1TaskOutput,
     critic_feedback: str = "",
     repair_feedback: str = "",
+    decision: Agent2Decision | None = None,
 ) -> tuple[str, str]:
     task_type = agent1_output.task_type
     result_model = RESULT_MODELS[task_type]
@@ -140,6 +199,12 @@ def build_extension_agent2_prompt(
             "\n- 每套单品只能从 Agent 1 candidate_item_ids 中选择，不得重复同一单品，"
             "也不得从其他任务复用与当前请求无关的单品。"
         )
+    decision_block = (
+        f"\n【当前决策（由可行性事实确定性推导，你不得擅自改变）】\n"
+        f"{_json(decision.model_dump(mode='json'))}\n{_decision_guidance(decision)}\n"
+        if decision
+        else ""
+    )
     user = (
         f"提示词版本：{EXTENSION_PROMPT_VERSION}\n"
         f"任务类型：{task_type.value}\n"
@@ -149,10 +214,11 @@ def build_extension_agent2_prompt(
         f"当前任务完成条件：{completion_rule_for(agent1_output)}\n"
         f"Agent 3 上轮反馈：{critic_feedback or '无，这是首次生成'}\n"
         f"结构修复反馈：{repair_feedback or '无'}\n"
+        f"{decision_block}"
         "顶层必须符合 Agent2TaskOutput；result.status 必须与顶层 status 一致。"
         "used_item_ids 列出 result 实际引用的全部衣橱 ID，"
         "evidence_source_ids 列出使用的证据 source_id。\n"
-        f"顶层 Schema：\n{_json(Agent2TaskOutput.model_json_schema())}\n"
+        f"顶层 Schema：\n{_json(agent2_llm_schema())}\n"
         f"result Schema：\n{_json(result_model.model_json_schema())}"
     )
     return system, user

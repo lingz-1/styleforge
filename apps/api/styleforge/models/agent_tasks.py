@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from styleforge.core.decision import Agent2Decision
 from styleforge.models.context import KnowledgeEvidence
 from styleforge.orchestration.task_router import TaskType
 
@@ -50,6 +51,11 @@ class Agent2TaskOutput(BaseModel):
     result: dict[str, Any]
     used_item_ids: list[str] = Field(default_factory=list)
     evidence_source_ids: list[str] = Field(default_factory=list)
+    # PR4A: deterministic decision (EXACT_MATCH / RELAX_PREFERENCE / RETRIEVE_MORE
+    # / ASK_USER / WARDROBE_GAP) derived from the CandidatePool + relaxation plan.
+    # Set by the composer from the feasibility facts; the LLM never fills it (it
+    # is excluded from the LLM-facing JSON schema).
+    decision: Agent2Decision | None = None
 
 
 class ExtensionReview(BaseModel):

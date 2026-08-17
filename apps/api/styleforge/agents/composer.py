@@ -13,9 +13,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from styleforge.core.decision import derive_decision_from_facts
 from styleforge.core.schemas import CatalogItem, TaskSpec
 from styleforge.llm.extension_prompts import (
     EXTENSION_PROMPT_VERSION,
+    agent2_llm_schema,
     build_extension_agent2_prompt,
 )
 from styleforge.llm.client import LlmCallDiagnostics, LlmInvalidJson, LlmSchemaViolation, LlmUnavailable
@@ -30,6 +32,7 @@ from styleforge.llm.schema import (
 from styleforge.models.agent_tasks import Agent1TaskOutput, Agent2TaskOutput
 from styleforge.models.context import ContextPack
 from styleforge.models.task_results import validate_task_result
+from styleforge.orchestration.task_router import TaskType
 from styleforge.tools.candidate_generation import generate_candidates, select_diverse_candidates
 from styleforge.tools.extension_validation import sanitize_extension_references
 
@@ -132,6 +135,10 @@ class ComposerAgent:
         if llm is None:
             raise LlmUnavailable("extension Agent 2 requires a configured LLM client")
         repair = repair_feedback or ""
+        # PR4A: the decision is a factual classification of the feasibility
+        # facts, derived here so the prompt can carry it and the output can
+        # carry it -- never guessed by the LLM.
+        decision = derive_decision_from_facts(agent1_output.facts)
         call_diagnostics: list[LlmCallDiagnostics] = []
         for attempt in range(2):
             system, user = build_extension_agent2_prompt(
@@ -140,11 +147,12 @@ class ComposerAgent:
                 agent1_output=agent1_output,
                 critic_feedback=critic_feedback,
                 repair_feedback=repair,
+                decision=decision,
             )
             payload, diagnostics = llm.chat_json(
                 system=system,
                 user=user,
-                json_schema=Agent2TaskOutput.model_json_schema(),
+                json_schema=agent2_llm_schema(),
             )
             call_diagnostics.append(diagnostics)
             try:
@@ -199,6 +207,29 @@ class ComposerAgent:
                 raise LlmSchemaViolation(
                     f"extension Agent 2 schema violation after repair: {error}"
                 ) from error
+        # Deterministic decision wins: even if the LLM echoed some value, the
+        # decision field is owned by the fact-derived classification.
+        if decision is not None:
+            output = output.model_copy(update={"decision": decision})
+        # The partition of the current outfit (locked vs replaced) is Agent 1's
+        # deterministic fact, never the LLM's to decide. Restore both from the
+        # facts so any deviation cannot trip the hard validator. Flexible
+        # rebuilds keep the LLM's own choice -- the flexible validator never
+        # compares these two fields.
+        if (
+            output.task_type is TaskType.OUTFIT_MODIFY
+            and (agent1_output.facts or {}).get("adjustment_mode") != "flexible"
+        ):
+            facts = agent1_output.facts or {}
+            restored = validate_task_result(
+                output.task_type,
+                {
+                    **output.result,
+                    "locked_item_ids": list(facts.get("locked_item_ids", [])),
+                    "replaced_item_ids": list(facts.get("replaced_item_ids", [])),
+                },
+            )
+            output = output.model_copy(update={"result": restored})
         return output, {
             "degraded": False,
             "prompt_version": EXTENSION_PROMPT_VERSION,
