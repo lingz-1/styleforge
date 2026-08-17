@@ -238,6 +238,23 @@ def test_modify_outfit_add_conflict_is_rejected_and_draft_untouched(seeded_conn:
     assert draft.outfit.item_ids == before_ids  # untouched
 
 
+def test_modify_outfit_add_without_placement_is_filled_from_structure(seeded_conn: Any) -> None:
+    # A real model may omit placement entirely. The environment derives region
+    # from the garment type and layer from its effective (lowest) layer.
+    env, draft = _draft_from_active(seeded_conn)
+    plan = ModifyPlan(
+        ops=[
+            ModifyOp(action="add", item_id="sneakers_d"),
+            ModifyOp(action="remove", item_id="boots_c"),
+        ]
+    )
+    next_draft, issues = env.modify_outfit(draft, plan)
+    assert issues == []
+    assert next_draft is not None
+    assert "sneakers_d" in next_draft.outfit.item_ids
+    assert next_draft.layers["sneakers_d"] is GarmentLayer.base  # feet garment
+
+
 def test_modify_outfit_add_accessory_is_legal(seeded_conn: Any) -> None:
     env, draft = _draft_from_active(seeded_conn)
     plan = ModifyPlan(

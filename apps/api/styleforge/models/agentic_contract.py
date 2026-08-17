@@ -164,9 +164,16 @@ class GarmentStructure(BaseModel):
 
 class Placement(BaseModel):
     """Where the Agent wants a garment worn. The Agent decides; the program
-    only verifies the garment allows it and nothing conflicts."""
-    region: BodyRegion
-    layer: GarmentLayer
+    only verifies the garment allows it and nothing conflicts.
+
+    Both fields are optional: the region is a *structural fact* the program
+    derives from the garment type, and the layer falls back to the garment's
+    effective (lowest) layer. A real model may omit either — the environment
+    fills the gaps deterministically. A *wrong* explicit value is still
+    rejected by ``placement_error``.
+    """
+    region: BodyRegion | None = None
+    layer: GarmentLayer | None = None
 
 
 # ── Modify (transactional) ─────────────────────────────────────────

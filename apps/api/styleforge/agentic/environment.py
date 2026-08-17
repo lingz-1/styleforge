@@ -27,6 +27,7 @@ from styleforge.models.agentic_contract import (
     ModifyOutcome,
     ModifyPlan,
     OutfitSnapshot,
+    Placement,
     WardrobeSearchResult,
 )
 from styleforge.models.context import ContextPack
@@ -36,6 +37,7 @@ from styleforge.repositories.catalog_repository import fetch_items_by_ids
 from styleforge.agentic.structure import (
     PlacedItem,
     check_structure,
+    effective_layer,
     placement_error,
     structure_for,
 )
@@ -291,6 +293,41 @@ class Environment:
             query=query,
         )
 
+    def _resolve_placement(
+        self,
+        snapshot: ItemSnapshot,
+        placement: Placement | None,
+    ) -> tuple[Placement | None, str | None]:
+        """Fill missing region/layer from the garment's structure facts.
+
+        The region is a structural fact (the garment's allowed region) and the
+        layer falls back to the garment's effective (lowest) layer; the Agent's
+        explicit values win when present. A *wrong* explicit value is still a
+        physical error. Returns (placement, None) when resolved, else
+        (None, issue).
+        """
+        if snapshot.structure is None:
+            if placement is None or placement.region is None:
+                return None, "未知物理结构且未显式指定 placement"
+            # UNKNOWN type with an explicit placement: verify it verbatim.
+            error = placement_error(None, placement)
+            return (placement, None) if error is None else (None, error)
+        region = (
+            placement.region
+            if placement is not None and placement.region is not None
+            else snapshot.structure.allowed_region
+        )
+        layer = (
+            placement.layer
+            if placement is not None and placement.layer is not None
+            else effective_layer(snapshot.structure)
+        )
+        resolved = Placement(region=region, layer=layer)
+        error = placement_error(snapshot.structure, resolved)
+        if error is not None:
+            return None, error
+        return resolved, None
+
     def modify_outfit(
         self,
         draft: Draft,
@@ -322,11 +359,11 @@ class Environment:
                 snapshot = self._snapshot_for(op.item_id)
                 if snapshot is None:
                     return None, [f"无法添加 {op.item_id}：衣橱中不存在该单品"]
-                if op.placement is not None:
-                    error = placement_error(snapshot.structure, op.placement)
-                    if error is not None:
-                        return None, [f"单品 {op.item_id}：{error}"]
-                    layers[op.item_id] = op.placement.layer
+                resolved, issue = self._resolve_placement(snapshot, op.placement)
+                if issue is not None:
+                    return None, [f"单品 {op.item_id}：{issue}"]
+                assert resolved is not None
+                layers[op.item_id] = resolved.layer
                 item_ids.append(op.item_id)
                 items.append(snapshot)
             elif op.action == "replace":
@@ -338,11 +375,11 @@ class Environment:
                 snapshot = self._snapshot_for(replacement)
                 if snapshot is None:
                     return None, [f"无法替换为 {replacement}：衣橱中不存在该单品"]
-                if op.placement is not None:
-                    error = placement_error(snapshot.structure, op.placement)
-                    if error is not None:
-                        return None, [f"替换单品 {replacement}：{error}"]
-                    layers[replacement] = op.placement.layer
+                resolved, issue = self._resolve_placement(snapshot, op.placement)
+                if issue is not None:
+                    return None, [f"替换单品 {replacement}：{issue}"]
+                assert resolved is not None
+                layers[replacement] = resolved.layer
                 item_ids = [replacement if item_id == op.item_id else item_id for item_id in item_ids]
                 items = [item for item in items if item.item_id != op.item_id]
                 items.append(snapshot)

@@ -40,6 +40,7 @@ def _item_snapshot(item: Any) -> ItemSnapshot:
 WARDROBE = [
     make_item("shirt_a", "top", "White shirt", "white"),
     make_item("pants_b", "pants", "Black trousers", "black"),
+    make_item("skirt_c", "skirt", "Blue skirt", "blue"),
     make_item("boots_c", "shoes", "Brown boots", "brown"),
     make_item("sneakers_d", "shoes", "White sneakers", "white"),
     make_item("coat_e", "outwear", "Gray coat", "gray"),
@@ -215,6 +216,185 @@ def test_timeout_bounded_loop() -> None:
     assert outcome["status"] == "timeout"
     assert len(outcome["steps"]) == 3
     assert all(step["action"] == "search_wardrobe" for step in outcome["steps"])
+
+
+def test_repeated_identical_action_is_flagged() -> None:
+    # C4 regressed: with no active outfit the model re-inspected "active" 8×
+    # and timed out instead of asking. The program must surface the stall so
+    # the model changes strategy.
+    llm = ScriptedExtensionLlm(
+        [_step("inspect_outfit", outfit_id="active") for _ in range(4)]
+        + [_step("ask_user", question="要修改哪一套？")]
+    )
+    outcome = AgentLoop(llm, _env(), "鞋换一下").run()
+
+    assert outcome["status"] == "ask_user"
+    flagged = [s for s in outcome["steps"] if "连续 3 步执行相同操作" in s["observation"]]
+    assert len(flagged) >= 1
+
+
+def test_inspect_active_returns_current_draft() -> None:
+    # A real model says outfit_id="active" to mean "the outfit I am editing".
+    # The dispatcher must return the *draft* (post-modification), not look up a
+    # stored id — C2 in the real smoke stalled on "未找到搭配 active".
+    llm = ScriptedExtensionLlm(
+        [
+            _step(
+                "modify_outfit",
+                plan=_modify_plan(
+                    action="replace",
+                    item_id="boots_c",
+                    replacement_item_id="sneakers_d",
+                    placement={"region": "feet", "layer": "base"},
+                ),
+            ),
+            _step("inspect_outfit", outfit_id="active"),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env(), "换双鞋").run()
+
+    assert outcome["status"] == "success"
+    inspect_steps = [s for s in outcome["steps"] if s["action"] == "inspect_outfit"]
+    assert len(inspect_steps) == 1
+    assert "正在编辑" in inspect_steps[0]["observation"]
+    assert "sneakers_d" in inspect_steps[0]["observation"]  # the draft, not o1
+
+
+def test_natural_language_placement_is_normalised_to_enums() -> None:
+    # A real model says region="legs", layer="bottom" instead of the ontology
+    # values. The program translates the aliases deterministically before the
+    # plan is validated and executed.
+    llm = ScriptedExtensionLlm(
+        [
+            _step(
+                "modify_outfit",
+                plan={
+                    "ops": [
+                        {
+                            "action": "replace",
+                            "item_id": "pants_b",
+                            "replacement_item_id": "skirt_c",
+                            "placement": {"region": "legs", "layer": "bottom"},
+                        }
+                    ],
+                    "reasoning": "换裙子",
+                },
+            ),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env(), "把裤子换成裙子").run()
+
+    assert outcome["status"] == "success"
+    assert outcome["candidate"]["item_ids"] == ["shirt_a", "skirt_c", "boots_c"]
+
+
+def test_blank_placement_fields_drop_to_structure() -> None:
+    # The prompt tells the model it may leave a field blank; a real model then
+    # emits layer="" (empty string, not null). "" means "not provided" — the
+    # environment fills it from the garment's structure. Third smoke crash.
+    llm = ScriptedExtensionLlm(
+        [
+            _step(
+                "modify_outfit",
+                plan={
+                    "ops": [
+                        {
+                            "action": "replace",
+                            "item_id": "boots_c",
+                            "replacement_item_id": "sneakers_d",
+                            "placement": {"region": "", "layer": ""},
+                        }
+                    ],
+                    "reasoning": "换双运动鞋",
+                },
+            ),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env(), "鞋换双运动鞋").run()
+
+    assert outcome["status"] == "success"
+    assert outcome["candidate"]["item_ids"] == ["shirt_a", "pants_b", "sneakers_d"]
+
+
+def test_item_type_word_in_layer_slot_drops_to_structure() -> None:
+    # A real model wrote layer="shoes" (an item type) where the layer belongs.
+    # The layer is a decision, so the program drops it and the environment
+    # derives the garment's effective layer — the second smoke crash in C2.
+    llm = ScriptedExtensionLlm(
+        [
+            _step(
+                "modify_outfit",
+                plan={
+                    "ops": [
+                        {
+                            "action": "replace",
+                            "item_id": "boots_c",
+                            "replacement_item_id": "sneakers_d",
+                            "placement": {"region": "feet", "layer": "shoes"},
+                        }
+                    ],
+                    "reasoning": "换双运动鞋",
+                },
+            ),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env(), "鞋换双运动鞋").run()
+
+    assert outcome["status"] == "success"
+    assert outcome["candidate"]["item_ids"] == ["shirt_a", "pants_b", "sneakers_d"]
+
+
+def test_item_type_word_as_region_is_normalised() -> None:
+    # A real model writes region="shoes" (the item type) instead of the body
+    # region "feet", and omits the layer. Both are translated deterministically.
+    llm = ScriptedExtensionLlm(
+        [
+            _step(
+                "modify_outfit",
+                plan={
+                    "ops": [
+                        {
+                            "action": "replace",
+                            "item_id": "boots_c",
+                            "replacement_item_id": "sneakers_d",
+                            "placement": {"region": "shoes"},
+                        }
+                    ],
+                    "reasoning": "换双运动鞋",
+                },
+            ),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env(), "鞋换双运动鞋").run()
+
+    assert outcome["status"] == "success"
+    assert outcome["candidate"]["item_ids"] == ["shirt_a", "pants_b", "sneakers_d"]
+
+
+def test_null_optional_fields_from_real_model_are_tolerated() -> None:
+    # A real JSON-mode model fills unused fields with null rather than omitting
+    # them. The dispatcher must normalise None -> "" at the tool boundary.
+    llm = ScriptedExtensionLlm(
+        [
+            _step("search_wardrobe", query="boots", outfit_id=None, question=None),
+            _step("finish", outfit_id=None, question=None),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env(), "换双鞋").run()
+
+    assert outcome["status"] == "success"
+    assert any(step["action"] == "search_wardrobe" for step in outcome["steps"])
 
 
 def test_intent_is_carried_from_first_decision() -> None:
