@@ -150,10 +150,14 @@ class MultiTaskWorkflow:
         # primary with the agent loop alongside. Defaults to the
         # STYLEFORGE_MODIFY_MODE env flag.
         modify_mode: str | None = None,
+        # Web search for the agentic ``search_web`` tool. None degrades the
+        # tool to an "unconfigured" observation; the loop keeps working.
+        web_search_provider: Any | None = None,
     ) -> None:
         self.database_path = database_path
         self.knowledge_root = knowledge_root.resolve()
         self.llm_client = llm_client
+        self.web_search_provider = web_search_provider
         self.recommendation_runner = recommendation_runner
         self.router = TaskRouter()
         self.context_builder = ContextPackBuilder(self.database_path)
@@ -182,6 +186,7 @@ class MultiTaskWorkflow:
             database_path,
             llm_client,
             enabled=self.agentic_shadow_enabled,
+            web_search_provider=self.web_search_provider,
         )
 
     def _build_graph(self):
@@ -789,7 +794,11 @@ class MultiTaskWorkflow:
                         connection, sub_input, initial_context, wardrobe_items
                     )
                     environment = Environment(
-                        connection, wardrobe_items, facts, search_limit=12
+                        connection,
+                        wardrobe_items,
+                        facts,
+                        search_limit=12,
+                        web_search_provider=self.web_search_provider,
                     )
                     loop = AgentLoop(
                         self.llm_client,

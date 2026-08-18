@@ -12,6 +12,7 @@ environment's wardrobe is fully resolved from in-memory items).
 from __future__ import annotations
 
 from typing import Any
+from urllib.request import Request
 
 from styleforge.agentic.agent import AgentLoop, LoopConfig
 from styleforge.agentic.environment import Environment
@@ -22,6 +23,7 @@ from styleforge.models.agentic_contract import (
     ItemSnapshot,
     OutfitSnapshot,
 )
+from styleforge.tools.web_search import TavilySearchProvider
 
 from tests.extension_llm import ScriptedExtensionLlm
 from tests.helpers import make_item
@@ -121,7 +123,13 @@ def test_trace_never_leaks_raw_thought() -> None:
 
     assert outcome["status"] == "success"
     for step in outcome["steps"]:
-        assert set(step.keys()) == {"step", "action", "args", "observation"}
+        assert set(step.keys()) == {
+            "step",
+            "action",
+            "args",
+            "observation",
+            "external_context_decision",
+        }
         assert "thought" not in str(step)
 
 
@@ -420,3 +428,170 @@ def test_intent_is_carried_from_first_decision() -> None:
     assert outcome["status"] == "success"
     assert outcome["intent"]["goal"] == "把靴子换成更轻便的运动鞋"
     assert outcome["intent"]["requirements"] == ["不要高跟", "浅色优先"]
+
+
+# ── search_web (web search beyond the wardrobe) ──────────────────────
+
+
+def _env_with_web(provider: Any) -> Environment:
+    active_ids = ["shirt_a", "pants_b", "boots_c"]
+    by_id = {item.item_id: item for item in WARDROBE}
+    active_items = [_item_snapshot(by_id[item_id]) for item_id in active_ids]
+    facts = EnvironmentFacts(
+        interaction=InteractionContext(active_outfit_id="o1"),
+        active_outfit=OutfitSnapshot(
+            outfit_id="o1",
+            item_ids=list(active_ids),
+            items=active_items,
+        ),
+        wardrobe_summary={},
+    )
+    return Environment(
+        connection=None,
+        wardrobe_items=WARDROBE,
+        facts=facts,
+        web_search_provider=provider,
+    )
+
+
+def _web_hits() -> dict[str, Any]:
+    return {
+        "results": [
+            {
+                "title": "商务晚宴着装指南",
+                "content": "正式场合建议西装皮鞋，避免运动鞋",
+                "url": "https://style.example/1",
+            },
+            {
+                "title": "海边度假穿搭",
+                "content": "速干短裤加凉鞋",
+                "url": "https://style.example/2",
+            },
+        ]
+    }
+
+
+def _web_provider() -> TavilySearchProvider:
+    def _transport(request: Request, timeout: float) -> dict[str, Any]:
+        return _web_hits()
+
+    return TavilySearchProvider(api_key="tvly-test", transport=_transport)
+
+
+def test_search_web_observation_enters_steps() -> None:
+    # A successful web search lands its formatted observation in the trace, so
+    # the user can see what external knowledge the Agent consulted.
+    llm = ScriptedExtensionLlm(
+        [
+            _step("search_web", query="商务晚宴着装"),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env_with_web(_web_provider()), "帮我看看晚宴穿什么").run()
+
+    assert outcome["status"] == "success"
+    web_steps = [s for s in outcome["steps"] if s["action"] == "search_web"]
+    assert len(web_steps) == 1
+    assert "商务晚宴着装指南" in web_steps[0]["observation"]
+    assert "仅供知识参考" in web_steps[0]["observation"]
+
+
+def test_search_web_then_modify_uses_wardrobe_id() -> None:
+    # Web results are knowledge references only: modify_outfit must still use
+    # ids from the wardrobe, never an id fabricated from search content.
+    llm = ScriptedExtensionLlm(
+        [
+            _step("search_web", query="正式场合穿什么"),
+            _step(
+                "modify_outfit",
+                plan=_modify_plan(
+                    action="replace",
+                    item_id="boots_c",
+                    replacement_item_id="sneakers_d",
+                    placement={"region": "feet", "layer": "base"},
+                ),
+            ),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env_with_web(_web_provider()), "换双鞋").run()
+
+    assert outcome["status"] == "success"
+    assert outcome["candidate"]["item_ids"] == ["shirt_a", "pants_b", "sneakers_d"]
+
+
+def test_search_web_no_key_degrades_without_raising() -> None:
+    # No provider (the default): search_web returns an "unconfigured" observation
+    # and the loop continues to a successful finish.
+    llm = ScriptedExtensionLlm(
+        [
+            _step("search_web", query="海边穿搭"),
+            _step(
+                "modify_outfit",
+                plan=_modify_plan(
+                    action="replace",
+                    item_id="boots_c",
+                    replacement_item_id="sneakers_d",
+                    placement={"region": "feet", "layer": "base"},
+                ),
+            ),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env(), "换双鞋").run()
+
+    assert outcome["status"] == "success"
+    web_steps = [s for s in outcome["steps"] if s["action"] == "search_web"]
+    assert len(web_steps) == 1
+    assert "未配置" in web_steps[0]["observation"]
+
+
+def test_external_context_decision_is_recorded_in_trace() -> None:
+    # The Agent's judgement on whether external facts were needed lands in the
+    # trace as lightweight advisory metadata (for tool-use appropriateness
+    # evaluation) — it never gates behaviour.
+    llm = ScriptedExtensionLlm(
+        [
+            _step(
+                "search_web",
+                query="北京茶博会活动穿什么",
+                external_context_decision={
+                    "needed": True,
+                    "reason": "茶博会的地点和形式可能影响穿搭",
+                },
+            ),
+            _step(
+                "modify_outfit",
+                plan=_modify_plan(
+                    action="replace",
+                    item_id="boots_c",
+                    replacement_item_id="sneakers_d",
+                    placement={"region": "feet", "layer": "base"},
+                ),
+                external_context_decision={
+                    "needed": False,
+                    "reason": "换鞋是已有穿搭的局部调整，无需外部事实",
+                },
+            ),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env_with_web(_web_provider()), "下周去茶博会，帮我换双鞋").run()
+
+    assert outcome["status"] == "success"
+    # Only executed tools enter the trace (finish is a commit action, not a
+    # step), so exactly two decisions are recorded here.
+    decisions = [s["external_context_decision"] for s in outcome["steps"]]
+    assert len(decisions) == 2
+    assert decisions[0] == {
+        "needed": True,
+        "reason": "茶博会的地点和形式可能影响穿搭",
+    }
+    assert decisions[1] == {
+        "needed": False,
+        "reason": "换鞋是已有穿搭的局部调整，无需外部事实",
+    }

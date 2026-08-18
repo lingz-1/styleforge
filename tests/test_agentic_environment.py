@@ -394,3 +394,41 @@ def test_check_environment_surfaces_unknown_structures(seeded_conn: Any) -> None
     result = env.check_environment(draft)
     assert result.valid is False
     assert any("cape_x" in issue for issue in result.issues)
+
+
+# ── search_web (web search beyond the wardrobe) ──────────────────────
+
+
+def test_search_web_without_provider_degrades(seeded_conn: Any) -> None:
+    # No provider is the default: the tool must not crash, it returns an
+    # "unconfigured" fact the Agent works around.
+    env, _ = _draft_from_active(seeded_conn)
+    result = env.search_web("海边度假穿什么")
+
+    assert result.available is False
+    assert "未配置" in result.error
+    assert result.results == []
+
+
+def test_search_web_delegates_to_provider(seeded_conn: Any) -> None:
+    from styleforge.models.agentic_contract import WebSearchHit, WebSearchResult
+
+    class StubProvider:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def search(self, query: str) -> WebSearchResult:
+            self.queries.append(query)
+            return WebSearchResult(
+                query=query,
+                results=[WebSearchHit(title="快干材质更适合海边", content="建议速干短裤", url="u")],
+            )
+
+    stub = StubProvider()
+    env, _ = _draft_from_active(seeded_conn)
+    env.web_search_provider = stub
+    result = env.search_web(" 海边度假穿什么 ")
+
+    assert stub.queries == ["海边度假穿什么"]  # trimmed at the boundary
+    assert result.available is True
+    assert result.results[0].title == "快干材质更适合海边"

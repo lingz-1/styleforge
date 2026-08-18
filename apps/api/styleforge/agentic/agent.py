@@ -24,6 +24,7 @@ from styleforge.models.agentic_contract import (
     OutfitSnapshot,
     ReviewResult,
     UserIntent,
+    WebSearchResult,
 )
 from styleforge.agentic.environment import Draft, Environment
 from styleforge.agentic.reviewer import review_outfit
@@ -101,6 +102,15 @@ SYSTEM_PROMPT = """\
 - search_wardrobe {query}：在用户衣橱中搜索单品。结果有数量上限；空结果不代表衣柜里没有，可以换一个表达再搜。
   注意：衣橱单品名称/描述是英文（如 sneakers、denim jacket、jeans），中文关键词通常搜不到。
   搜索时应同时尝试中英文表达（先中文直觉词，若未找到就换英文词或中英混合再搜）
+- search_web {query}：联网获取本地上下文无法可靠提供的外部事实，**服务于穿搭决策**：
+  根据搜索结果判断场合/演出/活动的性质、主题、氛围、场地与时效信息，推导怎样穿搭才符合主题。
+  不要把搜索当作“有没有着装规定”的查询：即使无明文 dress code，也要按活动主题给出有依据的搭配。
+  是否使用它是一项信息获取决策，不是场景分类规则。优先搜：请求依赖可能随时间/地点/具体活动变化的
+  外部事实（具体活动、展会、演出、赛事、节庆、商场、餐厅、景点等现实实体；近期/今天/下周等时效场景；
+  穿搭决策依赖活动性质、举办地点、室内/室外、活动安排等）。通常不必搜：单纯修改已有穿搭
+  （如“休闲一点”“换双鞋”“不要红色”）、普通常识性风格判断、本地衣橱检索、环境已提供充分信息的场景。
+  原则：搜索结果可能实质改变你的搭配决策就搜；只是补充无关背景就不搜。结果仅作知识参考，不要用它
+  替代 search_wardrobe 找衣橱单品，也不要联网买单品
 - modify_outfit {plan}：修改当前穿搭。add/remove/replace 三种操作，可以一次提交多个。
   每步 placement 里 region 是身体部位（upper_body/lower_body/feet/full_body/accessory），
   layer 是层（base/mid/outer）；拿不准的字段可以留空，程序会按单品结构自动补全。
@@ -109,6 +119,12 @@ SYSTEM_PROMPT = """\
 - ask_user {question}：需要用户澄清时使用（例如用户要求明确，但衣柜里确实没有满足条件的单品）
 - finish：修改已满足用户目标时使用。提交后程序会自动做物理与风格审核；审核未通过会返回
   原因，你再针对性调整后重新 finish 即可（不是一次性判死，不必反复试探、过度修改）
+
+【认知边界】
+你的内部参数存储的是截至 2024 年之前的通用百科、文学、数理逻辑等知识。
+凡涉及线下实时发生的具体活动（首演、巡演、快闪）、具体穿搭攻略、当日具体政策等，都不在你的参数内。
+默认假设：当用户提到训练语料中未高频出现的专有名词组合（如“破冰话”+“舞剧”），一律视为未知新实体，
+必须 search_web 获取事实，不得凭内部知识推断其具体细节。
 
 操作纪律：
 1. 绝不编造单品 id。modify_outfit 里出现的 id 必须来自环境提供的衣橱 id 清单或
@@ -131,19 +147,46 @@ SYSTEM_PROMPT = """\
 8. 不要反复查看同一套而不行动：inspect_outfit 看过一次就记住内容；连续 2 次以上只
    查看或搜索而没有任何 modify_outfit / finish，属于空转，应立即决定行动（修改、
    finish 或 ask_user）。
+9. search_web 结果仅作知识参考，绝不把联网返回的商品/链接当作衣橱 item_id 使用；
+   modify_outfit 里的 id 必须来自环境提供的衣橱清单或 search_wardrobe 结果。
+   搜不到或用不上就改用衣橱搜索、ask_user 或自主决定，不要联网空转。
+
+【强制决策原则 - 判断是否需要 search_web 时，执行反事实压力测试】
+1. 该实体是通用词汇，还是“专有名词 + 特定时间/地点”的组合？
+2. 若我的回答缺少具体日期、票价、卡司、演出场馆的着装规定，用户是否会认为这是“正确的废话”？
+3. 满足以下任一条件，needed 必须为 true：
+   - 涉及任何具体的演出活动、展览、赛事（教科书经典案例除外）；
+   - 用户使用了“穿什么”“几点”“票价”等强时效性表述；
+   - 你无法在 3 秒内想出该活动的官方新闻稿标题。
+结论：宁滥勿缺。任何涉及特定线下活动的细节，默认 needed: true 并 search_web；
+搜到就用，搜不到（返回“未配置”或失败）就按衣橱现有单品自主判断继续，不联网空转。
+搜索后把事实转化为穿搭：识别活动性质/主题（如“禁毒题材硬汉舞剧”），据此推导符合主题的
+单品与风格，而不是只报告“有无 dress code”。
 
 每次只输出一个 JSON 对象：
 {
   "thought": "你的推理（不会展示给用户）",
   "goal": "最终目标（自然语言，一句话）",
   "requirements": ["用户的明确要求，逐条列出"],
-  "action": "inspect_outfit | search_wardrobe | modify_outfit | check_environment | ask_user | finish",
-  "query": "search_wardrobe 时填",
+  "action": "inspect_outfit | search_wardrobe | search_web | modify_outfit | check_environment | ask_user | finish",
+  "query": "search_wardrobe / search_web 时填",
   "outfit_id": "inspect_outfit 时填",
   "plan": {"ops": [{"action": "add|remove|replace", "item_id": "...", "replacement_item_id": "...", "placement": {"region": "...", "layer": "..."}}], "reasoning": "..."},
-  "question": "ask_user 时填"
+  "question": "ask_user 时填",
+  "external_context_decision": {"needed": true|false, "reason": "为何需要/不需要外部事实（一句话，仅作记录，不影响行动）"}
 }
 不要输出 JSON 以外的任何内容。"""
+
+
+class ExternalContextDecision(BaseModel):
+    """The Agent's recorded judgement on whether external facts were needed.
+
+    Lightweight advisory metadata for evaluating *tool-use appropriateness*
+    (was search_web worth calling, and why) — it never gates behaviour.
+    """
+
+    needed: bool = False
+    reason: str = ""
 
 
 class AgentStep(BaseModel):
@@ -160,6 +203,7 @@ class AgentStep(BaseModel):
     action: Literal[
         "inspect_outfit",
         "search_wardrobe",
+        "search_web",
         "modify_outfit",
         "check_environment",
         "ask_user",
@@ -169,6 +213,7 @@ class AgentStep(BaseModel):
     outfit_id: str | None = None
     plan: ModifyPlan | None = None
     question: str | None = None
+    external_context_decision: ExternalContextDecision | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -232,8 +277,32 @@ def _outfit_text(outfit: OutfitSnapshot | None) -> str:
     return "；".join(items) or "（空）"
 
 
+MAX_WEB_OBSERVATION_CHARS = 2000
+
+
+def _web_search_observation(result: WebSearchResult) -> str:
+    """Format a ``search_web`` result into one bounded observation line.
+
+    An unconfigured / failed / empty search is a fact the Agent works around
+    (switch to the wardrobe, ask the user, or decide on its own) — never an
+    error the loop must crash on.
+    """
+    if not result.available or result.error:
+        reason = result.error or "未配置"
+        return f"联网搜索未可用：{reason}。可改用衣橱搜索、ask_user 或自主决定。"
+    if not result.results:
+        return "联网搜索结果为空。可改用衣橱搜索、ask_user 或自主决定。"
+    lines = [f"{hit.title}：{hit.content}（{hit.url}）" for hit in result.results]
+    text = "联网搜索结果（仅供知识参考）：\n" + "\n".join(lines)
+    if result.answer:
+        text = f"联网搜索摘要：{result.answer}\n" + text
+    return text[:MAX_WEB_OBSERVATION_CHARS]
+
+
 def _args_for(step: AgentStep) -> dict[str, Any]:
     if step.action == "search_wardrobe":
+        return {"query": step.query or ""}
+    if step.action == "search_web":
         return {"query": step.query or ""}
     if step.action == "inspect_outfit":
         return {"outfit_id": step.outfit_id or ""}
@@ -329,6 +398,11 @@ class AgentLoop:
                     "action": step.action,
                     "args": _args_for(step),
                     "observation": observation,
+                    "external_context_decision": (
+                        step.external_context_decision.model_dump(mode="json")
+                        if step.external_context_decision
+                        else None
+                    ),
                 }
             )
         return self._outcome("timeout", draft, intent, steps, None, llm_calls)
@@ -420,6 +494,9 @@ class AgentLoop:
                 "衣橱单品名称/描述为英文，建议改英文关键词再试（如 sneakers、jeans）。",
                 draft,
             )
+        if step.action == "search_web":
+            result = self.environment.search_web(step.query or "")
+            return _web_search_observation(result), draft
         if step.action == "modify_outfit":
             if step.plan is None or not step.plan.ops:
                 return "modify_outfit 需要提供 plan（至少一个操作）", draft

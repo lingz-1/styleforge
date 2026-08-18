@@ -233,6 +233,31 @@ class WardrobeSearchResult(BaseModel):
     query: str = ""
 
 
+class WebSearchHit(BaseModel):
+    """One web search result. ``content`` is truncated inside the provider
+    (~200 chars) so a long page never bloats the Agent's context."""
+
+    title: str = ""
+    url: str = ""
+    content: str = ""
+
+
+class WebSearchResult(BaseModel):
+    """``search_web`` return. Never raises.
+
+    ``available=False`` means the search is unconfigured/disabled (graceful
+    degradation); a non-empty ``error`` means this call failed (network /
+    parse / API). Both are *facts* the Agent observes and works around — the
+    loop must never crash because the web is unreachable.
+    """
+
+    query: str = ""
+    results: list[WebSearchHit] = Field(default_factory=list)
+    answer: str = ""  # LLM summary, only when include_answer=True
+    error: str | None = None
+    available: bool = True
+
+
 class CheckEnvironmentResult(BaseModel):
     """``check_environment`` — pure deterministic structural legality.
 

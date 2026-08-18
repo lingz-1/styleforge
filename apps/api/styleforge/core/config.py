@@ -79,6 +79,13 @@ class Settings:
     vision_model: str = "gemini-2.5-flash"
     vision_timeout: float = 120.0
     vision_max_retries: int = 2
+    # Web search for the agentic loop (search_web / Tavily). Optional: without
+    # a key the tool degrades to an "unconfigured" observation and the loop
+    # keeps working.
+    tavily_api_key: str = ""
+    web_search_enabled: bool = True
+    web_search_timeout: float = 10.0
+    web_search_max_results: int = 5
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -118,6 +125,16 @@ class Settings:
             vision_max_retries = int(os.getenv("STYLEFORGE_VISION_MAX_RETRIES", "2"))
         except ValueError:
             vision_max_retries = 2
+        try:
+            web_search_timeout = float(os.getenv("STYLEFORGE_WEB_SEARCH_TIMEOUT", "10"))
+        except ValueError:
+            web_search_timeout = 10.0
+        try:
+            web_search_max_results = int(
+                os.getenv("STYLEFORGE_WEB_SEARCH_MAX_RESULTS", "5")
+            )
+        except ValueError:
+            web_search_max_results = 5
         return cls(
             metadata_path=Path(
                 os.getenv(
@@ -194,4 +211,10 @@ class Settings:
             vision_model=os.getenv("STYLEFORGE_VISION_MODEL", "gemini-2.5-flash").strip(),
             vision_timeout=vision_timeout,
             vision_max_retries=vision_max_retries,
+            tavily_api_key=os.getenv("TAVILY_API_KEY", "").strip(),
+            web_search_enabled=_optional_bool(
+                os.getenv("STYLEFORGE_WEB_SEARCH_ENABLED"), default=True
+            ),
+            web_search_timeout=web_search_timeout,
+            web_search_max_results=web_search_max_results,
         )

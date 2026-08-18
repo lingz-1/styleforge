@@ -278,3 +278,124 @@ def test_execute_agentic_primary_ask_user_not_committed(db_dsn: str) -> None:
     with database_session(db_dsn) as connection:
         rows = connection.execute("SELECT COUNT(*) AS n FROM candidate_outfits").fetchone()
     assert rows["n"] == 0
+
+
+def test_execute_agentic_primary_without_tavily_key_still_completes(db_dsn: str) -> None:
+    # No TAVILY_API_KEY configured (the default): search_web returns an
+    # "unconfigured" observation, the Agent proceeds with the wardrobe, and the
+    # primary chain still completes and commits the candidate.
+    initialize_database(db_dsn)
+    _seed(db_dsn)
+    llm = ScriptedExtensionLlm(
+        [
+            {
+                "thought": "先查一下海边穿搭建议",
+                "goal": "把皮鞋换成舒适的运动鞋",
+                "requirements": ["要舒适"],
+                "action": "search_web",
+                "query": "海边度假穿什么",
+                "outfit_id": "",
+                "plan": None,
+                "question": "",
+            },
+            {
+                "thought": "联网不可用，改用衣橱里的运动鞋",
+                "goal": "把皮鞋换成舒适的运动鞋",
+                "requirements": ["要舒适"],
+                "action": "modify_outfit",
+                "query": "",
+                "outfit_id": "",
+                "plan": {
+                    "ops": [
+                        {
+                            "action": "replace",
+                            "item_id": "shoes-1",
+                            "replacement_item_id": "sneakers-1",
+                            "placement": {"region": "feet", "layer": "base"},
+                        }
+                    ],
+                    "reasoning": "换运动鞋更舒适",
+                },
+                "question": "",
+            },
+            {
+                "thought": "完成",
+                "goal": "把皮鞋换成舒适的运动鞋",
+                "requirements": ["要舒适"],
+                "action": "finish",
+                "query": "",
+                "outfit_id": "",
+                "plan": None,
+                "question": "",
+            },
+            {"approved": True, "issues": [], "feedback": "已换成白色运动鞋"},  # reviewer
+            {"evidence": []},  # memory extraction
+        ]
+    )
+    workflow = _workflow(db_dsn, llm, modify_mode="agentic")
+
+    payload = workflow.execute(_modify_task())
+
+    assert payload["status"] == "completed"
+    # 3 agent steps + 1 reviewer call; memory extraction runs separately and is
+    # not part of the loop's llm_call_count.
+    assert payload["llm_call_count"] == 4
+    assert payload["agentic_outcome"]["status"] == "success"
+    web_steps = [
+        s for s in payload["agentic_outcome"]["steps"] if s["action"] == "search_web"
+    ]
+    assert len(web_steps) == 1
+    assert "未配置" in web_steps[0]["observation"]
+    assert payload["result"]["alternatives"][0]["item_ids"] == [
+        "top-1", "bottom-1", "coat-1", "sneakers-1",
+    ]
+    with database_session(db_dsn) as connection:
+        rows = connection.execute(
+            "SELECT outfit_id FROM candidate_outfits"
+        ).fetchall()
+    assert len(rows) == 1
+
+
+def test_execute_agentic_primary_web_degraded_then_ask_user(db_dsn: str) -> None:
+    # Web search degrades to an "unconfigured" observation; the Agent decides it
+    # needs clarification and suspends — the ask_user branch is unaffected.
+    initialize_database(db_dsn)
+    _seed(db_dsn)
+    llm = ScriptedExtensionLlm(
+        [
+            {
+                "thought": "查一下海边穿搭",
+                "goal": "换双皮鞋",
+                "requirements": [],
+                "action": "search_web",
+                "query": "海边度假穿什么",
+                "outfit_id": "",
+                "plan": None,
+                "question": "",
+            },
+            {
+                "thought": "联网不可用且衣橱里没有合适的皮鞋",
+                "goal": "换双皮鞋",
+                "requirements": [],
+                "action": "ask_user",
+                "query": "",
+                "outfit_id": "",
+                "plan": None,
+                "question": "衣橱里没有黑色皮鞋，换棕色短靴可以吗？",
+            },
+        ]
+    )
+    workflow = _workflow(db_dsn, llm, modify_mode="agentic")
+
+    payload = workflow.execute(_modify_task())
+
+    assert payload["status"] == "needs_clarification"
+    assert payload["agentic_outcome"]["status"] == "ask_user"
+    web_steps = [
+        s for s in payload["agentic_outcome"]["steps"] if s["action"] == "search_web"
+    ]
+    assert len(web_steps) == 1
+    assert "未配置" in web_steps[0]["observation"]
+    with database_session(db_dsn) as connection:
+        rows = connection.execute("SELECT COUNT(*) AS n FROM candidate_outfits").fetchone()
+    assert rows["n"] == 0

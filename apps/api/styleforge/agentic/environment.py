@@ -29,6 +29,7 @@ from styleforge.models.agentic_contract import (
     OutfitSnapshot,
     Placement,
     WardrobeSearchResult,
+    WebSearchResult,
 )
 from styleforge.models.context import ContextPack
 from styleforge.models.task import TaskExecutionInput
@@ -223,11 +224,13 @@ class Environment:
         facts: EnvironmentFacts,
         *,
         search_limit: int = 12,
+        web_search_provider: Any | None = None,
     ) -> None:
         self.connection = connection
         self.wardrobe_items = wardrobe_items
         self.facts = facts
         self.search_limit = search_limit
+        self.web_search_provider = web_search_provider
         self._wardrobe_by_id = {item.item_id: item for item in wardrobe_items}
 
     # --- helpers ---------------------------------------------------------
@@ -300,6 +303,17 @@ class Environment:
             matched=len(scored),
             query=query,
         )
+
+    def search_web(self, query: str) -> WebSearchResult:
+        """Web search for outfit / occasion / activity knowledge beyond the
+        wardrobe. Results are knowledge references only — never item ids.
+
+        An unconfigured provider degrades to an ``available=False`` fact; a
+        failed call carries an ``error``. Either way the Agent keeps working.
+        """
+        if self.web_search_provider is None:
+            return WebSearchResult(query=query, error="联网搜索未配置", available=False)
+        return self.web_search_provider.search((query or "").strip()[:200])
 
     def _resolve_placement(
         self,

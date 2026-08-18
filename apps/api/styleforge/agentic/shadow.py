@@ -40,11 +40,13 @@ class AgenticShadowRunner:
         *,
         enabled: bool | None = None,
         search_limit: int = 12,
+        web_search_provider: Any | None = None,
     ) -> None:
         self.database_path = database_path
         self.llm_client = llm_client
         self.enabled = enabled if enabled is not None else shadow_enabled()
         self.search_limit = search_limit
+        self.web_search_provider = web_search_provider
 
     def run(
         self,
@@ -64,6 +66,7 @@ class AgenticShadowRunner:
                     wardrobe_items,
                     facts,
                     search_limit=self.search_limit,
+                    web_search_provider=self.web_search_provider,
                 )
                 loop = AgentLoop(
                     self.llm_client,

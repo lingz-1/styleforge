@@ -29,6 +29,7 @@ from styleforge.tools.weather.schemas import (
     WeatherFacts,
     WeatherToolInput,
 )
+from styleforge.tools.web_search import TavilySearchProvider
 from styleforge.repositories.dataset_source_repository import (
     get_source_image_root,
     list_dataset_sources,
@@ -301,6 +302,13 @@ def get_multi_task_workflow() -> MultiTaskWorkflow:
         recommendation_runner=lambda **kwargs: workflow.recommend_payload(**kwargs),
         chroma_store=chroma[0] if chroma else None,
         text_embedder=chroma[1] if chroma else None,
+        # Always construct the provider (even without a key); degradation is
+        # concentrated in ``TavilySearchProvider.available``.
+        web_search_provider=TavilySearchProvider(
+            api_key=settings.tavily_api_key,
+            timeout=settings.web_search_timeout,
+            max_results=settings.web_search_max_results,
+        ),
     )
 
 
