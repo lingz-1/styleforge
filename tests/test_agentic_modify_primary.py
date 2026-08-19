@@ -113,9 +113,10 @@ def _ask_user_outcome() -> dict[str, Any]:
 
 
 def test_resolve_modify_mode_argument_wins_over_env(monkeypatch) -> None:
+    # The Stage-2 ``shadow`` chain is retired; it now falls back to ``agentic``.
     monkeypatch.setenv("STYLEFORGE_MODIFY_MODE", "legacy")
     assert _resolve_modify_mode("agentic") == "agentic"
-    assert _resolve_modify_mode("shadow") == "shadow"
+    assert _resolve_modify_mode("shadow") == "agentic"
     assert _resolve_modify_mode(None) == "legacy"
 
 

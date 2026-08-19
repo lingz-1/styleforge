@@ -12,7 +12,6 @@ from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from styleforge.agentic.agent import AgentLoop, LoopConfig
 from styleforge.agentic.context.grounding import GroundingResolver
 from styleforge.agentic.context.memory_context import PreferenceRetriever
 from styleforge.agentic.environment import (
@@ -22,7 +21,6 @@ from styleforge.agentic.environment import (
     resolve_active_outfit,
 )
 from styleforge.agentic.harness import StyleForgeHarness
-from styleforge.agentic.shadow import AgenticShadowRunner, shadow_enabled, shadow_exposed
 from styleforge.agentic.tools.local_tools import (
     CAP_KNOWLEDGE,
     CAP_SKILLS,
@@ -103,7 +101,7 @@ def is_follow_up(request: str) -> bool:
     return True
 
 
-_MODIFY_MODES = ("agentic", "legacy", "shadow")
+_MODIFY_MODES = ("agentic", "legacy")
 
 # Body regions the Agent writes in placement -> the legacy slot word the front
 # end shows (``target_slot``). Best-effort mapping only; empty when unknown.
@@ -119,11 +117,11 @@ _REGION_TO_SLOT = {
 def _resolve_modify_mode(modify_mode: str | None) -> str:
     """Resolve which OUTFIT_MODIFY chain is primary.
 
-    ``agentic`` (default) runs the Agent loop as the primary chain and skips the
-    legacy graph entirely; ``legacy`` keeps the old three-agent chain; ``shadow``
-    keeps the legacy chain primary with the agent loop as a non-committing
-    shadow. An explicit argument wins; otherwise the ``STYLEFORGE_MODIFY_MODE``
-    env flag is read; anything unrecognised falls back to ``agentic``.
+    ``agentic`` (default) runs the Multi-Agent Harness as the primary chain and
+    skips the legacy graph entirely; ``legacy`` keeps the old three-agent chain
+    (used by the extension tasks). An explicit argument wins; otherwise the
+    ``STYLEFORGE_MODIFY_MODE`` env flag is read; anything unrecognised falls
+    back to ``agentic``.
     """
     mode = (modify_mode or os.environ.get("STYLEFORGE_MODIFY_MODE", "")).strip().lower()
     return mode if mode in _MODIFY_MODES else "agentic"
@@ -185,17 +183,10 @@ class MultiTaskWorkflow:
         recommendation_runner: Callable[..., dict[str, Any]] | None = None,
         chroma_store: Any | None = None,
         text_embedder: Any | None = None,
-        # Stage 2 shadow mode. ``agentic_shadow`` runs the loop alongside the
-        # legacy path; ``expose_agentic_shadow`` additionally attaches the
-        # outcome to the API payload (tests / dev only). Both default to their
-        # env flags (AGENTIC_SHADOW / AGENTIC_SHADOW_EXPOSE).
-        agentic_shadow: bool | None = None,
-        expose_agentic_shadow: bool | None = None,
-        # Stage 4: which OUTFIT_MODIFY chain is primary. ``agentic`` (default)
-        # runs the Agent loop as the primary chain (legacy graph skipped);
-        # ``legacy`` keeps the old three-agent chain; ``shadow`` keeps legacy
-        # primary with the agent loop alongside. Defaults to the
-        # STYLEFORGE_MODIFY_MODE env flag.
+        # Which OUTFIT_MODIFY chain is primary. ``agentic`` (default) runs the
+        # Multi-Agent Harness as the primary chain (legacy graph skipped);
+        # ``legacy`` keeps the old three-agent chain for extension tasks.
+        # Defaults to the STYLEFORGE_MODIFY_MODE env flag.
         modify_mode: str | None = None,
         # Web search for the agentic ``search_web`` tool. None degrades the
         # tool to an "unconfigured" observation; the loop keeps working.
@@ -232,14 +223,6 @@ class MultiTaskWorkflow:
         )
         initialize_database(self.database_path)
         self.graph = self._build_graph()
-        self.agentic_shadow_enabled = (
-            agentic_shadow if agentic_shadow is not None else shadow_enabled()
-        )
-        self.expose_agentic_shadow = (
-            expose_agentic_shadow
-            if expose_agentic_shadow is not None
-            else shadow_exposed()
-        )
         self.modify_mode = _resolve_modify_mode(modify_mode)
         self.recommend_mode = _resolve_recommend_mode(recommend_mode)
         # H3a-3: deterministic Search-before-Ask resolver. ``today_provider`` is
@@ -252,12 +235,6 @@ class MultiTaskWorkflow:
         # H3a-4: layered long-term preference recall (read-chain tail). Shared
         # by recommend and modify; the Thread layer stays in thread_context.
         self.memory_retriever = PreferenceRetriever()
-        self.agentic_shadow_runner = AgenticShadowRunner(
-            database_path,
-            llm_client,
-            enabled=self.agentic_shadow_enabled,
-            web_search_provider=self.web_search_provider,
-        )
 
     def _build_graph(self):
         builder = StateGraph(TaskWorkflowState)
@@ -622,11 +599,11 @@ class MultiTaskWorkflow:
         ]
         if not session_item_ids:
             return route0
-        # Under the agentic modify chain the Agent loop resolves its own targets
-        # from ``session_context`` (``_agentic_targets``); injecting the session
-        # outfit into ``task_input`` would mask "no explicit choice" and defeat
-        # "modify all three". The legacy / shadow chains still need the injection
-        # to ground their context pack.
+        # Under the agentic modify chain the Multi-Agent Harness resolves its own
+        # targets from ``session_context`` (``_agentic_targets``); injecting the
+        # session outfit into ``task_input`` would mask "no explicit choice" and
+        # defeat "modify all three". The legacy chain still needs the injection
+        # to ground its context pack.
         inject_session = self.modify_mode != "agentic"
         if route0.task_type is TaskType.OUTFIT_RECOMMEND and is_follow_up(task_input.request):
             if inject_session:
@@ -733,13 +710,9 @@ class MultiTaskWorkflow:
                 request=task_input.request,
             )
         initial_context = self.context_builder.build(task_input, route)
-        # Stage 2 shadow: freeze the *pre-legacy* context pack so the shadow
-        # sees the same world the legacy saw (logical parallelism; execution
-        # may be serial). `initial_context` is never mutated by the graph.
-        frozen_context = initial_context
-        # Stage 4: with the Agent loop primary, OUTFIT_MODIFY never enters the
-        # legacy graph — the loop is the chain, and the legacy branch (incl. its
-        # shadow mount) is skipped entirely.
+        # With the Multi-Agent Harness primary, OUTFIT_MODIFY never enters the
+        # legacy graph — the harness is the chain, and the legacy branch (which
+        # serves the extension tasks below) is skipped entirely.
         if route.task_type is TaskType.OUTFIT_MODIFY and self.modify_mode == "agentic":
             return self._run_agentic_modify(
                 task_input, route, initial_context, run_id, session_context
@@ -825,14 +798,6 @@ class MultiTaskWorkflow:
                 "llm_call_count": final.get("llm_call_count", 0),
             }
         )
-        if route.task_type is TaskType.OUTFIT_MODIFY:
-            shadow_result = self.agentic_shadow_runner.run(
-                task_input, frozen_context, session_context
-            )
-            if shadow_result and self.expose_agentic_shadow:
-                # Test / dev only: the shadow outcome rides the payload. The
-                # response contract is otherwise unchanged.
-                payload["agentic_shadow"] = shadow_result
         return payload
 
     # --- Stage 4: agentic primary chain ----------------------------------

@@ -753,3 +753,27 @@ LLM 证据（`llm/memory_schema.py` / `memory_prompts.py` / `services/memory_ext
   - 「下半年去piacon怎么穿搭」→ **needs_clarification**，uncertainties 明确 3 条，不再伪造事实、不再静默 infeasible；
   - 「下半年去德奥音乐剧女演员pia的演唱会怎么穿搭」→ 修复前 `infeasible / agent_protocol_error / 0 候选` → 修复后 **completed / 2 套候选**。
 - 前端 `vite build` 成功；后端 uvicorn 重启加载新代码；用户实测复验。
+
+## 20. 旧框架代码清理：Stage 2 残留 + p-outfit 评估退役（2026-08-20）
+
+清理「非当前框架」代码（当前框架 = `StyleForgeHarness` 多 Agent 编排 + 确定性降级）。调查中发现关键依赖，导致删除范围收窄：
+
+### 20.1 调查结论：扩展任务依赖 legacy 三 Agent 链
+
+- **扩展任务（单品搭配 item_advice / 风格知识 style_advice / 衣橱兼容性 / 衣橱缺口）的执行器不在 `workflow/graph.py`，而在 `task_workflow.py` 的 legacy 三 Agent 链**（`_build_graph` → `_agent1_node/_agent2_node/_critic_with_repair/_agent3_node`，用 `agents/` 下 `SemanticRetrieverAgent/ComposerAgent/CriticAgent.run_extension`）。
+- 前端**仍真实调用**扩展任务：`RecommendPage.vue` 衣柜点选单品 → `item_advice` 直达；`TaskResultView.vue` 渲染四种扩展结果。
+- 若删除 legacy graph，扩展任务（含在用功能单品搭配）将无执行器。
+
+### 20.2 用户决策：暂缓删 graph.py
+
+用户确认**暂缓删除 `workflow/graph.py`**，保留 `agents/` 给扩展任务。本次删除范围收敛为：
+
+- **Stage 2 残留**：`agentic/agent.py`（AgentLoop）、`agentic/shadow.py`（AgenticShadowRunner）、`agentic/reviewer.py`、`tools/smoke_agentic.py`、`tests/test_agentic_loop.py`、`tests/test_agentic_shadow.py`。
+- **p-outfit 评估退役**：`evals/runners/evaluate_p_outfit.py`、`evals/runners/evaluate_extend.py`、`tests/test_p_outfit_eval.py`。
+- **`task_workflow.py` 仅删 shadow 挂载**：`AgentLoop`/`AgenticShadowRunner` import、`agentic_shadow`/`expose_agentic_shadow` 参数、`self.agentic_shadow_runner`、execute 末尾 shadow 挂载、`_MODIFY_MODES` 移除 `"shadow"`；**保留 legacy 三 Agent 扩展链与 `graph.invoke` 分支**（扩展任务 + 无 LLM recommend 的确定性降级）。
+
+### 20.3 验证
+
+- 全量回归 **766 passed**（删 4 个测试文件，恢复并跑通 legacy 扩展链测试组）。
+- 本次改动文件 `ruff check` 干净；`compileall` 通过。
+- 变更集：删 9 文件 + 改 2 文件（`task_workflow.py` 删 shadow、`test_agentic_modify_primary.py` shadow 断言回落 agentic）。
