@@ -37,6 +37,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from styleforge.agentic.context.grounding import thread_grounding_to_prompt
+from styleforge.agentic.context.thread_preferences import thread_preferences_to_prompt
+from styleforge.agentic.context.wardrobe_index import format_wardrobe_index
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from styleforge.agentic.agentic_contract import ResearchEvidence, TaskState
@@ -199,10 +203,14 @@ class PromptAssembler:
                 sections.append(draft_section)
         if view.enabled("environment_facts") and context.environment_facts is not None:
             sections.append(_format_facts(context.environment_facts))
-        if view.enabled("memories") and context.memories:
-            sections.append(_format_memories(context.memories))
+        # C-layer tail order (H3a): thread → memories → grounding, so the
+        # grounding decision is the last thing the model reads before the turn.
         if view.enabled("thread_context") and context.thread_context:
             sections.append(_format_thread(context.thread_context))
+        if view.enabled("memories") and context.memories:
+            sections.append(_format_memories(context.memories))
+        if view.enabled("grounding") and context.grounding:
+            sections.append(_format_grounding(context.grounding))
         return "\n\n".join(sections)
 
     # -- layer D: current turn ----------------------------------------------
@@ -367,11 +375,11 @@ def _format_drafts(working_draft: Any, base_draft: Any, candidate_count: int = 0
 def _format_facts(facts: Any) -> str:
     lines = ["【环境事实】"]
     if facts.wardrobe_summary:
-        lines.append(f"衣橱摘要：{json.dumps(facts.wardrobe_summary, ensure_ascii=False)}")
+        # A count-level capability index (~300-500 chars), never the 262 KB item
+        # dump. Concrete ids come from the search_wardrobe tool (see stylist.md).
+        lines.append(format_wardrobe_index(facts.wardrobe_summary))
     if facts.weather:
         lines.append(f"天气快照：{json.dumps(facts.weather, ensure_ascii=False)}")
-    if facts.memory_profile:
-        lines.append(f"记忆画像：{json.dumps(facts.memory_profile, ensure_ascii=False)}")
     if facts.selected_item is not None:
         lines.append(
             f"用户点击定位的单品：{facts.selected_item.item_id}"
@@ -379,10 +387,32 @@ def _format_facts(facts: Any) -> str:
         )
     if facts.active_outfit is not None:
         lines.append(f"正在编辑的搭配：{outfit_text(facts.active_outfit)}")
+    # memory_profile is deliberately NOT dumped here: the full preference list
+    # (~12 K chars) polluted the prompt. Layered Top-K recall replaces it via the
+    # memories channel (PreferenceRetriever, H3a-4).
     return "\n".join(lines)
 
 
 def _format_memories(memories: list[Any]) -> str:
+    """Render recalled preferences, grouped by read-chain layer when tagged.
+
+    H3a-4 PreferenceRetriever entries carry a ``layer``/``layer_label`` and render
+    under 【偏好上下文】 in read-chain order (短期偏好 → 场景偏好 → 长期偏好 →
+    避免), keeping the layer boundaries visible. Untagged legacy entries keep the
+    flat 【相关记忆】 shape.
+    """
+    if memories and all(
+        isinstance(item, dict) and item.get("layer") for item in memories
+    ):
+        sections: list[str] = []
+        current_label: str | None = None
+        for item in memories:
+            label = str(item.get("layer_label") or item.get("layer") or "偏好")
+            if label != current_label:
+                sections.append(f"\n【{label}】")
+                current_label = label
+            sections.append(f"- {_memory_text(item)}")
+        return "【偏好上下文】" + "\n".join(sections)
     lines = ["【相关记忆】"]
     for memory in memories:
         text = memory if isinstance(memory, str) else json.dumps(memory, ensure_ascii=False)
@@ -390,5 +420,70 @@ def _format_memories(memories: list[Any]) -> str:
     return "\n".join(lines)
 
 
+def _memory_text(item: dict[str, Any]) -> str:
+    """One preference row: ``- [dimension][polarity][置信度] value``."""
+    dimension = item.get("dimension") or item.get("category") or "general"
+    value = item.get("value") or item.get("content") or item.get("attribute") or ""
+    confidence = float(item.get("confidence") or 0.0)
+    polarity = item.get("polarity") or ""
+    polarity_tag = f"[{polarity}]" if polarity else ""
+    prefix = "避免: " if polarity == "negative" else ""
+    return f"[{dimension}]{polarity_tag}[置信度 {confidence:.2f}] {prefix}{value}"
+
+
+def _format_grounding(grounding: dict[str, Any]) -> str:
+    """【环境定位】— the deterministic grounding facts for this turn (H3a).
+
+    Renders the date / city / activity the model should reason from, plus the
+    search-before-ask decision so research/stylist know what remains to verify.
+    """
+    lines = ["【环境定位】"]
+    if grounding.get("current_date"):
+        lines.append(f"当前日期：{grounding['current_date']}")
+    if grounding.get("current_city"):
+        lines.append(
+            f"当前城市：{grounding['current_city']}"
+            f"（来源：{grounding.get('location_source', 'none')}）"
+        )
+    if grounding.get("destination_city"):
+        lines.append(f"观演城市：{grounding['destination_city']}")
+    if grounding.get("explicit_date"):
+        lines.append(f"日期：{grounding['explicit_date']}")
+    elif grounding.get("approximate_time"):
+        lines.append(f"时间：{grounding['approximate_time']}")
+    elif grounding.get("date_expression"):
+        lines.append(f"时间：{grounding['date_expression']}")
+    if grounding.get("activity"):
+        lines.append(f"活动：{grounding['activity']}")
+    decision = grounding.get("decision", "ready")
+    if decision == "search_first":
+        missing = "、".join(grounding.get("missing") or [])
+        lines.append(f"决策：先查证再作答（待查证：{missing or '（无）'}）")
+    elif decision == "need_user":
+        missing = "、".join(grounding.get("missing") or [])
+        lines.append(f"决策：需向用户确认（缺失：{missing}）")
+    else:
+        lines.append("决策：上下文已足够")
+    return "\n".join(lines)
+
+
 def _format_thread(thread: dict[str, Any]) -> str:
-    return f"【对话上下文】{json.dumps(thread, ensure_ascii=False)}"
+    """Render the session-scoped thread layer.
+
+    Thread preferences and grounding get dedicated human-readable sections
+    (H3a-2); everything else (outfit anchor, session signals) rides the compact
+    JSON line.
+    """
+    sections: list[str] = []
+    if thread.get("thread_preferences"):
+        sections.append(thread_preferences_to_prompt(thread["thread_preferences"]))
+    if thread.get("thread_grounding"):
+        sections.append(thread_grounding_to_prompt(thread["thread_grounding"]))
+    other = {
+        key: value
+        for key, value in thread.items()
+        if key not in ("thread_preferences", "thread_grounding")
+    }
+    if other:
+        sections.append(f"【对话上下文】{json.dumps(other, ensure_ascii=False)}")
+    return "\n\n".join(sections) or "【对话上下文】（无）"

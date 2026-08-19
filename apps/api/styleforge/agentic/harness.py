@@ -47,6 +47,9 @@ class StyleForgeHarness:
         agent_instruction_versions: dict[str, str] | None = None,
         knowledge_retriever: Any | None = None,
         target_candidates: int = 3,
+        # H3a-4: layered PreferenceRetriever; default None keeps the legacy
+        # ``recalled_memories`` fallback for non-workflow callers (shadow).
+        memory_retriever: Any | None = None,
     ) -> None:
         self.registry = CapabilityRegistry()
         register_local_tools(self.registry, environment, knowledge_retriever=knowledge_retriever)
@@ -59,6 +62,7 @@ class StyleForgeHarness:
             visibility=visibility,
             guard=guard,
             agent_instruction_versions=agent_instruction_versions,
+            memory_retriever=memory_retriever,
         )
         self.evidence_store = EvidenceStore()
         self.graph = build_h2a_main_graph(

@@ -34,6 +34,7 @@ from styleforge.models.agentic_contract import (
     WardrobeSearchResult,
     WebSearchResult,
 )
+from styleforge.agentic.context.wardrobe_index import build_wardrobe_index
 from styleforge.tools.weather.schemas import WeatherFacts
 from styleforge.models.context import ContextPack
 from styleforge.models.task import TaskExecutionInput
@@ -89,32 +90,15 @@ def _load_items(connection: Any, item_ids: list[str]) -> list[ItemSnapshot]:
     return [_item_snapshot_from_row(by_id[item_id]) for item_id in item_ids if item_id in by_id]
 
 
-def _wardrobe_summary(items: list[Any]) -> dict[str, Any]:
-    by_slot: dict[str, list[Any]] = {}
-    for item in items:
-        slot = item.item_type or "other"
-        by_slot.setdefault(slot, []).append(item)
-    summary: dict[str, Any] = {}
-    for slot, slot_items in sorted(by_slot.items()):
-        ordered = sorted(slot_items, key=lambda item: item.item_id)
-        summary[slot] = {
-            "count": len(ordered),
-            "sample_colors": sorted({item.color for item in ordered if item.color})[:8],
-            # The Stylist builds candidates from real ids; a count-only summary
-            # forces it to re-search the wardrobe for ids it already holds,
-            # burning tool turns on lookups instead of composing. Carry the
-            # concrete items so it can act immediately (ContextGuard caps size).
-            "items": [
-                {
-                    "id": item.item_id,
-                    "name": item.name or "",
-                    "type": item.item_type or "",
-                    "color": item.color or "",
-                }
-                for item in ordered
-            ],
-        }
-    return summary
+def _wardrobe_summary(items: list[Any], request: str = "") -> dict[str, Any]:
+    """Compact wardrobe capability index (see ``wardrobe_index``).
+
+    The old full item dump (~262 KB for 2080 items) blew ContextGuard's 40 K
+    budget and the Stylist got a truncated wardrobe. Concrete item ids are only
+    ever fetched through ``search_wardrobe``; the prompt carries a count-level
+    index instead.
+    """
+    return build_wardrobe_index(items, request=request)
 
 
 def resolve_active_outfit(
@@ -226,7 +210,7 @@ def build_facts(
         visible_outfits=recent_visible_outfits(connection, task_input.user_id),
         active_outfit=active_outfit,
         selected_item=selected_item,
-        wardrobe_summary=_wardrobe_summary(wardrobe_items),
+        wardrobe_summary=_wardrobe_summary(wardrobe_items, request=task_input.request),
         weather=weather,
         memory_profile=memory_profile,
     )

@@ -56,6 +56,7 @@ class AgentContextView:
     drafts: bool = False
     thread_context: bool = False
     memories: bool = False
+    grounding: bool = False  # H3a: the deterministic grounding context (独立 C 层 section)
     trajectory: bool = False  # an agent's OWN recent tool observations (frozen #9)
     gate_feedback: bool = False  # last Env/Critic feedback for the next candidate
 
@@ -71,6 +72,7 @@ _VIEWS: dict[str, AgentContextView] = {
         research_evidence=True,
         candidates=True,
         thread_context=True,
+        grounding=True,  # H3a: today's date / current city / decision
     ),
     AGENT_RESEARCH: AgentContextView(
         user_request=True,
@@ -78,6 +80,7 @@ _VIEWS: dict[str, AgentContextView] = {
         research_evidence=True,
         thread_context=True,
         memories=True,
+        grounding=True,  # H3a: search-before-ask — the research agent needs it
         trajectory=True,  # its own tool observations while researching
     ),
     AGENT_STYLIST: AgentContextView(
@@ -91,6 +94,7 @@ _VIEWS: dict[str, AgentContextView] = {
         drafts=True,
         thread_context=True,
         memories=True,
+        grounding=True,  # H3a: date/city/season basis for outfit inference
         trajectory=True,  # its own ReAct loop observations
         gate_feedback=True,  # last Env/Critic feedback to replan on
     ),

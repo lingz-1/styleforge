@@ -13,6 +13,8 @@ from typing import Any, Callable, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from styleforge.agentic.agent import AgentLoop, LoopConfig
+from styleforge.agentic.context.grounding import GroundingResolver
+from styleforge.agentic.context.memory_context import PreferenceRetriever
 from styleforge.agentic.environment import (
     Draft,
     Environment,
@@ -49,6 +51,7 @@ from styleforge.repositories.task_run_repository import (
     finish_task_run,
     start_task_run,
 )
+from styleforge.repositories.user_preferences_repository import get_environment_profile
 from styleforge.repositories.wardrobe_repository import list_items
 from styleforge.services.memory_aggregator import apply_evidence
 from styleforge.services.memory_evidence import extract_language_evidence, record_and_fold
@@ -60,6 +63,19 @@ from styleforge.services.memory_resolver import (
 )
 from styleforge.services.presentation import present_result
 from styleforge.services.recommendation import recommend_for_user
+
+# H3a-2 Memory scope gate: turn-scoped requests never feed long-term memory.
+# EvidenceScope only distinguishes global/contextual (no turn type), so the gate
+# is a deterministic request-level check. "这次想穿黑一点" is a current-session
+# preference — ThreadPreferenceView already holds it; promoting it to the user
+# profile would be wrong (Turn/Thread ≠ User Profile). Conservative by design:
+# 宁可漏报、不误升级.
+_TURN_SCOPE_RE = re.compile(r"(这次|刚才|今天|今晚|本场|本次|眼下|现在要)")
+
+
+def _scope_gate(request: str) -> bool:
+    """Whether a request is turn-scoped and must skip the long-term extractor."""
+    return bool(_TURN_SCOPE_RE.search(request or ""))
 
 _FOLLOW_UP_ADJUST_WORDS = (
     "更", "再", "别", "不", "一点", "太", "有点", "调整", "改变",
@@ -190,6 +206,10 @@ class MultiTaskWorkflow:
         # (``knowledge/skills``). None degrades each tool to "unconfigured".
         weather_provider: Any | None = None,
         skills_root: Path | None = None,
+        # H3a-3 grounding: global default city (e.g. settings.weather_default_location)
+        # + injectable clock for deterministic tests.
+        default_location: str = "",
+        today_provider: Callable[..., Any] | None = None,
     ) -> None:
         self.database_path = database_path
         self.knowledge_root = knowledge_root.resolve()
@@ -222,6 +242,16 @@ class MultiTaskWorkflow:
         )
         self.modify_mode = _resolve_modify_mode(modify_mode)
         self.recommend_mode = _resolve_recommend_mode(recommend_mode)
+        # H3a-3: deterministic Search-before-Ask resolver. ``today_provider`` is
+        # injectable so tests freeze "today"; the legacy LocationResolver derives
+        # the current city from device → profile → global default.
+        self.grounding_resolver = GroundingResolver(
+            default_location=default_location,
+            today_provider=today_provider,
+        )
+        # H3a-4: layered long-term preference recall (read-chain tail). Shared
+        # by recommend and modify; the Thread layer stays in thread_context.
+        self.memory_retriever = PreferenceRetriever()
         self.agentic_shadow_runner = AgenticShadowRunner(
             database_path,
             llm_client,
@@ -615,6 +645,11 @@ class MultiTaskWorkflow:
 
     def _extract_memories(self, task_input: TaskExecutionInput) -> None:
         """Distill preference evidence via LLM and aggregate it; failures swallowed."""
+        # H3a-2 scope gate: a turn-scoped request stays in ThreadPreferenceView
+        # and never promotes to the user profile (covers the legacy + agentic
+        # call sites 748/915/1246 in one change).
+        if _scope_gate(task_input.request):
+            return
         try:
             evidence = extract_language_evidence(self.llm_client, task_input.request)
             if not evidence:
@@ -820,6 +855,10 @@ class MultiTaskWorkflow:
             runtime_capabilities=self._runtime_capabilities(),
             knowledge_retriever=self.knowledge_retriever,
             target_candidates=target_candidates,
+            # H3a-4: layered Top-K recall over ``raw_preferences`` (recommend +
+            # modify share one retriever; the Thread layer stays in
+            # thread_context, two chains never promote into each other).
+            memory_retriever=self.memory_retriever,
         )
 
     def _runtime_capabilities(self) -> frozenset[str]:
@@ -834,6 +873,78 @@ class MultiTaskWorkflow:
         if self.skills_root is not None:
             caps.add(CAP_SKILLS)
         return frozenset(caps)
+
+    def _thread_context(
+        self,
+        session_context: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Session-scoped context for the harness (H3a-2).
+
+        Carries the current outfit anchor plus the thread-scoped preference /
+        grounding views that api.py updates right after the user message is
+        accepted. A missing session yields ``None`` (no thread layer for
+        single-shot callers).
+        """
+        if not session_context:
+            return None
+        return {
+            "current_outfit_id": session_context.get("current_outfit_id") or "",
+            "current_item_ids": list(session_context.get("current_item_ids") or []),
+            "session_signals": session_context.get("session_signals") or {},
+            "thread_preferences": session_context.get("thread_preferences") or {},
+            "thread_grounding": session_context.get("thread_grounding") or {},
+        }
+
+    def _environment_profile(self, connection, user_id: str) -> dict[str, Any]:
+        """User's default city/timezone for grounding (device → profile → global).
+
+        Best-effort: a missing or malformed profile yields ``{}`` so grounding
+        falls through to the global default instead of failing the run.
+        """
+        try:
+            return get_environment_profile(connection, user_id)
+        except Exception:
+            return {}
+
+    def _raw_preferences(self, initial_context: ContextPack) -> list[Any]:
+        """Normalized memory profile for the PreferenceRetriever (H3a-3).
+
+        ``memory_profile`` may be a flat list of preference entries or a dict
+        carrying a ``preferences`` key; the retriever consumes a flat list.
+        """
+        profile = (
+            (initial_context.user_context.preferences or {}).get("memory_profile") or []
+        )
+        if isinstance(profile, dict):
+            return list(profile.get("preferences") or [])
+        return list(profile)
+
+    def _preference_context(self, outcome: dict[str, Any]) -> list[dict[str, Any]]:
+        """Layered Top-K preference view for the result payload (H3a-4).
+
+        Same retriever the harness prompt actually fed the Stylist, re-run once
+        over the final outcome state — so the front end renders the *new* layered
+        memory context (短期/场景/长期/避免, ≤ 8 rows) instead of dumping the
+        full legacy ``memory_profile`` (~12 K chars of raw preferences).
+        """
+        return self.memory_retriever.retrieve("stylist", outcome)
+
+    def _grounding_context(
+        self,
+        task_input: TaskExecutionInput,
+        initial_context: ContextPack,
+        connection,
+        thread_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Deterministic grounding facts for one invoke (H3a-3)."""
+        grounding = self.grounding_resolver.resolve(
+            task_input.request,
+            location_context=task_input.location_context,
+            environment_profile=self._environment_profile(connection, task_input.user_id),
+            thread_context=thread_context,
+            capabilities=self._runtime_capabilities(),
+        )
+        return grounding.model_dump(mode="json")
 
     def _run_agentic_modify(
         self,
@@ -889,11 +1000,19 @@ class MultiTaskWorkflow:
                         item_ids=list(target["item_ids"]),
                         items=[],
                     )
+                    thread_context = self._thread_context(session_context)
                     outcome = harness.invoke(
                         {
                             "run_id": run_id,
                             "request": task_input.request,
                             "base_draft": Draft(outfit=base_snapshot, layers={}),
+                            "thread_context": thread_context,
+                            "grounding_context": self._grounding_context(
+                                task_input, initial_context, connection, thread_context
+                            ),
+                            "raw_preferences": self._raw_preferences(initial_context),
+                            "grounding_attempted_kinds": [],
+                            "grounding_resolved_kinds": [],
                         }
                     )
                     outcome["_llm_call_count"] = harness.model_calls
@@ -1211,6 +1330,7 @@ class MultiTaskWorkflow:
                     skills_root=self.skills_root,
                 )
                 harness = self._harness(environment)
+                thread_context = self._thread_context(session_context)
                 outcome = harness.invoke(
                     {
                         "run_id": run_id,
@@ -1221,9 +1341,20 @@ class MultiTaskWorkflow:
                             ),
                             layers={},
                         ),
+                        "thread_context": thread_context,
+                        "grounding_context": self._grounding_context(
+                            task_input, initial_context, connection, thread_context
+                        ),
+                        "raw_preferences": self._raw_preferences(initial_context),
+                        "grounding_attempted_kinds": [],
+                        "grounding_resolved_kinds": [],
                     }
                 )
                 weather_facts = environment.last_weather_facts
+                # H3a: expose the layered preference view the Stylist actually
+                # saw so the front end renders the new agentic context (环境定位
+                # + 分层偏好 + 对话上下文) instead of the full legacy dump.
+                outcome["preference_context"] = self._preference_context(outcome)
             assert harness is not None
             result = self._agentic_recommend_to_result(
                 task_input,

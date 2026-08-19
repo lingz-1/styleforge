@@ -695,3 +695,61 @@ LLM 证据（`llm/memory_schema.py` / `memory_prompts.py` / `services/memory_ext
 - `agents/composer.py`：`run_extension` 先 `derive_decision_from_facts(agent1_output.facts)`，注入 prompt，`chat_json` 用 `agent2_llm_schema()`，校验后把确定性 decision 挂回 output（覆盖 LLM 任何臆测值）。
 
 验收 case「不要帽子，要粉色系发夹 + 衣橱无粉色发夹」：`derive_decision` 得 **RELAX_PREFERENCE**、`relaxed_prefers=["pink"]`、hairwear MUST 仍 exact（候选 gold_clip）、帽子全 level 排除——只放松 pink、不放松 hairwear。测试 `tests/test_decision.py` 新增 9 例（五类决策 + MUST 色/品类两路 RETRIEVE_MORE + facts 还原 + composer 端到端：LLM schema/prompt 无 decision、输出带确定性 RELAX_PREFERENCE）。全量回归 **551 passed**（542 + 9）、Ruff clean。
+
+---
+
+## 18. Multi-Agent Harness（H1+H2）：StyleForgeHarness + LangGraph 多 Agent 编排（2026-08-19，已实现并真实模型验收）
+
+### 18.1 需求与背景
+
+按「架构编排.md」落地：**LangGraph 负责运行时编排；Agent 负责决策；Harness 负责工具、上下文、记忆、Skill、MCP、Hook、权限与生命周期**。原 `AgentLoop.run()` 单循环退休，降为 legacy adapter；入口改为 `task_workflow → StyleForgeHarness.invoke() → compiled StyleForgeGraph`。
+
+### 18.2 实现清单（H1a→H2c，每步测试可跑）
+
+- **H1a Harness Foundation（8 项）**：LLM `chat_tools`（`ToolUseBlock` + DeepSeek 原生 tools，`tool_choice` 恒 `auto`；`chat_json` 原样保留 9 个 legacy 调用点零改动）；`CapabilityRegistry`（`registered_for_agent` / `runtime_available` / `check_precondition` 三层分离）；`ToolRuntime`（schema 校验 → Hook → handler → normalize）；`HookManager`；`ContextVisibilityPolicy`（按 Agent 决定能看什么）；`ContextAssembler`（**每次 Model Call 前重跑**，BootstrapContext 只初始化基础事实）；`PromptAssembler`（产出 `PromptBundle`：stable_system / capability_context / runtime_context / user_message / tools / `prompt_profile_key`（人工版本号）/ `stable_prefix_fingerprint`（机器 sha256 判稳定前缀字节一致）/ context_stats，A→D 动态程度递增，**与 LLM 协议无关**——chat_tools 与 chat_json 共用同一 build）；`ContextGuard`（40K soft / 80K hard，OVER_BUDGET 只从动态 C 层回收 + 警告，绝不伪装完成）。
+- **H1b Stylist Subgraph + Main Graph 验证链**：`StylistDecision.control` 路由；CANDIDATE_READY → RETURN `AgentHandoffResult`（Subgraph 只产出，验证链在 Main Graph）；Main Graph `Environment Gate → Critic → StageCandidate → GoalGate`；`ResetCandidateDraft`（reset 到 base_draft，绝不 reset 到上一候选）；ClarificationNode 只由 Main Graph 持有。
+- **H2a Coordinator + handoff**：`CoordinatorDecision`（goal / next_agent / need_plan_update / need_user 三态互斥，`need_plan_update` → 恰好 update_plan → 回 Coordinator → 下一轮再 handoff）；普通修改一次 handoff、无 Research。
+- **H2b Research Subgraph + Evidence 契约**：`ResearchState` 私有（raw_evidence / tool_observations / messages 不进 Main State）；research_agent → 工具 → **Evidence Synthesizer**（独立 prompt profile + visibility，只整理已有证据、uncertainties 明示，输出 `ResearchEvidence`）→ RETURN 产物；NEED_USER 经 `AgentHandoffResult` 回 Parent。
+- **H2c 三套单次执行 + 主链接入**：`_run_agentic_recommend` 单次 `harness.invoke`（target_candidates=3），搜索/天气只做一次三套共享；`agentic_outcome` 单 dict 是前端契约。
+
+### 18.3 遇到的问题
+
+- **候选 3 死锁（真实 DeepSeek）**：Critic 持续 FAIL，stylist 在有限衣橱里反复 modify 到死（`modify → 相似 → 被拒 → 再改` 无限循环）。修复：**bounded revision**——Critic FAIL 后最多 3 步强制重提交（`DEGRADED_ACCEPTED` 诚实标记，非伪造 PASS）+ 二选一 observation（「调用工具或提交当前方案」）。
+- **契约/循环健壮性**：真实 smoke 暴露 parse retry ≤1、re-entry ≤1 的 `AGENT_PROTOCOL_ERROR` 硬上限（`protocol_error_count` 卡死，不无限自愈）；Control/Tool 组合校验（CONTINUE 恰好 1 工具、终态 0 工具）。
+
+### 18.4 验证证据
+
+- H1+H2 分阶段 721 → 736 passed；提交 `12d18d9`。
+- 真实 DeepSeek 验收：推荐产出 3 候选 + research evidence + done；「换双鞋」Coordinator 直通 stylist 多轮修改。
+- 前端契约：planningNotes 展示 research 依据 + 三套卡片；`llm_call_count` 真实计数。
+
+## 19. H3a：Grounding + Memory 分层 + WardrobeIndex（2026-08-19/20，已实现）
+
+### 19.1 需求背景
+
+真实 DeepSeek smoke「下半年去看风声音乐剧再怎么搭」暴露四问题：只出 1 套、32 次模型调用、大量联网搜索、无旗袍推荐。诊断确认根因：**Grounding 缺失**（agent 不知道今天几号/在哪个城市，research 看不到环境事实）；**Memory 读链全量注入**（至多 100 条偏好全量 JSON dump，无 Top-K/分层）；**衣橱摘要 262KB 触发 ContextGuard 40K 截断**（stylist 实际看到的衣橱残缺）。
+
+### 19.2 实现清单（四个新 Context 子模块）
+
+- **① `context/grounding.py` — GroundingContext**：`GroundingResolver` 确定性产出 `decision ∈ {READY, SEARCH_FIRST, NEED_USER}`（missing → capability 对应，缺演出城市 + 只有天气工具 → NEED_USER）；`ThreadGroundingView` + `pending_field`（跨轮确认：round1「下半年去看风声」→ clarification 问城市 → round2「上海」按 pending_field 确定性解释，不靠「去X看」正则）；SEARCH_FIRST 由 **AgentRuntime 运行时校验**（`grounding_attempted/resolved` 两态：attempted=有效查证过、resolved=真拿到事实，查过没查到 → uncertainties + RESEARCH_COMPLETE 收尾不卡死）。
+- **② `context/thread_preferences.py` — ThreadPreferenceView**：会话内偏好（「这次想穿黑一点」），只写 session dict 不碰长期链；`api.py::execute_task` 用户消息 accepted 即更新（NEED_USER/失败不丢约束）；Memory scope gate（`_scope_gate` 拦截 TURN 词 → skip apply_evidence，**绝不因最近出现就成长期偏好**）。
+- **③ `context/memory_context.py` — PreferenceRetriever**：分层 Top-K（short_term 3 / contextual 3 / stable 4 / avoidances 3，总 top_k=8），每层带 layer 标签，按 `effective_confidence × relevance × scope_w × recency` 打分；agent 差异化（stylist 见四层、research 无 avoidance）。
+- **④ `context/wardrobe_index.py` — WardrobeIndexSummary**：`item_count / categories / colors / candidate_pool`，**262KB 全量清单 → ~1KB 能力索引**，彻底消除 ContextGuard 截断；真实单品 id 只能经 `search_wardrobe` 检索获得。
+- **前端 TaskResultView.vue**：旧「Context Pack 全量 JSON dump」→ 新「Agent 上下文」面板（环境定位 / 分层偏好 / 对话上下文 / 查证记录）；technical dump 排除 raw_preferences/context_pack，**偏好不再刷屏**。
+
+### 19.3 遇到的问题（piacon / pia 演唱会场景调试，2026-08-19/20）
+
+用户实测两个场景失败（0 候选、28/15 次模型调用）：「下半年去piacon怎么穿搭」和「下半年去德奥音乐剧女演员pia的演唱会怎么穿搭」。「piacon」实为德奥音乐剧女演员 **Pia Douwes** 的演唱会（非 PyCon 大会）。逐根因修复：
+
+1. **stylist 无强制提交** → 步数耗尽 PROTOCOL_ERROR、0 候选。修复：步数上限时 draft 有单品 → 强制 CANDIDATE_READY；空 draft → PROTOCOL_ERROR；fresh-research nudge（免费注入，不耗模型预算）。
+2. **research_synthesizer 拼凑事实** → 早期版本伪造「2026 音乐节 @ 国家大剧院」。修复：`research_synthesizer.md` 强化「活动身份不确定时绝不拼凑」（event/venue/timing 必须留 null，写 uncertainties）。
+3. **research「散文 + 工具调用」整轮丢弃（本场景 0 候选的直接根因）**：真实 DeepSeek 在长上下文后习惯「散文前缀 + 工具调用」一起输出，而 `AgentRuntime._request` 只对「空文本 + 工具」放行，散文非空 → 整轮判协议错误——**工具白调、步数不递增**，research 永远到不了 6 步强制 synthesize 上限，卡死在「搜索 → 散文被拒 → 重入」直到协议错误计数耗尽。修复：有工具调用本身就是「继续干活」的强意图信号 → 散文+工具 infer CONTINUE 执行；散文无工具仍协议错误（绝不从叙述编造终态）。
+4. **research 反复搜索不收敛**：搜到「上海文化广场 2026-07-08」具体信息后仍继续搜德国/奥地利（模型把「德奥音乐剧」误读为德国/奥地利）。MAX_RESEARCH_STEPS=6 强制 synthesize 兜底，未确认事实由 synthesizer 写 uncertainties。
+
+### 19.4 验证证据
+
+- 全量回归 **825 passed**（H3a 新增 grounding / memory_context / thread_preferences / wardrobe_index / search_first / prompt_context_h3 测试 + 本次 2 个散文测试）。
+- 真实 DeepSeek 回归（`_regress_piacon.py` 临时脚本，验收后已清理）：
+  - 「下半年去piacon怎么穿搭」→ **needs_clarification**，uncertainties 明确 3 条，不再伪造事实、不再静默 infeasible；
+  - 「下半年去德奥音乐剧女演员pia的演唱会怎么穿搭」→ 修复前 `infeasible / agent_protocol_error / 0 候选` → 修复后 **completed / 2 套候选**。
+- 前端 `vite build` 成功；后端 uvicorn 重启加载新代码；用户实测复验。

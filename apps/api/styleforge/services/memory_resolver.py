@@ -38,6 +38,14 @@ AGENT_BUCKETS: dict[str, tuple[str, ...]] = {
     AGENT_RETRIEVER: MEMORY_PACK_KEYS,
     AGENT_COMPOSER: ("session_signals", "short_term_preferences", "stable_preferences"),
     AGENT_CRITIC: ("stable_preferences", "avoidances"),
+    # H3a-4 PreferenceRetriever increments (legacy three keys untouched — the
+    # PreferenceRetriever reuses this same resolver as its gate). "research" sees
+    # no avoidances (it plans outfit context, not exclusions); the synthesizer
+    # sees none at all (it only reorganizes existing evidence).
+    "coordinator": ("session_signals", "stable_preferences"),
+    "research": ("stable_preferences", "contextual_preferences"),
+    "stylist": MEMORY_PACK_KEYS,
+    "research_synthesizer": (),
 }
 
 # Confidence bars: effective confidence must clear these to be injected.

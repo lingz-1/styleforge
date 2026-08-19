@@ -26,6 +26,7 @@ from langgraph.graph import END, START, StateGraph
 from styleforge.agentic.agentic_contract import StyleForgeState
 from styleforge.agentic.agents.coordinator.graph import build_coordinator_subgraph
 from styleforge.agentic.agents.critic.graph import make_critic_node
+from styleforge.agentic.context.grounding import pending_field_for_question
 from styleforge.agentic.agents.research.graph import build_research_subgraph
 from styleforge.agentic.agents.stylist.graph import build_stylist_subgraph
 from styleforge.agentic.gates.environment import make_environment_gate
@@ -178,7 +179,22 @@ def _build_main_graph(
     def clarification_node(state: StyleForgeState) -> dict[str, Any]:
         handoff = state["handoff_result"]
         question = handoff.clarification.question
-        return {"status": "needs_clarification", "clarification_question": question}
+        updates: dict[str, Any] = {
+            "status": "needs_clarification",
+            "clarification_question": question,
+        }
+        # H3a-3 pending_field (Question → Answer → Grounding continuity): a
+        # city/date question deterministically names the ThreadGrounding field
+        # the next bare reply answers — so round-2 "上海" (no 去X看 structure) is
+        # still read as the destination. The field rides out via thread_context.
+        field = pending_field_for_question(question)
+        if field is not None:
+            thread = dict(state.get("thread_context") or {})
+            grounding = dict(thread.get("thread_grounding") or {})
+            grounding["pending_field"] = field
+            thread["thread_grounding"] = grounding
+            updates["thread_context"] = thread
+        return updates
 
     def end_node(state: StyleForgeState) -> dict[str, Any]:
         handoff = state.get("handoff_result")

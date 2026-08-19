@@ -42,6 +42,18 @@ MAX_STYLIST_STEPS = 12
 # is unrestricted (MAX_STYLIST_STEPS still guards it).
 MAX_REVISION_STEPS = 3
 
+# Fresh-research cap (real-model "piacon" failure): a FRESH candidate (no
+# gate_feedback) may keep re-searching the same facts (search_web / get_weather /
+# search_wardrobe) forever without ever calling modify_outfit, burning the step
+# cap and ending in PROTOCOL_ERROR with an empty draft — zero candidates from a
+# productive-looking run. Once a fresh candidate reaches this many tool turns
+# without having built anything, the subgraph injects a one-shot "__protocol__"
+# nudge (no model call, no budget) forcing it to compose a complete outfit and
+# submit. The step-cap force-submit (below) is the backstop if the nudge is
+# ignored. Revision rounds do NOT get the nudge — they already hit the bounded
+# revision force-submit at MAX_REVISION_STEPS.
+FRESH_RESEARCH_CAP = 4
+
 
 class StylistState(TypedDict, total=False):
     """Subgraph state. Shared channels flow from/to the Main Graph; private
@@ -73,6 +85,8 @@ class StylistState(TypedDict, total=False):
     trajectory_step_count: int
     trajectory_protocol_errors: int
     revision_steps: int  # tool turns consumed in THIS bounded-revision round
+    stylist_has_built: bool  # True once a modify_outfit yields a non-empty draft
+    fresh_research_nudged: bool  # one-shot fresh-research nudge already injected
     pending_tools: list[dict[str, Any]]
     # Done-in-this-run flag. MUST be private: the shared ``handoff_result``
     # channel carries the PREVIOUS run's envelope back into the subgraph as
@@ -96,8 +110,33 @@ def build_stylist_subgraph(runtime: AgentRuntime):
             "trajectory_done": True,
         }
 
+    def _draft_has_items(state: StylistState) -> bool:
+        working_draft = state.get("working_draft")
+        if working_draft is None:
+            return False
+        outfit = getattr(working_draft, "outfit", None)
+        if outfit is None:
+            return False
+        return bool(getattr(outfit, "item_ids", None))
+
     def stylist_agent(state: StylistState) -> dict[str, Any]:
+        # Step-cap force-submit (real-model "piacon" failure): a fresh candidate
+        # that kept re-searching without building hits MAX_STYLIST_STEPS with a
+        # (possibly partial) draft in hand. Submitting whatever legal draft
+        # exists beats PROTOCOL_ERROR-with-empty-hands — the Main Graph's
+        # Environment Gate / Critic will validate it and, if invalid, hand back
+        # feedback into a bounded revision round. Only a genuinely empty draft
+        # (nothing ever built) is a PROTOCOL_ERROR.
         if state.get("trajectory_step_count", 0) >= MAX_STYLIST_STEPS:
+            if _draft_has_items(state):
+                trace = state.get("trace", []) + [
+                    {
+                        "agent": "stylist",
+                        "decision_summary": "已达步数上限，强制提交当前方案",
+                        "control": "CANDIDATE_READY",
+                    }
+                ]
+                return _envelope("COMPLETED", trace)
             return _envelope("PROTOCOL_ERROR", state.get("trace", []))
         # Frozen #21 hard cap: re-entry after a protocol error is bounded. A
         # real provider can get stuck in a prose streak for a few turns; a valid
@@ -114,8 +153,7 @@ def build_stylist_subgraph(runtime: AgentRuntime):
         if (
             state.get("gate_feedback")
             and state.get("revision_steps", 0) >= MAX_REVISION_STEPS
-            and (state.get("working_draft") is not None)
-            and state["working_draft"].outfit.item_ids
+            and _draft_has_items(state)
         ):
             trace = state.get("trace", []) + [
                 {
@@ -125,6 +163,28 @@ def build_stylist_subgraph(runtime: AgentRuntime):
                 }
             ]
             return _envelope("COMPLETED", trace)
+        # Fresh-research nudge: a fresh candidate that keeps re-searching without
+        # ever building burns the step cap on searches alone. Inject a one-shot
+        # protocol observation (no model call — re-enter below) telling it to
+        # compose a complete outfit from what it already has and submit. The
+        # next call to this node runs the model WITH the nudge in context.
+        if (
+            not state.get("gate_feedback")
+            and not state.get("stylist_has_built")
+            and not state.get("fresh_research_nudged")
+            and state.get("trajectory_step_count", 0) >= FRESH_RESEARCH_CAP
+        ):
+            nudge = (
+                f"你已连续 {state.get('trajectory_step_count', 0)} 轮只查证（搜索/天气/衣橱）"
+                "而未组合任何搭配。基于已有的衣橱搜索结果与【研究证据】，"
+                "立即用 modify_outfit 组合一套完整搭配（一次 add 上装+下装+鞋履，"
+                "按需外套/配饰），随后 CANDIDATE_READY 提交。不要再重复搜索或查证同一事实。"
+            )
+            return {
+                "fresh_research_nudged": True,
+                "tool_observations": state.get("tool_observations", [])
+                + [{"tool": "__protocol__", "observation": nudge}],
+            }
         try:
             result = runtime.call(
                 "stylist",
@@ -205,7 +265,16 @@ def build_stylist_subgraph(runtime: AgentRuntime):
             updates["revision_steps"] = state.get("revision_steps", 0) + 1
         # Stateful tools (modify_outfit → new working_draft) write back through
         # state_updates; the graph node persists them — no second state source.
-        updates.update(tool_result.state_updates or {})
+        state_updates = tool_result.state_updates or {}
+        updates.update(state_updates)
+        # Track "has built": a modify_outfit that lands a non-empty outfit counts
+        # as a real build, so the fresh-research nudge won't re-fire on a
+        # candidate that has already started composing.
+        if pending["name"] == "modify_outfit":
+            new_draft = state_updates.get("working_draft")
+            new_outfit = getattr(new_draft, "outfit", None) if new_draft is not None else None
+            if new_outfit is not None and getattr(new_outfit, "item_ids", None):
+                updates["stylist_has_built"] = True
         return updates
 
     def _route(state: StylistState) -> str:

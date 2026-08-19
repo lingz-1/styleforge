@@ -1,6 +1,10 @@
 # StyleForge 项目状态
 
-> 更新时间：2026-08-14
+> 更新时间：2026-08-20
+> 2026-08-19/20 **Multi-Agent Harness（H1+H2）+ H3a 上下文分层**：核心链路切换为 `StyleForgeHarness + LangGraph` 多 Agent 编排（Coordinator → Research Subgraph → Evidence Synthesizer → Stylist×3 → Environment Gate → Critic → StageCandidate → GoalGate → PersistCandidates），`AgentLoop.run()` 退休为 legacy adapter；H1a→H2c 分阶段落地（chat_tools / CapabilityRegistry / ContextGuard / PromptAssembler PromptBundle / 三套单次执行），真实 DeepSeek 验收产出 3 候选 + evidence + done，候选死锁用 bounded revision（Critic FAIL 后最多 3 步强制重提交 + DEGRADED_ACCEPTED 诚实标记）兜底。H3a 落地四个新 Context 子模块：**GroundingContext**（search-before-ask 确定性判定 + SEARCH_FIRST 运行时校验 + ThreadGroundingView pending_field 跨轮确认）、**PreferenceRetriever**（分层 Top-K：短期/场景/长期/避免，总 top_k=8）、**ThreadPreferenceView**（会话内偏好 + scope gate 拦截 turn 词防晋升长期）、**WardrobeIndexSummary**（衣橱 262KB 全量清单 → ~1KB 能力索引，消除 ContextGuard 截断）。前端「Context Pack 全量 JSON dump」替换为「Agent 上下文」面板（环境定位 / 分层偏好 / 对话上下文 / 查证记录），偏好不再刷屏。全量回归 **825 passed**。详见[开发过程记录](DEVELOPMENT_LOG.md)第 18、19 节。
+
+> 2026-08-20 真实 DeepSeek 回归（用户实测两个失败场景）：「下半年去piacon怎么穿搭」→ **needs_clarification**（uncertainties 明确、不再伪造事实）；「下半年去德奥音乐剧女演员pia的演唱会怎么穿搭」（piacon 实为 Pia Douwes 演唱会）→ 修复前 `infeasible / 0 候选` → 修复后 **completed / 2 套候选**。三个调试根因已修复：stylist 步数上限强制提交（有单品强制 CANDIDATE_READY）；research「散文 + 工具调用」整轮丢弃 → infer CONTINUE 执行（工具白调、步数不递增是 research 卡死直接根因）；research_synthesizer 活动身份不确定绝不拼凑（event/venue 留 null）。
+
 > 定位：用于实习求职展示的本地个人衣柜多 Agent 穿搭项目  
 > 当前阶段：Polyvore 演示主链路已形成可运行基线；Mytheresa 接入和订单衣柜导入已完成代码实现，订单衣柜最新版已通过回归与一次性数据库验收，但真实订单尚未提交、个人商品嵌入和 Mytheresa 全量接入仍待端到端验收。2026-08-05 修复了运动场合推荐不合理、UI 提交强制逐条填写、推荐结果不更新等问题，详见[问题与解决记录](ISSUE_LOG.md)。2026-08-05 完成 v3.2.1 语义驱动三 Agent 改造（DeepSeek）；2026-08-06 用真实 DeepSeek API 对 8 类代表性请求完成端到端验收（全部 accept、正常 3 次 LLM 调用、0 回退、推荐 100% 衣柜归属），备选方案已补确定性评分。2026-08-06 落地《评估方案.txt》五维统一评估框架：统一 Rubric 贯穿三 Agent、第三维改名 `outfit_coordination`、`request_signature` 新增 `explicit_style`、用户可配置五维权重（真实链路验证首选分=用户权重加权结果）。2026-08-06 完成架构规划 v3.3-plan.1（参考目录 + 扩展版方案收口，见 [ARCHITECTURE_PLAN.md](architecture/ARCHITECTURE_PLAN.md)），后端移动至 `apps/api/styleforge/`（保持 import），双端前端（Vue Web + 小程序）骨架与核心功能完成（衣柜/上传/编辑/补图/订单导入/推荐/偏好），新增拍照创建与修改衣物接口；小程序真机预览因校园网隔离待通。2026-08-09 完成默认模拟衣柜重建（catalog=衣柜零冗余）、FashionCLIP 嵌入 + FAISS 索引全量构建、衣柜可折叠（双端）、推荐跨页面持久化、推荐评分改为按 LLM 五维分排序并双分数展示（LLM+规则归一化到 100）、中英分类结构文档与上传表单大类必选/细分类可选联动、小程序真机 http 图片本地化修复，详见下方各节。
 

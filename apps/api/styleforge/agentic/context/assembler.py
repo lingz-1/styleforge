@@ -43,6 +43,9 @@ class PromptContext:
     base_draft: Any = None
     thread_context: dict[str, Any] | None = None
     memories: list[Any] = field(default_factory=list)
+    # H3a: the deterministic grounding context (date / city / decision) — a
+    # separate C-layer section, not coupled to ``environment_facts``.
+    grounding: dict[str, Any] | None = None
     loaded_skills: list[str] = field(default_factory=list)
     # D-layer, subgraph-private: an agent's own recent tool observations and the
     # last gate feedback it must replan on (frozen #9, gate loop).
@@ -51,8 +54,17 @@ class PromptContext:
 
 
 class ContextAssembler:
-    def __init__(self, visibility: ContextVisibilityPolicy | None = None) -> None:
+    def __init__(
+        self,
+        visibility: ContextVisibilityPolicy | None = None,
+        memory_retriever: Any | None = None,
+    ) -> None:
         self.visibility = visibility or ContextVisibilityPolicy()
+        # H3a-4: when injected, layered Top-K recall of ``raw_preferences``
+        # replaces the ``recalled_memories`` passthrough (retriever wins by
+        # convention, documented in the plan). Default None keeps the existing
+        # 700+ tests on the legacy fallback — zero changes.
+        self.memory_retriever = memory_retriever
 
     def assemble(self, agent: str, state: dict[str, Any]) -> PromptContext:
         """Read the Execution State through the agent's visibility view."""
@@ -80,7 +92,12 @@ class ContextAssembler:
         if view.thread_context:
             context.thread_context = state.get("thread_context")
         if view.memories:
-            context.memories = list(state.get("recalled_memories") or [])
+            if self.memory_retriever is not None:
+                context.memories = self.memory_retriever.retrieve(agent, state)
+            else:
+                context.memories = list(state.get("recalled_memories") or [])
+        if view.grounding:
+            context.grounding = state.get("grounding_context")
         if view.trajectory:
             context.tool_observations = list(state.get("tool_observations") or [])
         if view.gate_feedback:

@@ -29,6 +29,7 @@ from styleforge.agentic.agentic_contract import (
     check_decision_contract,
 )
 from styleforge.agentic.context.assembler import ContextAssembler
+from styleforge.agentic.context.grounding import required_searchable_kinds
 from styleforge.agentic.context.guard import ContextGuard
 from styleforge.agentic.context.prompt_assembler import PromptAssembler, PromptBundle
 from styleforge.agentic.context.visibility import ContextVisibilityPolicy
@@ -119,6 +120,7 @@ class AgentRuntime:
         visibility: ContextVisibilityPolicy | None = None,
         guard: ContextGuard | None = None,
         agent_instruction_versions: dict[str, str] | None = None,
+        memory_retriever: Any | None = None,
     ) -> None:
         # Every chat_tools / chat_json call (incl. Critic + Evidence Synthesizer,
         # which reach ``self.llm`` directly) bumps this counter.
@@ -128,7 +130,7 @@ class AgentRuntime:
         self.runtime_capabilities = runtime_capabilities
         self.hooks = hooks
         self.visibility = visibility or ContextVisibilityPolicy()
-        self.assembler = ContextAssembler(self.visibility)
+        self.assembler = ContextAssembler(self.visibility, memory_retriever)
         self.prompt_assembler = PromptAssembler(
             instructions_root=instructions_root,
             agent_instruction_versions=agent_instruction_versions,
@@ -204,6 +206,31 @@ class AgentRuntime:
                     ),
                     decision=decision,
                 )
+        # H3a-5 (frozen gap 3): SEARCH_FIRST is a lifecycle contract, not a
+        # prompt hint. Under a search_first grounding decision the research
+        # agent must have *attempted* (good-faith checked) every missing kind a
+        # deployed capability can resolve before it may RESEARCH_COMPLETE or
+        # NEED_USER. Attempted ≠ resolved: a checked-but-empty search passes
+        # (the synthesizer records the gap in uncertainties) — no dead loop.
+        if agent == "research":
+            grounding = state.get("grounding_context") or {}
+            if grounding.get("decision") == "search_first":
+                control = getattr(decision, "control", None)
+                if control in ("RESEARCH_COMPLETE", "NEED_USER"):
+                    required = required_searchable_kinds(
+                        grounding.get("missing"), self.runtime_capabilities
+                    )
+                    attempted = set(state.get("grounding_attempted_kinds") or [])
+                    if not required <= attempted:
+                        return AgentCallResult(
+                            protocol_error=(
+                                "Grounding requires verification first. Missing kinds "
+                                f"resolvable by your tools: {sorted(required)}; you have only "
+                                f"attempted {sorted(attempted)}. Use search_web/get_weather to "
+                                "check these before completing or asking the user."
+                            ),
+                            decision=decision,
+                        )
         # Frozen #14: need_plan_update must be the update_plan tool, never a
         # wardrobe mutation.
         if (
@@ -272,18 +299,17 @@ class AgentRuntime:
             tools=bundle.tools,
         )
         decision, error = _parse_decision(decision_text, decision_model)
-        if (
-            error is not None
-            and decision is None
-            and not decision_text.strip()
-            and tool_blocks
-        ):
+        if error is not None and decision is None and tool_blocks:
             # A tool-calling provider may return an empty assistant text when the
-            # model decides to call a tool (the decision JSON is omitted). The
-            # call itself is the signal: CONTINUE for Research/Stylist,
-            # need_plan_update for the Coordinator — the tool-count and
-            # update_plan-only checks below still guard the call. Never
-            # fabricated for an empty response WITHOUT tool calls.
+            # model decides to call a tool (the decision JSON is omitted), or a
+            # prose prefix around the tools when its narration mode slips in —
+            # both are the same signal: the call itself means "keep working".
+            # The decision is synthesised (CONTINUE for Research/Stylist,
+            # need_plan_update for the Coordinator) and the tool-count and
+            # update_plan-only checks below still guard the call. A terminal
+            # decision (RESEARCH_COMPLETE / CANDIDATE_READY) never carries tools,
+            # so prose WITHOUT tools stays a protocol error — a completion is
+            # never fabricated from narration.
             decision, tool_blocks, error = _infer_decision(
                 agent, decision_model, tool_blocks, state
             )

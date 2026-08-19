@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from styleforge.agentic.agents.stylist.graph import (
+    FRESH_RESEARCH_CAP,
     MAX_REVISION_STEPS,
     MAX_STYLIST_STEPS,
     build_stylist_subgraph,
@@ -38,7 +39,7 @@ from styleforge.models.agentic_contract import (
 )
 
 from tests.helpers import make_item
-from tests.llm.fake_llm import FakeLlm
+from tests.llm.fake_llm import FakeLlm, fake_diagnostics
 
 _INSTRUCTIONS = Path(__file__).resolve().parent.parent / "apps/api/styleforge/agentic/instructions"
 
@@ -49,6 +50,10 @@ _MODIFY_TOP_1 = {
 _MODIFY_TOP_2 = {
     "name": "modify_outfit",
     "arguments": {"plan": {"ops": [{"action": "add", "item_id": "top-2"}]}},
+}
+_INSPECT = {
+    "name": "inspect_outfit",
+    "arguments": {"outfit_id": "active"},
 }
 _OK = {"approved": True, "issues": [], "feedback": ""}
 
@@ -201,9 +206,11 @@ def test_stylist_candidate_ready_with_tool_recovers_after_reentry() -> None:
     assert "0 tool call" in protocol_obs[0]["observation"]
 
 
-def test_stylist_step_cap_returns_protocol_error() -> None:
-    # MAX_STYLIST_STEPS CONTINUE+tool turns then the cap closes the subgraph —
-    # never a fabricated CANDIDATE_READY.
+def test_stylist_step_cap_force_submits_draft_with_items() -> None:
+    # Real-model "piacon" regression: a fresh candidate that kept editing /
+    # searching without submitting hits MAX_STYLIST_STEPS with a (legal) draft in
+    # hand. The cap now FORCES a CANDIDATE_READY instead of discarding it as
+    # PROTOCOL_ERROR — the Main Graph's gates validate whatever was built.
     llm = FakeLlm(
         [
             ({"decision_summary": "继续", "control": "CONTINUE"}, [_MODIFY_TOP_1])
@@ -215,9 +222,60 @@ def test_stylist_step_cap_returns_protocol_error() -> None:
         {"request": "x", "goal": "g", "base_draft": _base_draft(), "working_draft": _base_draft()}
     )
 
+    assert out["handoff_result"].status == "COMPLETED"  # forced submit, not PROTOCOL_ERROR
+    assert out["trajectory_step_count"] == MAX_STYLIST_STEPS
+    assert out["handoff_result"].trace_summary is not None
+    assert "强制提交" in str(out["handoff_result"].trace_summary)
+
+
+def test_stylist_step_cap_protocol_error_on_empty_draft() -> None:
+    # The cap only PROTOCOL_ERRORs when nothing was ever built (inspect_outfit
+    # never writes a draft) — a genuinely empty handed stop, never a fabricated
+    # candidate. The fresh-research nudge fires once mid-run but the script keeps
+    # ignoring it, so the cap closes the subgraph.
+    llm = FakeLlm(
+        [
+            ({"decision_summary": "查看", "control": "CONTINUE"}, [_INSPECT])
+        ]
+        * MAX_STYLIST_STEPS
+    )
+    subgraph = build_stylist_subgraph(_runtime(llm))
+    out = subgraph.invoke(
+        {"request": "x", "goal": "g", "base_draft": _base_draft(), "working_draft": _base_draft()}
+    )
+
     assert out["handoff_result"].status == "PROTOCOL_ERROR"
     assert out["trajectory_step_count"] == MAX_STYLIST_STEPS
-    assert len(out["tool_observations"]) == MAX_STYLIST_STEPS
+    nudges = [o for o in out["tool_observations"] if o["tool"] == "__protocol__"]
+    assert len(nudges) == 1  # one-shot nudge, never repeated
+
+
+def test_stylist_fresh_research_nudge_forces_build() -> None:
+    # Real-model "piacon" regression: a fresh candidate re-searches facts
+    # forever without ever calling modify_outfit, burning the step cap. At
+    # FRESH_RESEARCH_CAP tool turns a "__protocol__" nudge (no model call) is
+    # injected telling it to compose a complete outfit; the script proves the
+    # nudge was FREE by only supplying the pre-nudge searches + one build + one
+    # submit — a model call spent on the nudge would exhaust the script.
+    script: list[Any] = [
+        ({"decision_summary": "查证", "control": "CONTINUE"}, [_INSPECT])
+        for _ in range(FRESH_RESEARCH_CAP)
+    ]
+    script.append(({"decision_summary": "组合", "control": "CONTINUE"}, [_MODIFY_TOP_1]))
+    script.append({"decision_summary": "完成", "control": "CANDIDATE_READY"})
+    llm = FakeLlm(script)
+    subgraph = build_stylist_subgraph(_runtime(llm))
+    out = subgraph.invoke(
+        {"request": "x", "goal": "g", "base_draft": _base_draft(), "working_draft": _base_draft()}
+    )
+
+    assert out["handoff_result"].status == "COMPLETED"
+    assert out["fresh_research_nudged"] is True
+    assert out["stylist_has_built"] is True
+    nudges = [o for o in out["tool_observations"] if o["tool"] == "__protocol__"]
+    assert len(nudges) == 1
+    assert "只查证" in nudges[0]["observation"]
+    assert "modify_outfit" in nudges[0]["observation"]
 
 
 def test_stylist_continue_without_tool_gets_two_way_observation() -> None:
@@ -300,13 +358,22 @@ def test_main_happy_path_stages_three_candidates() -> None:
     assert all(candidate["run_id"] == "run-happy" for candidate in out["candidates"])
 
 
-def test_main_bootstrap_seeds_environment_facts_into_stylist_prompt() -> None:
+def test_main_bootstrap_seeds_wardrobe_index_into_stylist_prompt() -> None:
     # Frozen #15: BootstrapContext seeds the Environment's pre-legacy facts into
     # the Execution State. Without them the Stylist prompt carries no wardrobe
-    # summary and falls back to blind search_wardrobe probing — the regression
+    # index and falls back to blind search_wardrobe probing — the regression
     # that burned whole real-model runs. The Stylist's FIRST model call must see
-    # the item ids it can compose from.
-    facts = EnvironmentFacts(wardrobe_summary={"top": ["top-1", "top-2"]})
+    # the wardrobe index (facts are seeded); concrete ids arrive only via
+    # search_wardrobe (H3a-1: the 262 KB item dump is gone).
+    facts = EnvironmentFacts(
+        wardrobe_summary={
+            "item_count": 2,
+            "categories": {"top": 2},
+            "colors": [],
+            "candidate_pool": {"top": 2},
+            "top": {"count": 2, "sample_colors": []},
+        }
+    )
     env = _FakeEnvironmentWithFacts(facts)
     llm = FakeLlm(
         [
@@ -322,10 +389,15 @@ def test_main_bootstrap_seeds_environment_facts_into_stylist_prompt() -> None:
 
     assert out["status"] == "done"
     assert len(out["candidates"]) == 1
+    system = llm.calls[0]["system"]
     # The facts are part of the runtime-context layer (system_text), not the
-    # D-layer user message — the Stylist's first call must see the item ids.
-    assert "top-1" in llm.calls[0]["system"]
-    assert "top-2" in llm.calls[0]["system"]
+    # D-layer user message — the Stylist's first call must see the index.
+    assert "衣橱：" in system
+    assert "共 2 件" in system
+    assert "品类 top 2" in system
+    # Concrete ids no longer ride in the prompt; search_wardrobe fetches them.
+    assert "top-1" not in system
+    assert "top-2" not in system
 
 
 def test_main_reset_to_base_draft_not_previous_candidate() -> None:
@@ -504,3 +576,96 @@ def test_critic_speaks_chat_json_with_assembled_bundle() -> None:
     assert json_calls[0]["json_schema"]["properties"]["approved"]["type"] == "boolean"
     # The Critic's stable prefix comes from the shared instructions files.
     assert "批评" in json_calls[0]["system"] or "审校" in json_calls[0]["system"]
+
+
+class _ProseLlm:
+    """A scripted chat_tools fake whose entries may carry raw prose + tool calls.
+
+    FakeLlm always JSON-serialises the decision dict, so it cannot reproduce the
+    real DeepSeek narration slip where the assistant emits natural language
+    alongside a genuine tool call (the "pia 演唱会" regression). A tuple entry
+    ``(prose, [tool_specs])`` returns the prose verbatim with the tools — the
+    AgentRuntime must read the tool call as the CONTINUE signal and execute it,
+    not drop the whole turn as a protocol error. A dict entry behaves like a
+    clean zero-tool decision.
+    """
+
+    def __init__(self, script: list[Any]) -> None:
+        self.script = list(script)
+        self.calls: list[str] = []
+
+    def chat_tools(
+        self,
+        *,
+        system: str,
+        user: str,
+        tools: list[Any],
+        tool_choice: str = "auto",
+        temperature: float = 0.2,
+    ) -> tuple[str, list[Any], Any]:
+        import json
+
+        from styleforge.llm.client import ToolUseBlock
+
+        self.calls.append(user)
+        entry = self.script[0]
+        self.script = self.script[1:]
+        if isinstance(entry, tuple):
+            prose, tool_specs = entry
+            blocks = [
+                ToolUseBlock(
+                    name=spec["name"],
+                    arguments=spec.get("arguments", {}),
+                    arg_json=json.dumps(spec.get("arguments", {}), ensure_ascii=False),
+                )
+                for spec in tool_specs
+            ]
+            return prose, blocks, fake_diagnostics()
+        return json.dumps(entry, ensure_ascii=False), [], fake_diagnostics()
+
+
+def test_stylist_prose_with_tool_runs_the_tool_not_protocol_error() -> None:
+    # Real-model "pia 演唱会" regression: the model narrated its intent in prose
+    # and attached a genuine modify_outfit call. Prose-with-tool is the same
+    # "keep working" signal as an empty text with a tool — the call must execute
+    # (CONTINUE), not burn the whole turn as a protocol error (which never ran
+    # the tool and never advanced the step budget, so the subgraph could never
+    # reach its forced-submit cap).
+    llm = _ProseLlm(
+        [
+            ("我需要结合当前衣橱再调整一下", [_MODIFY_TOP_1]),
+            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
+        ]
+    )
+    subgraph = build_stylist_subgraph(_runtime(llm))
+    out = subgraph.invoke(
+        {"request": "x", "goal": "g", "base_draft": _base_draft(), "working_draft": _base_draft()}
+    )
+
+    assert out["handoff_result"].status == "COMPLETED"
+    protocol_obs = [o for o in out["tool_observations"] if o["tool"] == "__protocol__"]
+    assert len(protocol_obs) == 0  # the prose turn was NOT dropped
+    assert out["trajectory_step_count"] == 1  # modify_outfit actually ran
+    assert out["working_draft"].outfit.item_ids == ["top-1"]
+
+
+def test_stylist_prose_without_tool_stays_protocol_error_reentry() -> None:
+    # The mirror case: prose WITHOUT a tool call cannot be read as any signal —
+    # a terminal decision (CANDIDATE_READY) must never be fabricated from
+    # narration, so it stays a protocol-error re-entry (recoverable, one turn).
+    llm = _ProseLlm(
+        [
+            "这套方案我觉得挺好了就定这套吧",
+            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
+        ]
+    )
+    subgraph = build_stylist_subgraph(_runtime(llm))
+    out = subgraph.invoke(
+        {"request": "x", "goal": "g", "base_draft": _base_draft(), "working_draft": _base_draft()}
+    )
+
+    assert out["handoff_result"].status == "COMPLETED"  # self-healed on the retry
+    # The prose turn was consumed by a protocol-error re-entry (script entry #1),
+    # then entry #2 (CANDIDATE_READY) finished the run — both script entries are
+    # gone, so the prose turn really did re-enter instead of being skipped.
+    assert llm.script == []

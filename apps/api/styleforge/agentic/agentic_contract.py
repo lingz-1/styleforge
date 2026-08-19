@@ -279,6 +279,15 @@ class StyleForgeState(TypedDict, total=False):
     recalled_memories: list[Any]
     loaded_skills: list[str]
 
+    # H3a grounding (Context → Search → Materiality → Ask). ``grounding_context``
+    # is the GroundingResolver output (model_dump(mode="json")); the two-state
+    # grounding_attempted / grounding_resolved list tracks what the Research
+    # subgraph actually verified (缺口 3/4) — attempted ≠ resolved.
+    grounding_context: Any  # GroundingContext dict (json-safe)
+    raw_preferences: list[Any]  # normalized memory_profile for PreferenceRetriever
+    grounding_attempted_kinds: list[str]
+    grounding_resolved_kinds: list[str]
+
     research_evidence: ResearchEvidence | None
     base_draft: Any  # OutfitDraft: recommend=empty base, modify=original snapshot
     working_draft: Any  # current candidate in progress

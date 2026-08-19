@@ -201,9 +201,46 @@
       <div v-if="result.covered_elements?.length" class="covered"><strong>已覆盖元素</strong><span v-for="item in result.covered_elements" :key="item.id">{{ item.label }}</span></div>
     </section>
 
+    <section v-if="isRecommend && agentOutcome" class="block agent-context-block">
+      <div class="section-heading"><h3>Agent 上下文</h3><span>模型实际看到的分层上下文</span></div>
+      <article class="agent-context-card">
+        <template v-if="groundingRows.length">
+          <div class="context-section">
+            <strong class="context-label">环境定位</strong>
+            <div class="grounding-grid">
+              <div v-for="row in groundingRows" :key="row.label"><span>{{ row.label }}</span><strong>{{ row.text }}</strong></div>
+            </div>
+          </div>
+        </template>
+        <template v-if="preferenceGroups.length">
+          <div class="context-section">
+            <strong class="context-label">分层偏好<small> 来自长期记忆 Top-K（共 {{ totalPrefCount }} 条）</small></strong>
+            <div v-for="group in preferenceGroups" :key="group.label" class="pref-group">
+              <span class="pref-layer">{{ group.label }}</span>
+              <ul>
+                <li v-for="item in group.items" :key="item.key">{{ item.text }}</li>
+              </ul>
+            </div>
+          </div>
+        </template>
+        <template v-if="threadNotes.length">
+          <div class="context-section">
+            <strong class="context-label">对话上下文</strong>
+            <ul class="thread-notes"><li v-for="note in threadNotes" :key="note">{{ note }}</li></ul>
+          </div>
+        </template>
+        <template v-if="groundingKinds.length">
+          <div class="context-section">
+            <strong class="context-label">查证记录</strong>
+            <div class="grounding-kinds"><span v-for="kind in groundingKinds" :key="kind" class="grounding-kind">{{ kind }}</span></div>
+          </div>
+        </template>
+      </article>
+    </section>
+
     <el-collapse v-if="hasTechnical" class="block technical">
-      <el-collapse-item title="Context Pack 与 Agent 输出" name="trace">
-        <pre>{{ JSON.stringify({ context_pack: payload.context_pack, agent_outputs: payload.agent_outputs, trace: payload.trace }, null, 2) }}</pre>
+      <el-collapse-item title="Agent 输出与轨迹（原始调试）" name="trace">
+        <pre>{{ JSON.stringify({ agentic_outcome: technicalOutcome, agent_outputs: payload.agent_outputs, trace: payload.trace }, null, 2) }}</pre>
       </el-collapse-item>
     </el-collapse>
   </section>
@@ -348,6 +385,87 @@ const planningNotes = computed(() => {
   for (const unc of evidence?.uncertainties || []) notes.push({ label: '未确定', type: 'uncertainty', text: unc })
   return notes
 })
+
+// --- New "Agent 上下文" panel ----------------------------------------------
+// Renders the layered context the model actually saw (environment grounding +
+// layered Top-K preferences + thread view) instead of the old full legacy
+// context_pack dump, which polluted the page with ~19 noisy preference rows.
+const agentOutcome = computed(() => {
+  const raw = props.payload?.agentic_outcome
+  return (Array.isArray(raw) ? raw[0] : raw) || null
+})
+
+const DECISION_LABELS = { ready: '上下文已足够', search_first: '先搜索再确认', need_user: '需向你确认' }
+const groundingRows = computed(() => {
+  const g = agentOutcome.value?.grounding_context
+  if (!g) return []
+  const rows = []
+  if (g.current_date) rows.push({ label: '当前日期', text: g.current_date })
+  if (g.current_city) rows.push({ label: '当前城市', text: g.location_source ? `${g.current_city}（来源：${g.location_source}）` : g.current_city })
+  if (g.destination_city) rows.push({ label: '目标城市', text: g.destination_city })
+  if (g.date_expression) rows.push({ label: '时间表达', text: g.date_expression })
+  if (g.approximate_time) rows.push({ label: '时间定位', text: g.approximate_time })
+  if (g.decision) rows.push({ label: '定位决策', text: DECISION_LABELS[g.decision] || g.decision })
+  if (g.missing && g.missing.length) rows.push({ label: '未定位', text: g.missing.join('、') })
+  return rows
+})
+
+const preferenceGroups = computed(() => {
+  const list = agentOutcome.value?.preference_context || []
+  const groups = []
+  let current = null
+  for (const item of list) {
+    const label = item.layer_label || item.layer || '偏好'
+    if (!current || current.label !== label) { current = { label, items: [] }; groups.push(current) }
+    current.items.push({
+      key: item.value || item.attribute || item.content || item.dimension || item.key || '',
+      text: prefText(item),
+    })
+  }
+  return groups
+})
+const totalPrefCount = computed(() => (agentOutcome.value?.preference_context || []).length)
+
+function prefText(item) {
+  const value = item.value || item.content || item.attribute || item.dimension || ''
+  const confidence = item.confidence != null ? `置信度 ${Number(item.confidence).toFixed(2)}` : ''
+  return [value, confidence].filter(Boolean).join(' · ')
+}
+
+const threadNotes = computed(() => {
+  const t = agentOutcome.value?.thread_context
+  if (!t) return []
+  const notes = []
+  const prefs = t.thread_preferences
+  const list = Array.isArray(prefs) ? prefs : (prefs?.preferences || [])
+  for (const p of list) {
+    const value = p.value || p.content || p.attribute
+    if (value) notes.push(`会话偏好：${value}`)
+  }
+  const tg = t.thread_grounding || {}
+  if (tg.activity) notes.push(`上轮确认活动：${tg.activity}`)
+  if (tg.destination_city) notes.push(`上轮确认城市：${tg.destination_city}`)
+  if (tg.date_expression) notes.push(`上轮确认时间：${tg.date_expression}`)
+  return notes
+})
+
+const KIND_LABELS = { event_location: '活动地点', event_date: '活动日期', weather: '天气', local_time: '当地时间' }
+const groundingKinds = computed(() => {
+  const o = agentOutcome.value
+  if (!o) return []
+  const attempted = o.grounding_attempted_kinds || []
+  const resolved = o.grounding_resolved_kinds || []
+  return attempted.map((k) => `${KIND_LABELS[k] || k}${resolved.includes(k) ? ' ✓' : '（查过未确认）'}`)
+})
+
+// Technical dump: exclude the noisy raw_preferences / context_pack so the raw
+// debug view shows the trajectory, not the ~12 K-char legacy preference blob.
+const technicalOutcome = computed(() => {
+  const outcome = { ...(agentOutcome.value || {}) }
+  delete outcome.raw_preferences
+  delete outcome.context_pack
+  return outcome
+})
 const envByOutfit = computed(() => {
   const map = {}
   for (const proposal of recommendation.value.proposals || []) {
@@ -414,6 +532,14 @@ const recommendationLabel = (value) => ({ recommended: '建议', consider: '可�
 .anchor { display: flex; gap: 14px; width: fit-content; min-width: 300px; margin: 16px 0 28px; padding: 10px; border: 1px solid #d6dbd6; }.anchor :deep(.el-image) { width: 96px; height: 110px; }.anchor div { display: flex; flex-direction: column; justify-content: center; }.anchor small { color: var(--copper); }.anchor strong { margin: 6px 0; }.anchor span, .muted { color: #7c8580; font-size: 12px; }.slot-group { margin-top: 26px; }
 .scoreboard { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid #d5dbd6; }.scoreboard div { padding: 18px; border-right: 1px solid #d5dbd6; }.scoreboard div:last-child { border: 0; }.scoreboard strong, .scoreboard span { display: block; }.scoreboard strong { font-family: Georgia, serif; font-size: 28px; }.scoreboard span { margin-top: 4px; color: #7c8580; font-size: 12px; }
 .gap-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }.gap-card { padding: 16px; border-top: 3px solid var(--copper); background: #f4f2eb; }.gap-card > span { text-transform: uppercase; color: var(--copper); font-size: 10px; letter-spacing: .12em; }.gap-card h4 { margin: 9px 0; }.gap-card p { color: #626d67; line-height: 1.6; }.covered { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }.covered strong { width: 100%; }.covered span { padding: 5px 9px; border: 1px solid #cbd2cc; border-radius: 999px; font-size: 12px; }.technical pre { max-height: 440px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+.agent-context-card { padding: 14px 16px; border: 1px solid #d5dbd6; background: #faf9f4; }
+.context-section { padding: 10px 0; border-top: 1px dashed #dcd9ce; }.context-section:first-child { border-top: 0; padding-top: 0; }
+.context-label { display: block; margin-bottom: 8px; color: var(--moss); font-size: 11px; letter-spacing: .08em; }.context-label small { color: #89928d; font-weight: 400; letter-spacing: 0; }
+.grounding-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 16px; }.grounding-grid div span { display: block; color: #89928d; font-size: 11px; }.grounding-grid div strong { display: block; margin-top: 2px; color: #4b5751; font-size: 13px; font-weight: 600; }
+.pref-group { margin-bottom: 8px; }.pref-group:last-child { margin-bottom: 0; }
+.pref-layer { display: inline-block; padding: 2px 8px; border: 1px solid #cbd2cc; border-radius: 999px; font-size: 11px; color: var(--moss); }
+.pref-group ul, .thread-notes { margin: 6px 0 0; padding-left: 16px; }.pref-group li, .thread-notes li { color: #5e6863; font-size: 12px; line-height: 1.7; }
+.grounding-kinds { display: flex; gap: 8px; flex-wrap: wrap; }.grounding-kind { padding: 3px 9px; border: 1px solid #cbd2cc; border-radius: 999px; font-size: 12px; color: #4b5751; }
 @media (max-width: 900px) { .outfit-grid, .gap-grid { grid-template-columns: 1fr; }.weather-facts { flex-direction: column; }.weather-facts dl, .weather-days { flex-wrap: wrap; }.weather-body { align-items: flex-start; }.weather-note { text-align: left; }.knowledge-layout { grid-template-columns: 1fr; }.item-grid { grid-template-columns: repeat(2, 1fr); }.scoreboard { grid-template-columns: repeat(2, 1fr); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
 </style>

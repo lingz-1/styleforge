@@ -27,6 +27,7 @@ from styleforge.agentic.agentic_contract import (
     ResearchEvidence,
 )
 from styleforge.agentic.agents.research.synthesize import make_evidence_synthesizer
+from styleforge.agentic.context.grounding import grounding_progress_for_tool
 from styleforge.agentic.runtime.agent_runtime import AgentRuntime, ContextLimitError
 
 # Research is bounded: at most a few web/weather/knowledge/skill calls per goal.
@@ -54,6 +55,12 @@ class ResearchState(TypedDict, total=False):
     recalled_memories: list[Any]
     loaded_skills: list[str]
     interaction: Any
+    # H3a-5 grounding contract — shared channels crossing to/from the Main
+    # Graph: the resolver's decision enters, the attempted/resolved progress
+    # returns (the AgentRuntime SEARCH_FIRST gate reads them on the next turn).
+    grounding_context: dict | None
+    grounding_attempted_kinds: list[str]
+    grounding_resolved_kinds: list[str]
     # private trajectory — never returned to the parent (frozen #18)
     raw_evidence: list[dict[str, Any]]  # RawEvidenceBuffer, synthesizer input
     tool_observations: list[dict[str, Any]]
@@ -175,6 +182,21 @@ def build_research_subgraph(runtime: AgentRuntime):
                     "content": observation,
                 }
             ]
+        # H3a-5 two-state grounding progress: only a *successful* execution
+        # counts as attempted (a failed tool never does); resolved = the result
+        # actually carries fillable facts. Checked-but-empty → attempted only →
+        # the SEARCH_FIRST gate passes and the Synthesizer records uncertainties.
+        if tool_result.status == "ok":
+            attempted, resolved = grounding_progress_for_tool(
+                pending["name"], pending["arguments"], str(observation)
+            )
+            if attempted:
+                updates["grounding_attempted_kinds"] = sorted(
+                    set(state.get("grounding_attempted_kinds") or []) | attempted
+                )
+                updates["grounding_resolved_kinds"] = sorted(
+                    set(state.get("grounding_resolved_kinds") or []) | resolved
+                )
         updates.update(tool_result.state_updates or {})
         return updates
 

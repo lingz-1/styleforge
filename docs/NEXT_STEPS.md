@@ -1,7 +1,22 @@
 # 后续工作
 
-> 更新时间：2026-08-14  
+> 更新时间：2026-08-20  
 > 原则：先验证最新代码，再预览真实订单，最后才允许提交衣柜或导入 Mytheresa 主库。
+
+## P0：Multi-Agent Harness（H1+H2）+ H3a 上下文分层（✅ 2026-08-20 已完成）
+
+- **H1+H2（LangGraph 多 Agent 编排）**：核心链路切换为 `StyleForgeHarness`，Coordinator → Research Subgraph → Evidence Synthesizer → Stylist×3 → Environment Gate → Critic → StageCandidate → GoalGate → PersistCandidates；H1a→H2c 分阶段落地，真实 DeepSeek 验收产出 3 候选 + evidence + done，候选死锁用 bounded revision（Critic FAIL 后最多 3 步强制重提交 + DEGRADED_ACCEPTED）兜底。
+- **H3a（Grounding + Memory 分层 + WardrobeIndex）**：`GroundingContext`（search-before-ask 确定性判定 + SEARCH_FIRST 运行时校验 + ThreadGroundingView pending_field 跨轮确认）、`PreferenceRetriever`（短期/场景/长期/避免分层 Top-K）、`ThreadPreferenceView`（会话内偏好 + scope gate 拦截 turn 词）、`WardrobeIndexSummary`（衣橱 262KB 全量清单 → ~1KB 能力索引）。
+- **真实 DeepSeek 回归**：「下半年去piacon怎么穿搭」→ needs_clarification（不伪造事实）；「下半年去pia的演唱会怎么穿搭」→ 修复前 `infeasible / 0 候选` → 修复后 **completed / 2 候选 / 36 次调用**。四个调试根因见 [开发过程记录](DEVELOPMENT_LOG.md) 19.3。
+- 验证：全量回归 **825 passed**；详见 [项目状态](PROJECT_STATUS.md) 与 [开发过程记录](DEVELOPMENT_LOG.md) 第 18、19 节。
+
+后续候选：
+
+- 基线对比评估（规则关键词 vs FashionCLIP）仍待办（见下节）。
+- EXT-002/003 遗留缺陷（one_piece 缺配饰/外套；记忆过度归纳）仍待修。
+- 多轮反悔还原原 item（「鞋还是换回来，其他保留」）待设计。
+- H3b：Memory 写链（apply_evidence 生命周期/consolidation 优化）、ContextCompact 全量（EvidenceStore 摘要 → micro-summary → trim → LLM compact）。
+- H4：MCP 接入、PermissionManager、后台任务、Research 深层 subagent。
 
 ## P1：用户长期记忆系统与多轮对话（✅ 2026-08-12 已完成）
 

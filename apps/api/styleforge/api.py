@@ -72,7 +72,14 @@ from styleforge.services.memory_aggregator import apply_evidence
 from styleforge.services.memory_consolidation import consolidate_session
 from styleforge.services.memory_evidence import behavior_evidence_from_event
 from styleforge.repositories.task_run_repository import get_task_run
-from styleforge.core.redis import delete_session_outfit_cache, redis_client_from_settings
+from styleforge.core.redis import (
+    delete_session_outfit_cache,
+    get_session_outfit_cache,
+    redis_client_from_settings,
+    set_session_outfit_cache,
+)
+from styleforge.agentic.context.grounding import update_thread_grounding
+from styleforge.agentic.context.thread_preferences import update_thread_preferences
 from styleforge.services.chat_service import (
     assistant_summary,
     cache_session_outfit,
@@ -318,6 +325,9 @@ def get_multi_task_workflow() -> MultiTaskWorkflow:
             else None
         ),
         skills_root=settings.knowledge_root / "skills",
+        # H3a-3 grounding: the global default city (used when neither device nor
+        # profile pins the user's location) mirrors the legacy weather gate.
+        default_location=settings.weather_default_location,
     )
 
 
@@ -794,6 +804,35 @@ def _resolve_session_turn(request: TaskExecutionInput) -> dict[str, Any] | None:
     return context
 
 
+def _update_thread_views(
+    request: TaskExecutionInput,
+    session_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge this turn into the thread-scoped preference / grounding views.
+
+    Called right after the user message is persisted (frozen 缺口 5), so the
+    update is independent of whether execution succeeds — a NEED_USER or failed
+    turn still keeps "这次不要红色" style constraints for the next request. The
+    merged view is written back to the Redis session cache so a follow-up turn
+    reads it through ``get_session_outfit_context`` (Redis miss → empty view,
+    never a crash).
+    """
+    updated = {
+        **session_context,
+        "thread_preferences": update_thread_preferences(
+            session_context.get("thread_preferences") or {}, request.request
+        ),
+        "thread_grounding": update_thread_grounding(
+            session_context.get("thread_grounding") or {}, request.request
+        ),
+    }
+    if request.session_id:
+        set_session_outfit_cache(
+            _redis_client, request.session_id, updated, settings.redis_ttl
+        )
+    return updated
+
+
 def _append_chat_success(
     request: TaskExecutionInput,
     payload: dict[str, Any],
@@ -816,9 +855,50 @@ def _append_chat_success(
                 "outfit_context": outfit_context,
             },
         )
-    # Warm the Redis session cache so the next follow-up skips the DB scan.
+    # H3a-2: never drop the thread-scoped views written before execution when
+    # warming the outfit cache — a plain overwrite would lose the turn's
+    # constraints for the next request.
+    cached = get_session_outfit_cache(_redis_client, request.session_id)
+    if isinstance(cached, dict):
+        for key in ("thread_preferences", "thread_grounding"):
+            if key in cached:
+                outfit_context[key] = cached[key]
     cache_session_outfit(_redis_client, request.session_id, outfit_context, settings.redis_ttl)
     return message_id
+
+
+def _persist_clarification_pending_field(
+    request: TaskExecutionInput,
+    payload: dict[str, Any],
+) -> None:
+    """NEED_USER path: persist the clarification's pending_field (H3a-3).
+
+    The Main Graph's clarification_node writes ``pending_field`` into the
+    outcome's thread_context. The next turn's bare reply ("上海") is
+    deterministically read as that field's answer only if the field survives
+    into the Redis session cache — closing Question → Answer → Grounding
+    continuity.
+    """
+    if not request.session_id:
+        return
+    outcome = payload.get("agentic_outcome")
+    if isinstance(outcome, list):
+        outcome = outcome[0] if outcome else None
+    if not isinstance(outcome, dict) or str(outcome.get("status")) != "needs_clarification":
+        return
+    thread = outcome.get("thread_context")
+    if not isinstance(thread, dict):
+        return
+    grounding = thread.get("thread_grounding")
+    if not isinstance(grounding, dict) or not grounding.get("pending_field"):
+        return
+    cached = get_session_outfit_cache(_redis_client, request.session_id)
+    if not isinstance(cached, dict):
+        cached = {}
+    current_grounding = dict(cached.get("thread_grounding") or {})
+    current_grounding["pending_field"] = grounding["pending_field"]
+    cached["thread_grounding"] = current_grounding
+    set_session_outfit_cache(_redis_client, request.session_id, cached, settings.redis_ttl)
 
 
 def _append_chat_failure(request: TaskExecutionInput, detail: str) -> None:
@@ -874,6 +954,10 @@ def _record_task_event(request: TaskExecutionInput, payload: dict[str, Any]) -> 
 def execute_task(request: TaskExecutionInput) -> dict[str, Any]:
     """Route and execute one complete StyleForge task subgraph."""
     session_context = _resolve_session_turn(request)
+    # H3a-2: update thread-scoped views the moment the user message is accepted
+    # (缺口 5) — a NEED_USER / failed turn must never drop "这次不要红色".
+    if session_context is not None:
+        session_context = _update_thread_views(request, session_context)
     try:
         payload = get_multi_task_workflow().execute(
             request, session_context=session_context
@@ -900,6 +984,9 @@ def execute_task(request: TaskExecutionInput) -> dict[str, Any]:
             detail=f"Task execution failed: {type(error).__name__}: {error}",
         ) from error
     message_id = _append_chat_success(request, payload)
+    # H3a-3: a NEED_USER turn must carry its pending_field into the session
+    # cache so the next bare reply is read as that field's answer.
+    _persist_clarification_pending_field(request, payload)
     _record_task_event(request, payload)
     payload["session_id"] = request.session_id
     payload["message_id"] = message_id
