@@ -258,6 +258,35 @@ class WebSearchResult(BaseModel):
     available: bool = True
 
 
+class SkillResult(BaseModel):
+    """``load_skill`` return. Never raises.
+
+    A skill is procedural task knowledge (e.g. event-outfit planning) the
+    Agent loads when it recognises the task type. ``available=False`` means
+    the skill is missing/unconfigured — a fact the Agent works around.
+    """
+
+    name: str = ""
+    content: str = ""
+    error: str | None = None
+    available: bool = True
+
+
+class PlanState(BaseModel):
+    """The Agent's *structured* plan for a complex task (not chain-of-thought).
+
+    Recorded in the trace as a decision summary so Stage 3 can audit whether
+    the Agent surveyed what it needed before acting. Optional: simple requests
+    act directly and emit no plan_state.
+    """
+
+    objective: str = ""
+    missing_information: list[str] = Field(default_factory=list)
+    next_steps: list[str] = Field(default_factory=list)
+    completed_steps: list[str] = Field(default_factory=list)
+    remaining_steps: list[str] = Field(default_factory=list)
+
+
 class CheckEnvironmentResult(BaseModel):
     """``check_environment`` — pure deterministic structural legality.
 

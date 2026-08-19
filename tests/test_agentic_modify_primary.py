@@ -21,8 +21,8 @@ from styleforge.repositories.database import database_session, initialize_databa
 from styleforge.repositories.wardrobe_repository import add_items
 from styleforge.workflow.task_workflow import MultiTaskWorkflow, _resolve_modify_mode
 
-from tests.extension_llm import ScriptedExtensionLlm
 from tests.helpers import make_item
+from tests.llm.fake_llm import FakeLlm
 
 
 def _seed(database_path: str) -> None:
@@ -187,44 +187,40 @@ def test_outcome_single_item_becomes_clarification(db_dsn: str) -> None:
 
 # ── execute() primary end-to-end against a real database ─────────────
 
+# The one tool call the scripted Stylist makes: replace the leather shoes with
+# the sneakers, keeping the rest of the outfit (Harness modify contract).
+_REPLACE_SHOES = {
+    "name": "modify_outfit",
+    "arguments": {
+        "plan": {
+            "ops": [
+                {
+                    "action": "replace",
+                    "item_id": "shoes-1",
+                    "replacement_item_id": "sneakers-1",
+                    "placement": {"region": "feet", "layer": "base"},
+                }
+            ],
+            "reasoning": "换运动鞋更舒适",
+        }
+    },
+}
+
 
 def test_execute_agentic_primary_end_to_end(db_dsn: str) -> None:
     initialize_database(db_dsn)
     _seed(db_dsn)
-    llm = ScriptedExtensionLlm(
+    llm = FakeLlm(
         [
-            {
-                "thought": "换鞋",
-                "goal": "把皮鞋换成舒适的运动鞋",
-                "requirements": ["要舒适"],
-                "action": "modify_outfit",
-                "query": "",
-                "outfit_id": "",
-                "plan": {
-                    "ops": [
-                        {
-                            "action": "replace",
-                            "item_id": "shoes-1",
-                            "replacement_item_id": "sneakers-1",
-                            "placement": {"region": "feet", "layer": "base"},
-                        }
-                    ],
-                    "reasoning": "换运动鞋更舒适",
-                },
-                "question": "",
-            },
-            {
-                "thought": "完成",
-                "goal": "把皮鞋换成舒适的运动鞋",
-                "requirements": ["要舒适"],
-                "action": "finish",
-                "query": "",
-                "outfit_id": "",
-                "plan": None,
-                "question": "",
-            },
-            {"approved": True, "issues": [], "feedback": "已换成白色运动鞋"},  # reviewer
-            {"evidence": []},  # memory extraction
+            # coordinator → STYLIST handoff
+            {"decision_summary": "换运动鞋", "goal": "把皮鞋换成舒适的运动鞋", "next_agent": "STYLIST"},
+            # stylist: one modify_outfit call, then the candidate is ready
+            ({"decision_summary": "替换皮鞋", "control": "CONTINUE"}, [_REPLACE_SHOES]),
+            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
+            # Main-Graph critic (chat_json)
+            {"approved": True, "issues": [], "feedback": "已换成白色运动鞋"},
+            # memory extraction (chat_json, outside the harness proxy)
+            {"evidence": []},
         ]
     )
     workflow = _workflow(db_dsn, llm, modify_mode="agentic")
@@ -238,9 +234,20 @@ def test_execute_agentic_primary_end_to_end(db_dsn: str) -> None:
     assert result["alternatives"][0]["item_ids"] == [
         "top-1", "bottom-1", "coat-1", "sneakers-1",
     ]
-    assert payload["llm_call_count"] == 3
-    assert payload["agentic_outcome"]["status"] == "success"
-    assert payload["agents"] == {"loop": "agentic_agent_loop"}
+    assert result["replaced_item_ids"] == ["shoes-1"]
+    assert result["locked_item_ids"] == ["top-1", "bottom-1", "coat-1"]
+    assert result["target_slot"] == "footwear"
+    assert result["current_outfit_id"].startswith("outfit-1-mod-")
+    # coordinator + stylist(continue) + stylist(ready) + critic = 4.
+    assert payload["llm_call_count"] == 4
+    # Single outcome rides agentic_outcome as a dict; the StageCandidate entry
+    # carries the final item set.
+    assert payload["agentic_outcome"]["status"] == "done"
+    assert payload["agentic_outcome"]["candidates"][0]["item_ids"] == [
+        "top-1", "bottom-1", "coat-1", "sneakers-1",
+    ]
+    assert payload["selected_subgraph"] == "agentic_harness"
+    assert payload["agents"] == {"harness": "styleforge_harness"}
 
     # The completed candidate is committed so a later turn can re-anchor on it.
     with database_session(db_dsn) as connection:
@@ -252,20 +259,22 @@ def test_execute_agentic_primary_end_to_end(db_dsn: str) -> None:
 
 
 def test_execute_agentic_primary_ask_user_not_committed(db_dsn: str) -> None:
+    # The Stylist suspends for clarification; the Main Graph's ClarificationNode
+    # surfaces the question and nothing is committed.
     initialize_database(db_dsn)
     _seed(db_dsn)
-    llm = ScriptedExtensionLlm(
+    llm = FakeLlm(
         [
+            {"decision_summary": "换双皮鞋", "goal": "换双皮鞋", "next_agent": "STYLIST"},
             {
-                "thought": "询问",
-                "goal": "换双皮鞋",
-                "requirements": [],
-                "action": "ask_user",
-                "query": "",
-                "outfit_id": "",
-                "plan": None,
-                "question": "衣橱里没有黑色皮鞋，换棕色短靴可以吗？",
+                "decision_summary": "缺合适的鞋",
+                "control": "NEED_USER",
+                "clarification": {
+                    "question": "衣橱里没有黑色皮鞋，换棕色短靴可以吗？",
+                    "reason": "无合适皮鞋",
+                },
             },
+            {"evidence": []},  # memory extraction still runs on a suspended run
         ]
     )
     workflow = _workflow(db_dsn, llm, modify_mode="agentic")
@@ -275,61 +284,29 @@ def test_execute_agentic_primary_ask_user_not_committed(db_dsn: str) -> None:
     assert payload["status"] == "needs_clarification"
     assert payload["result"]["message"] == "衣橱里没有黑色皮鞋，换棕色短靴可以吗？"
     assert payload["result"]["alternatives"] == []
+    assert payload["agentic_outcome"]["status"] == "needs_clarification"
+    assert payload["agentic_outcome"]["clarification_question"] == (
+        "衣橱里没有黑色皮鞋，换棕色短靴可以吗？"
+    )
+    assert payload["llm_call_count"] == 2  # coordinator + stylist
     with database_session(db_dsn) as connection:
         rows = connection.execute("SELECT COUNT(*) AS n FROM candidate_outfits").fetchone()
     assert rows["n"] == 0
 
 
-def test_execute_agentic_primary_without_tavily_key_still_completes(db_dsn: str) -> None:
-    # No TAVILY_API_KEY configured (the default): search_web returns an
-    # "unconfigured" observation, the Agent proceeds with the wardrobe, and the
-    # primary chain still completes and commits the candidate.
+def test_execute_agentic_primary_without_web_capability_still_completes(db_dsn: str) -> None:
+    # No TAVILY_API_KEY configured (the default): the search_web tool is not
+    # even in the Stylist's catalog (Layer 2 capability filtering), so the chain
+    # goes straight to the wardrobe and still completes and commits.
     initialize_database(db_dsn)
     _seed(db_dsn)
-    llm = ScriptedExtensionLlm(
+    llm = FakeLlm(
         [
-            {
-                "thought": "先查一下海边穿搭建议",
-                "goal": "把皮鞋换成舒适的运动鞋",
-                "requirements": ["要舒适"],
-                "action": "search_web",
-                "query": "海边度假穿什么",
-                "outfit_id": "",
-                "plan": None,
-                "question": "",
-            },
-            {
-                "thought": "联网不可用，改用衣橱里的运动鞋",
-                "goal": "把皮鞋换成舒适的运动鞋",
-                "requirements": ["要舒适"],
-                "action": "modify_outfit",
-                "query": "",
-                "outfit_id": "",
-                "plan": {
-                    "ops": [
-                        {
-                            "action": "replace",
-                            "item_id": "shoes-1",
-                            "replacement_item_id": "sneakers-1",
-                            "placement": {"region": "feet", "layer": "base"},
-                        }
-                    ],
-                    "reasoning": "换运动鞋更舒适",
-                },
-                "question": "",
-            },
-            {
-                "thought": "完成",
-                "goal": "把皮鞋换成舒适的运动鞋",
-                "requirements": ["要舒适"],
-                "action": "finish",
-                "query": "",
-                "outfit_id": "",
-                "plan": None,
-                "question": "",
-            },
-            {"approved": True, "issues": [], "feedback": "已换成白色运动鞋"},  # reviewer
-            {"evidence": []},  # memory extraction
+            {"decision_summary": "换运动鞋", "goal": "把皮鞋换成舒适的运动鞋", "next_agent": "STYLIST"},
+            ({"decision_summary": "替换皮鞋", "control": "CONTINUE"}, [_REPLACE_SHOES]),
+            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
+            {"approved": True, "issues": [], "feedback": "已换成白色运动鞋"},
+            {"evidence": []},
         ]
     )
     workflow = _workflow(db_dsn, llm, modify_mode="agentic")
@@ -337,15 +314,8 @@ def test_execute_agentic_primary_without_tavily_key_still_completes(db_dsn: str)
     payload = workflow.execute(_modify_task())
 
     assert payload["status"] == "completed"
-    # 3 agent steps + 1 reviewer call; memory extraction runs separately and is
-    # not part of the loop's llm_call_count.
     assert payload["llm_call_count"] == 4
-    assert payload["agentic_outcome"]["status"] == "success"
-    web_steps = [
-        s for s in payload["agentic_outcome"]["steps"] if s["action"] == "search_web"
-    ]
-    assert len(web_steps) == 1
-    assert "未配置" in web_steps[0]["observation"]
+    assert payload["agentic_outcome"]["status"] == "done"
     assert payload["result"]["alternatives"][0]["item_ids"] == [
         "top-1", "bottom-1", "coat-1", "sneakers-1",
     ]
@@ -356,33 +326,28 @@ def test_execute_agentic_primary_without_tavily_key_still_completes(db_dsn: str)
     assert len(rows) == 1
 
 
-def test_execute_agentic_primary_web_degraded_then_ask_user(db_dsn: str) -> None:
-    # Web search degrades to an "unconfigured" observation; the Agent decides it
-    # needs clarification and suspends — the ask_user branch is unaffected.
+def test_execute_agentic_primary_tool_then_ask_user_not_committed(db_dsn: str) -> None:
+    # The Stylist grounds on a wardrobe search first, then decides it needs
+    # clarification — the tool→NEED_USER transition inside one subgraph run is
+    # unaffected and nothing is committed.
     initialize_database(db_dsn)
     _seed(db_dsn)
-    llm = ScriptedExtensionLlm(
+    llm = FakeLlm(
         [
+            {"decision_summary": "换双皮鞋", "goal": "换双皮鞋", "next_agent": "STYLIST"},
+            (
+                {"decision_summary": "找鞋", "control": "CONTINUE"},
+                [{"name": "search_wardrobe", "arguments": {"query": "皮鞋"}}],
+            ),
             {
-                "thought": "查一下海边穿搭",
-                "goal": "换双皮鞋",
-                "requirements": [],
-                "action": "search_web",
-                "query": "海边度假穿什么",
-                "outfit_id": "",
-                "plan": None,
-                "question": "",
+                "decision_summary": "缺合适的鞋",
+                "control": "NEED_USER",
+                "clarification": {
+                    "question": "衣橱里没有黑色皮鞋，换棕色短靴可以吗？",
+                    "reason": "无合适皮鞋",
+                },
             },
-            {
-                "thought": "联网不可用且衣橱里没有合适的皮鞋",
-                "goal": "换双皮鞋",
-                "requirements": [],
-                "action": "ask_user",
-                "query": "",
-                "outfit_id": "",
-                "plan": None,
-                "question": "衣橱里没有黑色皮鞋，换棕色短靴可以吗？",
-            },
+            {"evidence": []},
         ]
     )
     workflow = _workflow(db_dsn, llm, modify_mode="agentic")
@@ -390,12 +355,10 @@ def test_execute_agentic_primary_web_degraded_then_ask_user(db_dsn: str) -> None
     payload = workflow.execute(_modify_task())
 
     assert payload["status"] == "needs_clarification"
-    assert payload["agentic_outcome"]["status"] == "ask_user"
-    web_steps = [
-        s for s in payload["agentic_outcome"]["steps"] if s["action"] == "search_web"
-    ]
-    assert len(web_steps) == 1
-    assert "未配置" in web_steps[0]["observation"]
+    assert payload["result"]["message"] == "衣橱里没有黑色皮鞋，换棕色短靴可以吗？"
+    assert payload["result"]["alternatives"] == []
+    assert payload["agentic_outcome"]["status"] == "needs_clarification"
+    assert payload["llm_call_count"] == 3  # coordinator + stylist search + stylist ask
     with database_session(db_dsn) as connection:
         rows = connection.execute("SELECT COUNT(*) AS n FROM candidate_outfits").fetchone()
     assert rows["n"] == 0

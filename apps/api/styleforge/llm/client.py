@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from styleforge.core.config import Settings
@@ -49,8 +49,63 @@ class LlmCallDiagnostics:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ToolDefinition:
+    """Wire-level tool description handed to a tool-calling provider.
+
+    ``input_schema`` is the canonical JSON Schema (the same object the
+    CapabilityRegistry validates calls against). The Prompt layer carries only
+    the one-line capability manifest; the full schema rides exclusively here
+    in ``tools=``, so the model never sees two drifted copies of it.
+    """
+
+    name: str
+    description: str
+    input_schema: dict[str, Any] = field(default_factory=dict)
+
+    def to_openai_dict(self) -> dict[str, Any]:
+        """OpenAI-compatible ``tools=[...]`` entry for ``chat.completions``."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ToolUseBlock:
+    """One native tool call parsed from a tool-calling response.
+
+    ``arguments`` is the parsed dict; ``arg_json`` keeps the provider's raw
+    string for observability / re-parse. Frozen, so it can ride LangGraph
+    state and hashes (stable_prefix_fingerprint) safely.
+    """
+
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    arg_json: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "arguments": self.arguments}
+
+
 class LlmChatClient(Protocol):
-    """A minimal JSON-mode chat contract shared by agents and fakes."""
+    """A minimal JSON-mode chat contract shared by agents and fakes.
+
+    Two capabilities coexist on purpose (frozen architecture decision #3):
+
+    * ``chat_json`` — structured output. Kept byte-for-byte identical to the
+      original contract; the 9 legacy call sites (critic / judge / memory
+      extractor / legacy graphs) never change.
+    * ``chat_tools`` — native tool-calling (Coordinator / Research / Stylist).
+      Returns the model's *decision block* (raw text, parsed per-Agent by the
+      AgentRuntime) plus parsed ``ToolUseBlock`` tool calls. Business rules
+      like "CONTINUE must carry exactly one tool call" are the AgentRuntime's
+      job, never this client's — the client only parses legal native calls.
+    """
 
     def chat_json(
         self,
@@ -60,6 +115,16 @@ class LlmChatClient(Protocol):
         json_schema: dict[str, Any],
         temperature: float = 0.2,
     ) -> tuple[dict[str, Any], LlmCallDiagnostics]: ...
+
+    def chat_tools(
+        self,
+        *,
+        system: str,
+        user: str,
+        tools: list[ToolDefinition],
+        tool_choice: str = "auto",
+        temperature: float = 0.2,
+    ) -> tuple[str, list[ToolUseBlock], LlmCallDiagnostics]: ...
 
 
 def llm_client_from_settings(settings: Settings) -> DeepSeekClient | None:
@@ -169,6 +234,147 @@ class DeepSeekClient:
                     ) from error
         raise LlmUnavailable("provider call failed before returning a result")
 
+    def chat_tools(
+        self,
+        *,
+        system: str,
+        user: str,
+        tools: list[ToolDefinition],
+        tool_choice: str = "auto",
+        temperature: float = 0.2,
+    ) -> tuple[str, list[ToolUseBlock], LlmCallDiagnostics]:
+        """Native tool-calling: returns ``(decision_block, tool_uses, diagnostics)``.
+
+        The model answers through two channels: a text decision block
+        (``content``, per-Agent JSON the AgentRuntime parses) and native tool
+        calls. This client only guarantees a *parseable* response:
+
+        * ``content`` is present and non-empty (after stripping a `````` fence),
+        * every ``tool_calls`` entry has a name and a dict-parsable ``arguments``.
+
+        It deliberately allows 0 or 1 tool call — whether that is *legal* for
+        the current agent (CONTINUE needs exactly one; CANDIDATE_READY needs
+        zero) is the AgentRuntime's decision contract, not this client's.
+        """
+        started = time.perf_counter()
+        attempts = 0
+        parse_failed = ""
+        degraded_reason = ""
+        while attempts <= self.max_retries:
+            attempts += 1
+            user_payload = user
+            if parse_failed:
+                user_payload = f"{user}\n\n上次输出未通过解析，请修正。{parse_failed}"
+            try:
+                content, tool_calls, degraded_reason = self._request_tools(
+                    system, user_payload, tools, tool_choice, temperature
+                )
+            except LlmInvalidJson:
+                raise
+            except LlmSchemaViolation:
+                raise
+            except Exception as error:
+                # Network / 5xx / auth / rate-limit: raise after retries exhausted.
+                if attempts > self.max_retries:
+                    raise LlmUnavailable(
+                        f"provider tool-call request failed after {attempts} attempts: "
+                        f"{type(error).__name__}: {error}"
+                    ) from error
+                continue
+            if content is None or (not content.strip() and not tool_calls):
+                # A tool-calling response may legitimately carry an empty
+                # ``content`` (OpenAI-compatible providers leave the assistant
+                # text blank when the model decides to call a tool). An empty
+                # decision block WITH tool calls is therefore a real, usable
+                # turn — the AgentRuntime infers the control from the call. Only
+                # a completely empty response (no text, no tool call) is a
+                # parse failure worth retrying.
+                parse_failed = "缺少决策文本块：请同时输出决策 JSON 文本，再附加工具调用。"
+                continue
+            content = _strip_code_fence(content)
+            blocks: list[ToolUseBlock] = []
+            failed = False
+            for call in tool_calls or []:
+                function = _attr(call, "function")
+                if function is None:
+                    parse_failed = "tool call 缺少 function 字段。"
+                    failed = True
+                    break
+                name = _attr(function, "name", "") or ""
+                args_raw = _attr(function, "arguments", "") or ""
+                try:
+                    arguments = json.loads(args_raw) if args_raw else {}
+                except (json.JSONDecodeError, TypeError) as error:
+                    parse_failed = f"tool 参数 JSON 解析失败：{type(error).__name__}: {error}"
+                    failed = True
+                    break
+                if not isinstance(arguments, dict):
+                    parse_failed = "tool 参数必须是 JSON object。"
+                    failed = True
+                    break
+                blocks.append(ToolUseBlock(name=name, arguments=arguments, arg_json=args_raw))
+            if failed:
+                continue
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            return content, blocks, LlmCallDiagnostics(
+                model=self.model,
+                prompt_version="",
+                latency_ms=latency_ms,
+                prompt_tokens=0,
+                completion_tokens=0,
+                retries=attempts - 1,
+                degraded_reason=degraded_reason,
+            )
+        raise LlmUnavailable("provider tool-call request failed before returning a result")
+
+    def _request_tools(
+        self,
+        system: str,
+        user: str,
+        tools: list[ToolDefinition],
+        tool_choice: str,
+        temperature: float,
+    ) -> tuple[str | None, list[Any] | None, str]:
+        """One provider round-trip with native ``tools``, degrading gracefully.
+
+        Providers without tool-calling support are retried as a plain
+        completion (decision block only, zero tool calls); the degradation is
+        reported in ``diagnostics.degraded_reason`` so the AgentRuntime can
+        decide what zero tool calls means here.
+        """
+        client = self._get_client()
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        openai_tools = [tool.to_openai_dict() for tool in tools]
+        degraded = ""
+        try:
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                tools=openai_tools,
+                tool_choice=tool_choice,
+            )
+        except Exception as error:
+            message_text = str(error)
+            if "tools" not in message_text and "tool_choice" not in message_text:
+                raise
+            # Provider without tool-calling support: plain completion fallback.
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+            )
+            degraded = f"tools unsupported: {type(error).__name__}"
+        message = response.choices[0].message
+        content = _attr(message, "content")
+        tool_calls = _attr(message, "tool_calls")
+        if content is None and not tool_calls:
+            raise LlmUnavailable("provider returned empty completion content")
+        return content, tool_calls, degraded
+
     def _request_chat(self, system: str, user: str, temperature: float) -> str:
         client = self._get_client()
         messages: list[dict[str, str]] = [
@@ -203,3 +409,31 @@ class DeepSeekClient:
 def client_factory_from_settings(settings: Settings) -> DeepSeekClient | None:
     """Compatibility alias kept for call sites that pass Settings directly."""
     return llm_client_from_settings(settings)
+
+
+def _attr(obj: Any, name: str, default: Any = None) -> Any:
+    """Read ``obj.name`` regardless of whether ``obj`` is a dict or an object.
+
+    The openai SDK returns response objects in production, while tests inject
+    dict-shaped fakes; this helper keeps ``chat_tools`` parsing agnostic.
+    """
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _strip_code_fence(text: str) -> str:
+    """Strip a leading/trailing `````` block from model content.
+
+    Models sometimes wrap the decision block in markdown fences even inside a
+    tool-calling response; the client normalises before the AgentRuntime parses.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 from styleforge.models.agentic_contract import (
@@ -28,9 +30,11 @@ from styleforge.models.agentic_contract import (
     ModifyPlan,
     OutfitSnapshot,
     Placement,
+    SkillResult,
     WardrobeSearchResult,
     WebSearchResult,
 )
+from styleforge.tools.weather.schemas import WeatherFacts
 from styleforge.models.context import ContextPack
 from styleforge.models.task import TaskExecutionInput
 from styleforge.repositories.catalog_repository import fetch_items_by_ids
@@ -86,17 +90,31 @@ def _load_items(connection: Any, item_ids: list[str]) -> list[ItemSnapshot]:
 
 
 def _wardrobe_summary(items: list[Any]) -> dict[str, Any]:
-    by_slot: dict[str, list[str]] = {}
+    by_slot: dict[str, list[Any]] = {}
     for item in items:
         slot = item.item_type or "other"
-        by_slot.setdefault(slot, []).append(item.item_id)
-    return {
-        slot: {
-            "count": len(ids),
-            "sample_colors": sorted({item.color for item in items if item.item_id in ids and item.color})[:8],
+        by_slot.setdefault(slot, []).append(item)
+    summary: dict[str, Any] = {}
+    for slot, slot_items in sorted(by_slot.items()):
+        ordered = sorted(slot_items, key=lambda item: item.item_id)
+        summary[slot] = {
+            "count": len(ordered),
+            "sample_colors": sorted({item.color for item in ordered if item.color})[:8],
+            # The Stylist builds candidates from real ids; a count-only summary
+            # forces it to re-search the wardrobe for ids it already holds,
+            # burning tool turns on lookups instead of composing. Carry the
+            # concrete items so it can act immediately (ContextGuard caps size).
+            "items": [
+                {
+                    "id": item.item_id,
+                    "name": item.name or "",
+                    "type": item.item_type or "",
+                    "color": item.color or "",
+                }
+                for item in ordered
+            ],
         }
-        for slot, ids in sorted(by_slot.items())
-    }
+    return summary
 
 
 def resolve_active_outfit(
@@ -225,13 +243,20 @@ class Environment:
         *,
         search_limit: int = 12,
         web_search_provider: Any | None = None,
+        weather_provider: Any | None = None,
+        skills_root: Path | None = None,
     ) -> None:
         self.connection = connection
         self.wardrobe_items = wardrobe_items
         self.facts = facts
         self.search_limit = search_limit
         self.web_search_provider = web_search_provider
+        self.weather_provider = weather_provider
+        self.skills_root = skills_root
         self._wardrobe_by_id = {item.item_id: item for item in wardrobe_items}
+        # Last ``get_weather`` fact (if any) — surfaced in the recommend payload
+        # so the frontend weather block can render what the Agent actually saw.
+        self.last_weather_facts: WeatherFacts | None = None
 
     # --- helpers ---------------------------------------------------------
 
@@ -314,6 +339,74 @@ class Environment:
         if self.web_search_provider is None:
             return WebSearchResult(query=query, error="联网搜索未配置", available=False)
         return self.web_search_provider.search((query or "").strip()[:200])
+
+    def load_skill(self, skill_name: str) -> SkillResult:
+        """Load procedural task knowledge (e.g. event_outfit_planning).
+
+        A skill is a SKILL.md under ``skills_root/tasks/{name}/``; the content
+        teaches *how to investigate and decide* for a class of tasks, never
+        concrete outfit choices. Missing / unconfigured degrades to an
+        ``available=False`` fact — the Agent decides on its own.
+        """
+        name = (skill_name or "").strip().replace(".", "/")
+        if not name or self.skills_root is None:
+            return SkillResult(name=skill_name, error="技能未配置", available=False)
+        candidates = [
+            self.skills_root / "tasks" / name / "SKILL.md",
+            self.skills_root / "tasks" / f"{name}.md",
+        ]
+        for path in candidates:
+            if path.is_file():
+                try:
+                    content = path.read_text(encoding="utf-8").strip()
+                except OSError as error:
+                    return SkillResult(
+                        name=skill_name,
+                        error=f"技能读取失败：{type(error).__name__}",
+                        available=False,
+                    )
+                if not content:
+                    return SkillResult(name=skill_name, error="技能内容为空", available=False)
+                return SkillResult(name=name, content=content, available=True)
+        return SkillResult(name=skill_name, error=f"未找到技能 {skill_name}", available=False)
+
+    def get_weather(self, location: str, date_expression: str = "") -> WeatherFacts:
+        """Resolve a named location and fetch its near-term forecast facts.
+
+        ``date_expression`` is honoured when it is a plain ISO date (single day);
+        otherwise the near-3-day default window is used. An unconfigured or
+        unresolvable provider returns an ``unavailable`` fact, never raises.
+        """
+        provider = self.weather_provider
+        query = (location or "").strip()
+        if provider is None or not query:
+            return WeatherFacts.unavailable(
+                requested_location=query or (self.facts.weather or {}).get("requested_location", ""),
+                requested_date=date_expression,
+                error_code="tool_disabled",
+                error_message="天气工具未配置或未提供地点",
+            )
+        resolved = provider.resolve_location(query)
+        if resolved is None:
+            return WeatherFacts.unavailable(
+                requested_location=query,
+                requested_date=date_expression,
+                error_code="location_unresolved",
+                error_message=f"无法解析地点「{query}」",
+            )
+        today = date.today()
+        start = today
+        end = today + timedelta(days=2)
+        expr = date_expression.strip()
+        try:
+            if expr and len(expr) >= 8 and expr.replace("-", "").isdigit():
+                start = end = date.fromisoformat(expr[:10])
+        except ValueError:
+            pass  # fall back to the near-3-day window
+        result = provider.forecast_range(resolved, start, end)
+        if result.status == "available":
+            self.last_weather_facts = result
+        return result
 
     def _resolve_placement(
         self,

@@ -29,6 +29,7 @@ from styleforge.tools.weather.schemas import (
     WeatherFacts,
     WeatherToolInput,
 )
+from styleforge.tools.weather import OpenMeteoProvider
 from styleforge.tools.web_search import TavilySearchProvider
 from styleforge.repositories.dataset_source_repository import (
     get_source_image_root,
@@ -309,6 +310,14 @@ def get_multi_task_workflow() -> MultiTaskWorkflow:
             timeout=settings.web_search_timeout,
             max_results=settings.web_search_max_results,
         ),
+        # Agentic recommend ``get_weather`` tool + Task Skill root (mirrors the
+        # legacy graph's weather gating; ``WeatherTool`` is not needed here).
+        weather_provider=(
+            OpenMeteoProvider(timeout=settings.weather_timeout)
+            if settings.weather_enabled and settings.weather_provider == "open-meteo"
+            else None
+        ),
+        skills_root=settings.knowledge_root / "skills",
     )
 
 

@@ -59,6 +59,16 @@
       </div>
     </section>
 
+    <section v-if="isRecommend && planningNotes.length" class="block planning-block">
+      <div class="section-heading"><h3>搭配规划</h3><span>Agent 决策依据</span></div>
+      <article class="planning-card">
+        <div v-for="note in planningNotes" :key="note.type + note.text" class="plan-tool" :class="'plan-fact ' + note.type">
+          <strong>{{ note.label }}</strong>
+          <span>{{ note.text }}</span>
+        </div>
+      </article>
+    </section>
+
     <section v-if="isRecommend" class="block">
       <div class="section-heading"><h3>衣橱搭配方案</h3><span>{{ recommendOutfits.length }} 套</span></div>
       <div class="outfit-grid">
@@ -317,6 +327,27 @@ const weatherLocationNote = computed(() => {
   }
   return ''
 })
+// Agentic recommend: the single harness outcome (task goal + the Research
+// evidence the Stylist grounded on) shown above the outfit cards. Renders
+// nothing when the request went through the legacy graph (no agentic_outcome).
+const planningNotes = computed(() => {
+  const raw = props.payload?.agentic_outcome
+  const outcome = Array.isArray(raw) ? raw[0] : raw
+  if (!outcome) return []
+  const evidence = outcome.research_evidence
+  const taskState = outcome.task_state
+  const notes = []
+  const goal = taskState?.goal || outcome.plan?.objective || ''
+  if (goal) notes.push({ label: '目标', type: 'goal', text: goal })
+  for (const ctx of evidence?.dress_context || []) notes.push({ label: '着装语境', type: 'dress', text: ctx })
+  for (const req of evidence?.practical_requirements || []) notes.push({ label: '实用要求', type: 'requirement', text: req })
+  for (const theme of evidence?.theme_elements || []) notes.push({ label: '主题元素', type: 'theme', text: theme })
+  for (const src of evidence?.sources || []) {
+    notes.push({ label: '联网来源', type: 'source', text: `「${src.title}」${src.snippet ? ' · ' + src.snippet : ''}` })
+  }
+  for (const unc of evidence?.uncertainties || []) notes.push({ label: '未确定', type: 'uncertainty', text: unc })
+  return notes
+})
 const envByOutfit = computed(() => {
   const map = {}
   for (const proposal of recommendation.value.proposals || []) {
@@ -372,6 +403,8 @@ const recommendationLabel = (value) => ({ recommended: '建议', consider: '可�
 .temp-unit-switch { display: inline-flex; margin-top: 6px; border: 1px solid #c9cec8; border-radius: 999px; overflow: hidden; }.temp-unit-switch button { border: 0; background: #fff; color: #7c8580; font-size: 11px; line-height: 1; padding: 5px 9px; cursor: pointer; }.temp-unit-switch button + button { border-left: 1px solid #c9cec8; }.temp-unit-switch button.active { background: var(--moss); color: #fff; }
 .weather-note { display: block; max-width: 460px; text-align: right; }
 .env-adjustment { margin-top: 8px; padding: 7px 9px; border-left: 2px solid var(--copper); background: #f4f2eb; font-size: 12px; line-height: 1.5; }.env-adjustment strong { display: block; color: var(--copper); font-size: 10px; letter-spacing: .08em; }.env-adjustment span { color: #5e6863; }
+.planning-block { display: grid; grid-template-columns: 1fr; gap: 12px; }.planning-card { padding: 13px 15px; border: 1px solid #d5dbd6; background: #faf9f4; }.planning-card header span { color: var(--copper); font-size: 11px; font-weight: 700; letter-spacing: .1em; }.plan-tool { margin-top: 7px; padding-top: 7px; border-top: 1px dashed #dcd9ce; font-size: 12px; line-height: 1.6; color: #5e6863; }.plan-tool strong { display: block; color: var(--moss); font-size: 10px; letter-spacing: .08em; }.plan-tool span { display: block; white-space: pre-wrap; }.plan-tool.search-fact span, .plan-tool.weather-fact span { color: #4b5751; }.plan-tool.plan-fact.uncertainty span, .plan-tool.plan-fact.goal strong { color: var(--copper); }
+@media (max-width: 900px) { .planning-block { grid-template-columns: 1fr; } }
 .carry-recommendations { margin-top: 8px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }.carry-recommendations strong { color: var(--moss); font-size: 12px; }.carry-chip { padding: 3px 8px; border: 1px solid #cbd2cc; border-radius: 999px; font-size: 12px; color: #4b5751; }
 .outfit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }.outfit-card { padding: 14px; border: 1px solid #d5dbd6; background: #fff; }
 .outfit-card header { display: flex; justify-content: space-between; margin-bottom: 10px; color: #69736e; font-size: 12px; letter-spacing: .08em; }.outfit-card header strong { color: var(--copper); font-size: 16px; }

@@ -3,13 +3,14 @@ applies to every recent recommendation candidate ("modify all three").
 
 When ``current_outfit_id`` is empty the session context may carry the whole
 recommendation batch (``current_candidates``); ``_agentic_targets`` expands it
-into one target per candidate, each runs its own Agent loop, and the batch of
-outcomes is wrapped into a single OutfitModifyResult with one alternative per
-success. An explicit ``current_outfit_id`` keeps Stage 4's single-outfit path.
+into one target per candidate, each runs its own ``StyleForgeHarness.invoke``
+over that snapshot as ``base_draft``, and the batch of outcomes is wrapped into
+a single OutfitModifyResult with one alternative per success. An explicit
+``current_outfit_id`` keeps Stage 4's single-outfit path.
 
 Tests here opt in with ``modify_mode="agentic"`` and either exercise the pure
-wrappers or mock the Agent loop; the conftest autouse fixture keeps the legacy
-chain the default for every other test.
+wrappers or drive the harness with a scripted ``FakeLlm``; the conftest autouse
+fixture keeps the legacy chain the default for every other test.
 """
 
 from __future__ import annotations
@@ -27,8 +28,8 @@ from styleforge.repositories.wardrobe_repository import add_items
 from styleforge.services.chat_service import outfit_context_from_payload
 from styleforge.workflow.task_workflow import MultiTaskWorkflow
 
-from tests.extension_llm import ScriptedExtensionLlm
 from tests.helpers import make_item
+from tests.llm.fake_llm import FakeLlm
 
 
 def _seed(database_path: str) -> None:
@@ -331,40 +332,63 @@ def test_modify_context_keeps_alternatives() -> None:
     ]
 
 
-# ── execute() multi-target end-to-end with a mocked loop ─────────────
+# ── execute() multi-target end-to-end against a real database ────────
+
+# Per-target modify tool call. Each target grounds on its OWN base snapshot:
+# outfit-a swaps the leather shoes for sneakers, outfit-b does the reverse.
+_MODIFY_TO_SNEAKERS = {
+    "name": "modify_outfit",
+    "arguments": {
+        "plan": {
+            "ops": [
+                {
+                    "action": "replace",
+                    "item_id": "shoes-1",
+                    "replacement_item_id": "sneakers-1",
+                    "placement": {"region": "feet", "layer": "base"},
+                }
+            ],
+            "reasoning": "换运动鞋更休闲",
+        }
+    },
+}
+_MODIFY_TO_SHOES = {
+    "name": "modify_outfit",
+    "arguments": {
+        "plan": {
+            "ops": [
+                {
+                    "action": "replace",
+                    "item_id": "sneakers-1",
+                    "replacement_item_id": "shoes-1",
+                    "placement": {"region": "feet", "layer": "base"},
+                }
+            ],
+            "reasoning": "换皮鞋更正式",
+        }
+    },
+}
 
 
-class _FakeLoop:
-    """AgentLoop stand-in: returns a success outcome for the active outfit."""
-
-    def __init__(
-        self,
-        llm: Any,
-        environment: Any,
-        user_message: str,
-        *,
-        config: Any | None = None,
-    ) -> None:
-        self.environment = environment
-
-    def run(self) -> dict[str, Any]:
-        active = self.environment.facts.active_outfit
-        return _success_outcome(active.outfit_id, list(active.item_ids))
-
-
-def test_execute_multi_targets_runs_one_loop_per_candidate(db_dsn: str, monkeypatch) -> None:
+def test_execute_multi_targets_runs_one_harness_per_candidate(db_dsn: str) -> None:
     initialize_database(db_dsn)
     _seed(db_dsn)
-    seen: list[list[str]] = []
-
-    class RecordingLoop(_FakeLoop):
-        def run(self) -> dict[str, Any]:
-            active = self.environment.facts.active_outfit
-            seen.append(list(active.item_ids))
-            return super().run()
-
-    monkeypatch.setattr("styleforge.workflow.task_workflow.AgentLoop", RecordingLoop)
-    workflow = _workflow(db_dsn, ScriptedExtensionLlm([]))
+    llm = FakeLlm(
+        [
+            # target outfit-a: shoes-1 → sneakers-1
+            {"decision_summary": "换鞋", "goal": "改休闲", "next_agent": "STYLIST"},
+            ({"decision_summary": "换运动鞋", "control": "CONTINUE"}, [_MODIFY_TO_SNEAKERS]),
+            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
+            {"approved": True, "issues": [], "feedback": "已按要求修改"},  # critic a
+            # target outfit-b: sneakers-1 → shoes-1
+            {"decision_summary": "换鞋", "goal": "改休闲", "next_agent": "STYLIST"},
+            ({"decision_summary": "换皮鞋", "control": "CONTINUE"}, [_MODIFY_TO_SHOES]),
+            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
+            {"approved": True, "issues": [], "feedback": "已按要求修改"},  # critic b
+            {"evidence": []},  # memory extraction
+        ]
+    )
+    workflow = _workflow(db_dsn, llm)
     session_context = {
         "current_outfit_id": "outfit-a",
         "current_item_ids": ["top-1", "bottom-1", "coat-1", "shoes-1"],
@@ -382,11 +406,18 @@ def test_execute_multi_targets_runs_one_loop_per_candidate(db_dsn: str, monkeypa
     assert len(result["alternatives"]) == 2
     assert result["alternatives"][0]["outfit_id"].startswith("outfit-a-mod-")
     assert result["alternatives"][1]["outfit_id"].startswith("outfit-b-mod-")
-    assert payload["llm_call_count"] == 4
-    # One loop per candidate, each grounded on its own item set.
-    assert len(seen) == 2
-    assert seen[0] == ["top-1", "bottom-1", "coat-1", "shoes-1"]
-    assert seen[1] == ["top-1", "bottom-1", "coat-1", "sneakers-1"]
+    # Each harness ran against its own base snapshot — the item sets diverge.
+    assert result["alternatives"][0]["item_ids"] == [
+        "top-1", "bottom-1", "coat-1", "sneakers-1",
+    ]
+    assert result["alternatives"][1]["item_ids"] == [
+        "top-1", "bottom-1", "coat-1", "shoes-1",
+    ]
+    # Two harnesses × (coordinator + stylist×2 + critic) = 8.
+    assert payload["llm_call_count"] == 8
+    # Multi-target batch rides agentic_outcome as a list — one outcome per target.
+    assert isinstance(payload["agentic_outcome"], list)
+    assert [o["status"] for o in payload["agentic_outcome"]] == ["done", "done"]
     # Both completed alternatives are committed for multi-turn re-anchoring.
     with database_session(db_dsn) as connection:
         rows = connection.execute(
@@ -398,21 +429,21 @@ def test_execute_multi_targets_runs_one_loop_per_candidate(db_dsn: str, monkeypa
     ]
 
 
-def test_execute_explicit_outfit_keeps_single_target(db_dsn: str, monkeypatch) -> None:
+def test_execute_explicit_outfit_keeps_single_target(db_dsn: str) -> None:
     # An explicit current_outfit_id must not be expanded by session candidates:
-    # exactly one loop runs, exactly one alternative survives.
+    # exactly one harness runs, exactly one alternative survives.
     initialize_database(db_dsn)
     _seed(db_dsn)
-    runs = 0
-
-    class CountingLoop(_FakeLoop):
-        def run(self) -> dict[str, Any]:
-            nonlocal runs
-            runs += 1
-            return super().run()
-
-    monkeypatch.setattr("styleforge.workflow.task_workflow.AgentLoop", CountingLoop)
-    workflow = _workflow(db_dsn, ScriptedExtensionLlm([]))
+    llm = FakeLlm(
+        [
+            {"decision_summary": "换鞋", "goal": "改休闲", "next_agent": "STYLIST"},
+            ({"decision_summary": "换运动鞋", "control": "CONTINUE"}, [_MODIFY_TO_SNEAKERS]),
+            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
+            {"approved": True, "issues": [], "feedback": "已按要求修改"},
+            {"evidence": []},
+        ]
+    )
+    workflow = _workflow(db_dsn, llm)
     task = TaskExecutionInput(
         user_id="u",
         request="太正式了,休闲一点",
@@ -425,7 +456,7 @@ def test_execute_explicit_outfit_keeps_single_target(db_dsn: str, monkeypatch) -
 
     payload = workflow.execute(task, session_context=session_context)
 
-    assert runs == 1
     assert payload["status"] == "completed"
     assert len(payload["result"]["alternatives"]) == 1
     assert payload["result"]["alternatives"][0]["outfit_id"].startswith("outfit-1-mod-")
+    assert payload["llm_call_count"] == 4

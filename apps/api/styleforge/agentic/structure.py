@@ -53,12 +53,24 @@ OUTER = GarmentLayer.outer
 # TYPE_TO_SLOT vocabulary into the region/layer/occupancy ontology. Types whose
 # physical role is genuinely ambiguous (swimwear, skiwear, underwear, "other",
 # unknown imported categories) are intentionally absent, so ``structure_for``
-# returns None (UNKNOWN) for them.
+# returns None (UNKNOWN) for them. The shirt/blouse/... entries are common
+# synonyms the legacy TYPE_TO_SLOT already maps to a region — their physical
+# role is unambiguous, so UNKNOWN would mislabel real catalog rows as
+# structurally unplaceable.
 TYPE_TO_STRUCTURE: dict[str, GarmentStructure] = {
     # tops may sit on base or mid — the Agent picks the layer via placement.
     "top": _garment(UPPER, [BASE, MID]),
+    "shirt": _garment(UPPER, [BASE, MID]),
+    "blouse": _garment(UPPER, [BASE, MID]),
+    "sweater": _garment(UPPER, [BASE, MID]),
+    "knitwear": _garment(UPPER, [BASE, MID]),
     "outwear": _garment(UPPER, [OUTER]),
+    "jacket": _garment(UPPER, [OUTER]),
+    "coat": _garment(UPPER, [OUTER]),
+    "blazer": _garment(UPPER, [OUTER]),
     "pants": _garment(LOWER, [BASE]),
+    "trousers": _garment(LOWER, [BASE]),
+    "jeans": _garment(LOWER, [BASE]),
     "shorts": _garment(LOWER, [BASE]),
     "skirt": _garment(LOWER, [BASE]),
     "dress": _garment(FULL, [BASE], [UPPER, LOWER]),
@@ -66,10 +78,14 @@ TYPE_TO_STRUCTURE: dict[str, GarmentStructure] = {
     "suit": _garment(FULL, [BASE], [UPPER, LOWER]),
     "outfit_set": _garment(FULL, [BASE], [UPPER, LOWER]),
     "shoes": _garment(FEET, [], [FEET]),
+    "boots": _garment(FEET, [], [FEET]),
+    "sneakers": _garment(FEET, [], [FEET]),
+    "heels": _garment(FEET, [], [FEET]),
     "legwear": _garment(LOWER, [BASE]),
     # Accessories are structural cardinality, not uniqueness: several may
     # coexist on (accessory, *) — exclusive=False.
     "bag": _garment(ACCESSORY, [], exclusive=False),
+    "hat": _garment(ACCESSORY, [], exclusive=False),
     "belts": _garment(ACCESSORY, [], exclusive=False),
     "jewellery": _garment(ACCESSORY, [], exclusive=False),
     "eyewear": _garment(ACCESSORY, [], exclusive=False),

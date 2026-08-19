@@ -39,6 +39,21 @@ _REVIEW_SYSTEM = (
     "只输出 JSON：{\"approved\": bool, \"issues\": [\"...\"], \"feedback\": \"给修改 Agent 的重做建议\"}。"
 )
 
+# Recommend mode has no ``before`` benchmark: the outfit was generated from
+# scratch, so before/after style review is meaningless. The gate judges
+# completeness + intent fidelity + structure sanity only; physical legality is
+# check_environment's job (the program runs it regardless).
+_RECOMMEND_REVIEW_SYSTEM = (
+    "你是穿搭审校员，判断一次从零生成的推荐搭配是否合格。规则：\n"
+    "1. 完整性：搭配必须齐全——至少包含上装（或连衣裙/连体衣）、下装、鞋履；"
+    "只给一两件单品属于未完成，必须打回。\n"
+    "2. 贴合需求：搭配确实回应用户场景（如演出/会议/出行/日常通勤）与明确要求，"
+    "而不是答非所问；涉及具体活动时，主题/正式度/舒适度判断要有依据。\n"
+    "3. 结构合理：没有明显的叠穿冲突或荒谬组合（物理合法性由程序检查，这里只做语义层面）。\n"
+    "你只做语义判断，不判断数据库或物理结构是否合法（那是程序的事）。\n"
+    "只输出 JSON：{\"approved\": bool, \"issues\": [\"...\"], \"feedback\": \"给推荐 Agent 的重做建议\"}。"
+)
+
 
 def _outfit_text(outfit: OutfitSnapshot | None) -> str:
     if outfit is None:
@@ -60,22 +75,27 @@ def review_outfit(
     before: OutfitSnapshot | None,
     after: OutfitSnapshot | None,
     intent: UserIntent,
+    is_recommend: bool = False,
 ) -> ReviewResult:
-    """One LLM call judging the candidate against the user's original intent."""
-    user = "\n".join(
-        [
-            f"用户原话：{user_message}",
-            f"用户意图：{intent.goal or '（未给出）'}",
-            f"明确要求：{'；'.join(intent.requirements) or '（无）'}",
-            f"交互定位：active_outfit={interaction.active_outfit_id or '无'}，"
-            f"selected_item={interaction.selected_item_id or '无'}",
-            f"修改前：{_outfit_text(before)}",
-            f"修改后：{_outfit_text(after)}",
-        ]
-    )
+    """One LLM call judging the candidate against the user's original intent.
+
+    ``is_recommend=True`` (no before benchmark): judge completeness + intent
+    fidelity + structure sanity, skipping before/after style review.
+    """
+    system = _RECOMMEND_REVIEW_SYSTEM if is_recommend else _REVIEW_SYSTEM
+    lines = [
+        f"用户原话：{user_message}",
+        f"用户意图：{intent.goal or '（未给出）'}",
+        f"明确要求：{'；'.join(intent.requirements) or '（无）'}",
+        f"交互定位：active_outfit={interaction.active_outfit_id or '无'}，"
+        f"selected_item={interaction.selected_item_id or '无'}",
+        f"搭配结果：{_outfit_text(after)}",
+    ]
+    if not is_recommend:
+        lines.append(f"修改前：{_outfit_text(before)}")
     payload, _ = llm.chat_json(
-        system=_REVIEW_SYSTEM,
-        user=user,
+        system=system,
+        user="\n".join(lines),
         json_schema=_REVIEW_SCHEMA,
     )
     return ReviewResult.model_validate(payload)

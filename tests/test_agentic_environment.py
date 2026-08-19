@@ -24,6 +24,7 @@ from styleforge.agentic.environment import (
     build_facts,
     resolve_active_outfit,
 )
+from styleforge.agentic.gates.environment import make_environment_gate
 from styleforge.models.agentic_contract import (
     BodyRegion,
     GarmentLayer,
@@ -432,3 +433,45 @@ def test_search_web_delegates_to_provider(seeded_conn: Any) -> None:
     assert stub.queries == ["海边度假穿什么"]  # trimmed at the boundary
     assert result.available is True
     assert result.results[0].title == "快干材质更适合海边"
+
+
+# ── Environment Gate (Main-Graph node over check_environment) ────────
+
+
+def test_environment_gate_rejects_missing_and_empty_drafts(seeded_conn: Any) -> None:
+    env, _ = _draft_from_active(seeded_conn)
+    gate = make_environment_gate(env)
+
+    missing = gate({"working_draft": None})
+    assert missing["environment_valid"] is False
+
+    # An empty draft is "physically valid" to check_environment but is not a
+    # usable candidate — the gate must bounce it back to the Stylist to replan
+    # instead of letting an empty outfit reach the Critic and get staged.
+    empty = Draft(outfit=env.facts.active_outfit.model_copy(update={"item_ids": [], "items": []}), layers={})
+    bounced = gate({"working_draft": empty})
+    assert bounced["environment_valid"] is False
+    assert "候选为空" in bounced["gate_feedback"]
+
+
+def test_environment_gate_passes_a_valid_draft_and_rejects_conflicts(seeded_conn: Any) -> None:
+    env, draft = _draft_from_active(seeded_conn)
+    gate = make_environment_gate(env)
+
+    assert gate({"working_draft": draft})["environment_valid"] is True
+
+    # Two different exclusive garments claiming the same (upper_body, base)
+    # cell: the gate must bounce the candidate back instead of passing it.
+    top = draft.outfit.items[0]  # shirt_a
+    conflicted = Draft(
+        outfit=draft.outfit.model_copy(
+            update={
+                "item_ids": ["shirt_a", "shirt_a2"],
+                "items": [top, top.model_copy(update={"item_id": "shirt_a2"})],
+            }
+        ),
+        layers={"shirt_a": GarmentLayer.base, "shirt_a2": GarmentLayer.base},
+    )
+    result = gate({"working_draft": conflicted})
+    assert result["environment_valid"] is False
+    assert "冲突" in result["gate_feedback"]

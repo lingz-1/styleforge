@@ -1,0 +1,78 @@
+"""StyleForgeHarness: the assembled Multi-Agent Harness (H2a scope).
+
+One object owns the harness wiring:
+    CapabilityRegistry(+ 8 local tools) → AgentRuntime (Visibility/Assembler/
+    PromptAssembler/Guard/LLM) → compiled Main Graph (Coordinator + Stylist
+    chain + Clarification).
+
+Runtime Dependencies (llm, environment, providers) are captured here — never in
+the serializable Execution State (frozen #2). ``invoke(state)`` is the single
+entry point; H2c wires it from the request path. AgentLoop stays as a legacy
+adapter until the request path fully switches.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from styleforge.agentic.agentic_contract import StyleForgeState
+from styleforge.agentic.context.evidence_store import EvidenceStore
+from styleforge.agentic.context.guard import ContextGuard
+from styleforge.agentic.context.visibility import ContextVisibilityPolicy
+from styleforge.agentic.graph.main import build_h2a_main_graph
+from styleforge.agentic.hooks.manager import HookManager
+from styleforge.agentic.runtime.agent_runtime import AgentRuntime
+from styleforge.agentic.runtime.capability_registry import CapabilityRegistry
+from styleforge.agentic.tools.local_tools import register_local_tools
+
+DEFAULT_INSTRUCTIONS_ROOT = (
+    Path(__file__).resolve().parent / "instructions"
+)
+
+
+class StyleForgeHarness:
+    """The compiled Multi-Agent Harness over one LLM + one Environment."""
+
+    def __init__(
+        self,
+        *,
+        llm: Any,
+        environment: Any,
+        instructions_root: Path | str = DEFAULT_INSTRUCTIONS_ROOT,
+        runtime_capabilities: frozenset[str] = frozenset(),
+        hooks: HookManager | None = None,
+        guard: ContextGuard | None = None,
+        visibility: ContextVisibilityPolicy | None = None,
+        agent_instruction_versions: dict[str, str] | None = None,
+        knowledge_retriever: Any | None = None,
+        target_candidates: int = 3,
+    ) -> None:
+        self.registry = CapabilityRegistry()
+        register_local_tools(self.registry, environment, knowledge_retriever=knowledge_retriever)
+        self.runtime = AgentRuntime(
+            llm=llm,
+            registry=self.registry,
+            instructions_root=instructions_root,
+            runtime_capabilities=runtime_capabilities,
+            hooks=hooks,
+            visibility=visibility,
+            guard=guard,
+            agent_instruction_versions=agent_instruction_versions,
+        )
+        self.evidence_store = EvidenceStore()
+        self.graph = build_h2a_main_graph(
+            self.runtime,
+            environment=environment,
+            target_candidates=target_candidates,
+            evidence_store=self.evidence_store,
+        )
+
+    @property
+    def model_calls(self) -> int:
+        """Total LLM calls this harness has spent across all invokes."""
+        return self.runtime.model_calls
+
+    def invoke(self, state: StyleForgeState) -> dict[str, Any]:
+        """Run the compiled Main Graph over one execution state."""
+        return self.graph.invoke(dict(state))

@@ -11,10 +11,11 @@ environment's wardrobe is fully resolved from in-memory items).
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from urllib.request import Request
 
-from styleforge.agentic.agent import AgentLoop, LoopConfig
+from styleforge.agentic.agent import RECOMMEND_SYSTEM_PROMPT, AgentLoop, LoopConfig
 from styleforge.agentic.environment import Environment
 from styleforge.agentic.structure import structure_for
 from styleforge.models.agentic_contract import (
@@ -23,6 +24,7 @@ from styleforge.models.agentic_contract import (
     ItemSnapshot,
     OutfitSnapshot,
 )
+from styleforge.tools.weather.schemas import ResolvedLocation, WeatherDay, WeatherFacts
 from styleforge.tools.web_search import TavilySearchProvider
 
 from tests.extension_llm import ScriptedExtensionLlm
@@ -73,7 +75,10 @@ def _step(action: str, **kw: Any) -> dict[str, Any]:
         "action": action,
         "query": "",
         "outfit_id": "",
+        "location": "",
+        "date": "",
         "plan": None,
+        "plan_state": None,
         "question": "",
     }
     step.update(kw)
@@ -128,6 +133,7 @@ def test_trace_never_leaks_raw_thought() -> None:
             "action",
             "args",
             "observation",
+            "plan_state",
             "external_context_decision",
         }
         assert "thought" not in str(step)
@@ -595,3 +601,195 @@ def test_external_context_decision_is_recorded_in_trace() -> None:
         "needed": False,
         "reason": "换鞋是已有穿搭的局部调整，无需外部事实",
     }
+
+
+# ── Plan State ─────────────────────────────────────────────────────
+
+
+def test_plan_state_recorded_in_trace_without_thought() -> None:
+    # A complex task's structured plan lands in the trace as a decision summary
+    # (objective / missing_information / next_steps ...) — never raw thought.
+    llm = ScriptedExtensionLlm(
+        [
+            _step(
+                "search_web",
+                query="北京 莫里哀音乐剧 演出时间",
+                plan_state={
+                    "objective": "下周去北京看莫里哀音乐剧的穿搭",
+                    "missing_information": ["演出日期", "场馆", "主题"],
+                    "next_steps": ["search_web 查演出信息", "查天气"],
+                    "completed_steps": [],
+                    "remaining_steps": ["组合完整搭配"],
+                },
+            ),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env(), "下周去北京看莫里哀音乐剧穿什么").run()
+
+    assert outcome["status"] == "success"
+    recorded = [step["plan_state"] for step in outcome["steps"] if step["plan_state"]]
+    assert len(recorded) == 1
+    assert recorded[0]["objective"] == "下周去北京看莫里哀音乐剧的穿搭"
+    assert recorded[0]["missing_information"] == ["演出日期", "场馆", "主题"]
+    assert recorded[0]["remaining_steps"] == ["组合完整搭配"]
+    assert "thought" not in str(outcome["steps"])
+
+
+# ── Skill system ───────────────────────────────────────────────────
+
+
+def _env_with_skill(tmp_path: Path) -> Environment:
+    env = _env()
+    skill_dir = tmp_path / "tasks" / "event_outfit_planning"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "# Event Outfit Planning\n1. 识别活动实体\n2. search_web 查事实\n",
+        encoding="utf-8",
+    )
+    env.skills_root = tmp_path
+    return env
+
+
+def test_load_skill_observation_enters_steps(tmp_path: Path) -> None:
+    llm = ScriptedExtensionLlm(
+        [
+            _step("load_skill", query="event_outfit_planning"),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env_with_skill(tmp_path), "下周去北京看音乐剧穿什么").run()
+
+    assert outcome["status"] == "success"
+    skill_steps = [step for step in outcome["steps"] if step["action"] == "load_skill"]
+    assert len(skill_steps) == 1
+    assert skill_steps[0]["args"] == {"skill_name": "event_outfit_planning"}
+    assert "已加载技能" in skill_steps[0]["observation"]
+    assert "Event Outfit Planning" in skill_steps[0]["observation"]
+
+
+def test_load_skill_missing_degrades_gracefully() -> None:
+    # No skills_root configured: the tool is a fact the Agent works around.
+    llm = ScriptedExtensionLlm(
+        [
+            _step("load_skill", query="event_outfit_planning"),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, _env(), "下周去北京看音乐剧穿什么").run()
+
+    assert outcome["status"] == "success"
+    skill_steps = [step for step in outcome["steps"] if step["action"] == "load_skill"]
+    assert len(skill_steps) == 1
+    assert "技能不可用" in skill_steps[0]["observation"]
+
+
+class _FakeWeatherProvider:
+    """WeatherProvider stand-in: every named location resolves with one day."""
+
+    def resolve_location(self, query: str):
+        return ResolvedLocation(
+            name=query, country="CN", latitude=39.9, longitude=116.4
+        )
+
+    def forecast_range(
+        self,
+        location: ResolvedLocation,
+        start_date: Any,
+        end_date: Any,
+        *,
+        granularity: str = "daily",
+        period: str | None = None,
+    ) -> WeatherFacts:
+        day = WeatherDay(
+            date=str(start_date),
+            temperature_min_c=18,
+            temperature_max_c=26,
+            condition="晴",
+        )
+        return WeatherFacts(
+            status="available",
+            requested_location=location.display_name,
+            resolved_location=location,
+            start_date=str(start_date),
+            end_date=str(end_date),
+            days=[day],
+        )
+
+
+def test_get_weather_observation_enters_steps() -> None:
+    env = _env()
+    env.weather_provider = _FakeWeatherProvider()
+    llm = ScriptedExtensionLlm(
+        [
+            _step("get_weather", location="北京", date="2026-08-20"),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(llm, env, "下周去北京穿什么").run()
+
+    assert outcome["status"] == "success"
+    weather_steps = [step for step in outcome["steps"] if step["action"] == "get_weather"]
+    assert len(weather_steps) == 1
+    assert weather_steps[0]["args"] == {"location": "北京", "date": "2026-08-20"}
+    assert "北京, CN" in weather_steps[0]["observation"]
+    assert "晴" in weather_steps[0]["observation"]
+
+
+# ── Recommend mode (from-scratch generation) ───────────────────────
+
+
+def test_recommend_prompt_builds_outfit_from_empty_active() -> None:
+    # No active outfit; the recommend prompt must generate a complete outfit
+    # from the empty draft instead of asking which outfit to edit.
+    facts = EnvironmentFacts(
+        interaction=InteractionContext(),
+        active_outfit=None,
+        wardrobe_summary={},
+    )
+    env = Environment(connection=None, wardrobe_items=WARDROBE, facts=facts)
+    llm = ScriptedExtensionLlm(
+        [
+            _step(
+                "modify_outfit",
+                plan=_modify_plan(
+                    action="add",
+                    item_id="shirt_a",
+                    placement={"region": "upper_body", "layer": "base"},
+                ),
+            ),
+            _step(
+                "modify_outfit",
+                plan=_modify_plan(
+                    action="add",
+                    item_id="pants_b",
+                    placement={"region": "lower_body", "layer": "base"},
+                ),
+            ),
+            _step(
+                "modify_outfit",
+                plan=_modify_plan(
+                    action="add",
+                    item_id="sneakers_d",
+                    placement={"region": "feet", "layer": "base"},
+                ),
+            ),
+            _step("finish"),
+            {"approved": True, "issues": [], "feedback": ""},
+        ]
+    )
+    outcome = AgentLoop(
+        llm,
+        env,
+        "通勤穿搭",
+        system_prompt=RECOMMEND_SYSTEM_PROMPT,
+        is_recommend=True,
+    ).run()
+
+    assert outcome["status"] == "success"
+    assert set(outcome["candidate"]["item_ids"]) == {"shirt_a", "pants_b", "sneakers_d"}
+    assert outcome["llm_call_count"] == 5  # 3 modify + finish + reviewer

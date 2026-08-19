@@ -13,8 +13,20 @@ from typing import Any, Callable, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from styleforge.agentic.agent import AgentLoop, LoopConfig
-from styleforge.agentic.environment import Environment, build_facts
+from styleforge.agentic.environment import (
+    Draft,
+    Environment,
+    build_facts,
+    resolve_active_outfit,
+)
+from styleforge.agentic.harness import StyleForgeHarness
 from styleforge.agentic.shadow import AgenticShadowRunner, shadow_enabled, shadow_exposed
+from styleforge.agentic.tools.local_tools import (
+    CAP_KNOWLEDGE,
+    CAP_SKILLS,
+    CAP_WEATHER,
+    CAP_WEB_SEARCH,
+)
 from styleforge.agents.composer import ComposerAgent
 from styleforge.agents.critic import CriticAgent
 from styleforge.agents.semantic_retriever import SemanticRetrieverAgent
@@ -25,6 +37,7 @@ from styleforge.core.schemas import OutfitCandidate, RecommendationResult, TaskS
 from styleforge.knowledge.retriever import KnowledgeRetriever
 from styleforge.llm.client import LlmSchemaViolation, LlmUnavailable
 from styleforge.models.agent_tasks import Agent1TaskOutput, Agent2TaskOutput, Agent3TaskOutput
+from styleforge.models.agentic_contract import OutfitSnapshot
 from styleforge.models.context import ContextPack
 from styleforge.models.task import TaskExecutionInput
 from styleforge.models.task_results import validate_task_result
@@ -100,6 +113,24 @@ def _resolve_modify_mode(modify_mode: str | None) -> str:
     return mode if mode in _MODIFY_MODES else "agentic"
 
 
+_RECOMMEND_MODES = ("agentic", "legacy")
+
+
+def _resolve_recommend_mode(recommend_mode: str | None) -> str:
+    """Resolve which OUTFIT_RECOMMEND chain is primary.
+
+    ``agentic`` (default) runs the Agent loop (Plan State + Skill + web/weather
+    tools) as the primary chain and skips the legacy graph; ``legacy`` keeps the
+    old three-agent graph. An explicit argument wins; otherwise the
+    ``STYLEFORGE_RECOMMEND_MODE`` env flag is read. No LLM key degrades an
+    ``agentic`` request to the legacy graph anyway (execute gates on llm_client).
+    """
+    mode = (
+        recommend_mode or os.environ.get("STYLEFORGE_RECOMMEND_MODE", "")
+    ).strip().lower()
+    return mode if mode in _RECOMMEND_MODES else "agentic"
+
+
 class TaskWorkflowState(TypedDict, total=False):
     task_input: TaskExecutionInput
     route: TaskRoute
@@ -153,11 +184,19 @@ class MultiTaskWorkflow:
         # Web search for the agentic ``search_web`` tool. None degrades the
         # tool to an "unconfigured" observation; the loop keeps working.
         web_search_provider: Any | None = None,
+        # OUTFIT_RECOMMEND chain selection: ``agentic`` (default) or ``legacy``.
+        recommend_mode: str | None = None,
+        # Agentic recommend extras: ``get_weather`` provider + Task Skill root
+        # (``knowledge/skills``). None degrades each tool to "unconfigured".
+        weather_provider: Any | None = None,
+        skills_root: Path | None = None,
     ) -> None:
         self.database_path = database_path
         self.knowledge_root = knowledge_root.resolve()
         self.llm_client = llm_client
         self.web_search_provider = web_search_provider
+        self.weather_provider = weather_provider
+        self.skills_root = skills_root
         self.recommendation_runner = recommendation_runner
         self.router = TaskRouter()
         self.context_builder = ContextPackBuilder(self.database_path)
@@ -182,6 +221,7 @@ class MultiTaskWorkflow:
             else shadow_exposed()
         )
         self.modify_mode = _resolve_modify_mode(modify_mode)
+        self.recommend_mode = _resolve_recommend_mode(recommend_mode)
         self.agentic_shadow_runner = AgenticShadowRunner(
             database_path,
             llm_client,
@@ -669,6 +709,18 @@ class MultiTaskWorkflow:
             return self._run_agentic_modify(
                 task_input, route, initial_context, run_id, session_context
             )
+        # Recommend is the system's primary task; with a model present and
+        # agentic selected, the Agent loop is the chain (Plan State + Skill +
+        # web/weather tools). Without an LLM the request degrades to the legacy
+        # graph below, keeping no-key behaviour unchanged.
+        if (
+            route.task_type is TaskType.OUTFIT_RECOMMEND
+            and self.recommend_mode == "agentic"
+            and self.llm_client is not None
+        ):
+            return self._run_agentic_recommend(
+                task_input, route, initial_context, run_id, session_context
+            )
         try:
             final = self.graph.invoke(
                 {
@@ -750,6 +802,39 @@ class MultiTaskWorkflow:
 
     # --- Stage 4: agentic primary chain ----------------------------------
 
+    def _harness(
+        self,
+        environment: Environment,
+        *,
+        target_candidates: int = 3,
+    ) -> StyleForgeHarness:
+        """Assemble the Multi-Agent Harness over one environment.
+
+        Runtime capabilities are derived from the providers actually deployed on
+        this workflow (Layer 2), so ``tools=`` changes only with real capability
+        availability — never with the request.
+        """
+        return StyleForgeHarness(
+            llm=self.llm_client,
+            environment=environment,
+            runtime_capabilities=self._runtime_capabilities(),
+            knowledge_retriever=self.knowledge_retriever,
+            target_candidates=target_candidates,
+        )
+
+    def _runtime_capabilities(self) -> frozenset[str]:
+        """Deployed capability keys (Layer 2) from the workflow's providers."""
+        caps: set[str] = set()
+        if self.web_search_provider is not None:
+            caps.add(CAP_WEB_SEARCH)
+        if self.weather_provider is not None:
+            caps.add(CAP_WEATHER)
+        if self.knowledge_retriever is not None:
+            caps.add(CAP_KNOWLEDGE)
+        if self.skills_root is not None:
+            caps.add(CAP_SKILLS)
+        return frozenset(caps)
+
     def _run_agentic_modify(
         self,
         task_input: TaskExecutionInput,
@@ -758,31 +843,27 @@ class MultiTaskWorkflow:
         run_id: str,
         session_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Run OUTFIT_MODIFY through the Agent loop as the primary chain.
+        """Run OUTFIT_MODIFY through the Multi-Agent Harness as the primary chain.
 
-        Mirrors the shadow sequence (build_facts -> Environment -> AgentLoop)
-        but the outcome is the real result: it is validated against the
-        OutfitModifyResult contract, committed to task_runs, and (when it
-        produces a completed outfit) persisted to candidate_outfits so a later
-        turn can re-anchor on it by outfit_id.
-
-        The targets come from ``_agentic_targets``: an explicit
-        ``current_outfit_id`` means one outfit; otherwise every recent
-        recommendation candidate in the session context is a target ("modify
-        all three"). One loop runs per target, and the batch of outcomes is
-        wrapped into one result with one alternative per success.
+        Each target outfit (an explicit ``current_outfit_id``, or every recent
+        recommendation candidate — "modify all three") becomes one
+        ``StyleForgeHarness.invoke`` over that snapshot as ``base_draft``; the
+        batch of outcomes is wrapped into one result with one alternative per
+        success. Completed alternatives are persisted to candidate_outfits so a
+        later turn can re-anchor on the new outfit_id.
         """
         if self.llm_client is None:
             raise LlmUnavailable("OUTFIT_MODIFY requires an LLM client")
         context_json = initial_context.model_dump(mode="json")
         targets = self._agentic_targets(task_input, session_context)
+        outcomes: list[dict[str, Any]] = []
+        item_type_by_id: dict[str, str] = {}
         try:
             with database_session(self.database_path) as connection:
                 wardrobe_items = list_items(connection, task_input.user_id)
                 item_type_by_id = {
                     item.item_id: item.item_type for item in wardrobe_items
                 }
-                outcomes: list[dict[str, Any]] = []
                 for target in targets:
                     sub_input = task_input.model_copy(
                         update={
@@ -800,14 +881,24 @@ class MultiTaskWorkflow:
                         search_limit=12,
                         web_search_provider=self.web_search_provider,
                     )
-                    loop = AgentLoop(
-                        self.llm_client,
-                        environment,
-                        task_input.request,
-                        config=LoopConfig(max_steps=8, search_limit=12),
+                    harness = self._harness(environment, target_candidates=1)
+                    base_snapshot = resolve_active_outfit(
+                        connection, sub_input, initial_context
+                    ) or OutfitSnapshot(
+                        outfit_id=target["outfit_id"] or "active_outfit",
+                        item_ids=list(target["item_ids"]),
+                        items=[],
                     )
-                    outcomes.append(loop.run())
-            result = self._agentic_outcomes_to_result(
+                    outcome = harness.invoke(
+                        {
+                            "run_id": run_id,
+                            "request": task_input.request,
+                            "base_draft": Draft(outfit=base_snapshot, layers={}),
+                        }
+                    )
+                    outcome["_llm_call_count"] = harness.model_calls
+                    outcomes.append(outcome)
+            result = self._agentic_modify_to_result(
                 task_input, targets, outcomes, item_type_by_id
             )
             status = str(result.get("status", "infeasible"))
@@ -836,7 +927,7 @@ class MultiTaskWorkflow:
             "user_id": task_input.user_id,
             "request": task_input.request,
             "task_type": TaskType.OUTFIT_MODIFY.value,
-            "selected_subgraph": "agentic_loop",
+            "selected_subgraph": "agentic_harness",
             "route": route.to_dict(),
             "status": status,
             "context_pack": context_json,
@@ -844,13 +935,652 @@ class MultiTaskWorkflow:
             "trace": [],
             "diagnostics": {},
             "image_endpoint_template": "/items/{item_id}/image",
-            "agents": {"loop": "agentic_agent_loop"},
+            "agents": {"harness": "styleforge_harness"},
             "agentic_outcome": outcomes[0] if len(outcomes) == 1 else outcomes,
             "llm_enabled": True,
             "llm_call_count": sum(
-                int(outcome.get("llm_call_count", 0)) for outcome in outcomes
+                int(outcome.get("_llm_call_count", 0)) for outcome in outcomes
             ),
         }
+
+    def _agentic_modify_to_result(
+        self,
+        task_input: TaskExecutionInput,
+        targets: list[dict[str, Any]],
+        outcomes: list[dict[str, Any]],
+        item_type_by_id: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Wrap one or more Harness modify outcomes into the OutfitModifyResult
+        contract — one alternative per successful target."""
+        if len(outcomes) == 1:
+            return self._agentic_modify_outcome_to_result(
+                task_input, targets[0], outcomes[0], item_type_by_id
+            )
+        item_type_by_id = item_type_by_id or {}
+        base_id = task_input.current_outfit_id or ""
+        alternatives: list[dict[str, Any]] = []
+        skipped = 0
+        first_failure: dict[str, Any] | None = None
+        first_success: dict[str, Any] | None = None
+        for target, outcome in zip(targets, outcomes):
+            alternative, reason = self._harness_modify_alternative(
+                task_input, target, outcome, item_type_by_id
+            )
+            if alternative is not None:
+                alternatives.append(alternative)
+                if first_success is None:
+                    first_success = alternative
+            else:
+                if first_failure is None:
+                    first_failure = outcome
+                if reason == "skipped":
+                    skipped += 1
+        if not alternatives:
+            if (
+                first_failure is not None
+                and str(first_failure.get("status")) == "needs_clarification"
+            ):
+                question = str(
+                    first_failure.get("clarification_question") or "需要你进一步说明"
+                )
+                return validate_task_result(
+                    TaskType.OUTFIT_MODIFY,
+                    {
+                        "status": "needs_clarification",
+                        "current_outfit_id": base_id,
+                        "target_slot": "",
+                        "replaced_item_ids": [],
+                        "locked_item_ids": [],
+                        "alternatives": [],
+                        "message": question,
+                        "clarification_question": question,
+                    },
+                )
+            return validate_task_result(
+                TaskType.OUTFIT_MODIFY,
+                {
+                    "status": "infeasible",
+                    "current_outfit_id": base_id,
+                    "target_slot": "",
+                    "replaced_item_ids": [],
+                    "locked_item_ids": [],
+                    "alternatives": [],
+                    "message": "修改失败，请换个说法重试",
+                },
+            )
+        all_replaced = [
+            item_id
+            for alternative in alternatives
+            for item_id in alternative.get("replaced_item_ids", [])
+        ]
+        all_locked = [
+            item_id
+            for alternative in alternatives
+            for item_id in alternative.get("locked_item_ids", [])
+        ]
+        assert first_success is not None
+        target_slot = ""
+        for item_id in first_success.get("replaced_item_ids", []):
+            item_type = item_type_by_id.get(item_id)
+            if item_type:
+                slot = infer_slot(item_type)
+                if slot and slot != "other":
+                    target_slot = slot
+                    break
+        detail = (
+            f"已按你的要求修改 {len(alternatives)} 套"
+            if not skipped
+            else f"已修改 {len(alternatives)} 套，另有 {skipped} 套候选单品过少已跳过"
+        )
+        return validate_task_result(
+            TaskType.OUTFIT_MODIFY,
+            {
+                "status": "completed",
+                "current_outfit_id": alternatives[0]["outfit_id"],
+                "target_slot": target_slot,
+                "replaced_item_ids": all_replaced,
+                "locked_item_ids": all_locked,
+                "alternatives": alternatives,
+                "message": detail,
+            },
+        )
+
+    def _agentic_modify_outcome_to_result(
+        self,
+        task_input: TaskExecutionInput,
+        target: dict[str, Any],
+        outcome: dict[str, Any],
+        item_type_by_id: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Wrap ONE Harness modify outcome into the OutfitModifyResult contract.
+
+        Status mapping: done-with-candidate -> completed, needs_clarification ->
+        needs_clarification, otherwise infeasible. An under-sized candidate
+        surfaces as a clarification (the contract requires >= 2 items).
+        """
+        item_type_by_id = item_type_by_id or {}
+        base_id = target.get("outfit_id") or task_input.current_outfit_id or ""
+        if str(outcome.get("status")) == "needs_clarification":
+            question = str(outcome.get("clarification_question") or "需要你进一步说明")
+            return validate_task_result(
+                TaskType.OUTFIT_MODIFY,
+                {
+                    "status": "needs_clarification",
+                    "current_outfit_id": base_id,
+                    "target_slot": "",
+                    "replaced_item_ids": [],
+                    "locked_item_ids": [],
+                    "alternatives": [],
+                    "message": question,
+                    "clarification_question": question,
+                },
+            )
+        alternative, reason = self._harness_modify_alternative(
+            task_input, target, outcome, item_type_by_id
+        )
+        if alternative is None:
+            if reason == "skipped":
+                message = "当前搭配单品过少，请补充想怎么调整"
+                return validate_task_result(
+                    TaskType.OUTFIT_MODIFY,
+                    {
+                        "status": "needs_clarification",
+                        "current_outfit_id": base_id,
+                        "target_slot": "",
+                        "replaced_item_ids": [],
+                        "locked_item_ids": [],
+                        "alternatives": [],
+                        "message": message,
+                        "clarification_question": message,
+                    },
+                )
+            return validate_task_result(
+                TaskType.OUTFIT_MODIFY,
+                {
+                    "status": "infeasible",
+                    "current_outfit_id": base_id,
+                    "target_slot": "",
+                    "replaced_item_ids": [],
+                    "locked_item_ids": [],
+                    "alternatives": [],
+                    "message": "修改失败，请换个说法重试",
+                },
+            )
+        target_slot = ""
+        for item_id in alternative.get("replaced_item_ids", []):
+            item_type = item_type_by_id.get(item_id)
+            if item_type:
+                slot = infer_slot(item_type)
+                if slot and slot != "other":
+                    target_slot = slot
+                    break
+        return validate_task_result(
+            TaskType.OUTFIT_MODIFY,
+            {
+                "status": "completed",
+                "current_outfit_id": alternative["outfit_id"],
+                "target_slot": target_slot,
+                "replaced_item_ids": alternative.get("replaced_item_ids", []),
+                "locked_item_ids": alternative.get("locked_item_ids", []),
+                "alternatives": [alternative],
+                "message": alternative.get("reasoning", "已按你的要求修改搭配"),
+            },
+        )
+
+    def _harness_modify_alternative(
+        self,
+        task_input: TaskExecutionInput,
+        target: dict[str, Any],
+        outcome: dict[str, Any],
+        item_type_by_id: dict[str, str],
+    ) -> tuple[dict[str, Any] | None, str]:
+        """One alternative from one Harness modify outcome (``candidates[0]``).
+
+        ``replaced`` is the base target set minus the final set (the Harness
+        keeps no per-op trail in the state); ``locked`` is their intersection.
+        Returns ``(None, reason)`` when the outcome produced no usable candidate.
+        """
+        candidates = list(outcome.get("candidates") or [])
+        if not candidates:
+            return None, "failed"
+        candidate = candidates[0]
+        item_ids = list(candidate.get("item_ids") or [])
+        if len(item_ids) < 2:
+            return None, "skipped"
+        base_item_ids = list(target.get("item_ids") or [])
+        base_id = target.get("outfit_id") or task_input.current_outfit_id or ""
+        new_outfit_id = f"{base_id or 'outfit'}-mod-{uuid.uuid4().hex[:6]}"
+        outfit = candidate.get("outfit")
+        reasoning = str((outfit.reasoning if outfit is not None else None) or "") or "已按你的要求修改搭配"
+        replaced = [item_id for item_id in base_item_ids if item_id not in item_ids]
+        locked = [item_id for item_id in base_item_ids if item_id in item_ids]
+        return (
+            {
+                "outfit_id": new_outfit_id,
+                "item_ids": item_ids,
+                "reasoning": reasoning,
+                "replaced_item_ids": replaced,
+                "locked_item_ids": locked,
+            },
+            "ok",
+        )
+
+    # --- Stage 4b: agentic primary recommend chain -----------------------
+
+    def _run_agentic_recommend(
+        self,
+        task_input: TaskExecutionInput,
+        route: TaskRoute,
+        initial_context: ContextPack,
+        run_id: str,
+        session_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run OUTFIT_RECOMMEND through the Multi-Agent Harness as the primary chain.
+
+        One ``StyleForgeHarness.invoke`` produces all three candidates from the
+        empty base draft: Coordinator → Research (skill / web / weather run
+        ONCE) → Evidence Synthesizer → Stylist ×3 sharing the evidence → Main
+        Graph gates → StageCandidate. The single outcome rides
+        ``agentic_outcome`` so the front end can render the research basis; the
+        ``get_weather`` fact the Research Agent actually saw (if any) rides
+        ``environment_context``.
+
+        Requires an LLM; execute gates on ``llm_client`` so a no-key request
+        degrades to the legacy graph instead of raising.
+        """
+        if self.llm_client is None:
+            raise LlmUnavailable("OUTFIT_RECOMMEND requires an LLM client")
+        context_json = initial_context.model_dump(mode="json")
+        harness: StyleForgeHarness | None = None
+        try:
+            with database_session(self.database_path) as connection:
+                wardrobe_items = list_items(connection, task_input.user_id)
+                item_type_by_id = {
+                    item.item_id: item.item_type for item in wardrobe_items
+                }
+                facts = build_facts(
+                    connection, task_input, initial_context, wardrobe_items
+                )
+                environment = Environment(
+                    connection,
+                    wardrobe_items,
+                    facts,
+                    search_limit=12,
+                    web_search_provider=self.web_search_provider,
+                    weather_provider=self.weather_provider,
+                    skills_root=self.skills_root,
+                )
+                harness = self._harness(environment)
+                outcome = harness.invoke(
+                    {
+                        "run_id": run_id,
+                        "request": task_input.request,
+                        "base_draft": Draft(
+                            outfit=OutfitSnapshot(
+                                outfit_id="base", item_ids=[], items=[]
+                            ),
+                            layers={},
+                        ),
+                    }
+                )
+                weather_facts = environment.last_weather_facts
+            assert harness is not None
+            result = self._agentic_recommend_to_result(
+                task_input,
+                outcome,
+                item_type_by_id,
+                weather_facts=weather_facts,
+                llm_call_count=harness.model_calls,
+            )
+            status = str(result.get("status", "infeasible"))
+            with database_session(self.database_path) as connection:
+                finish_task_run(
+                    connection,
+                    run_id=run_id,
+                    status=status,
+                    context_pack=context_json,
+                    result=result,
+                )
+            if status == "completed":
+                self._persist_agentic_recommend(task_input, result)
+            self._extract_memories(task_input)
+        except Exception as error:
+            with database_session(self.database_path) as connection:
+                fail_task_run(
+                    connection,
+                    run_id=run_id,
+                    error=error,
+                    context_pack=context_json,
+                )
+            raise
+        return {
+            "run_id": run_id,
+            "user_id": task_input.user_id,
+            "request": task_input.request,
+            "task_type": TaskType.OUTFIT_RECOMMEND.value,
+            "selected_subgraph": "agentic_harness",
+            "route": route.to_dict(),
+            "status": status,
+            "context_pack": context_json,
+            "result": result,
+            "trace": [],
+            "diagnostics": {},
+            "image_endpoint_template": "/items/{item_id}/image",
+            "agents": {"harness": "styleforge_harness"},
+            "agentic_outcome": outcome,
+            "llm_enabled": True,
+            "llm_call_count": harness.model_calls,
+        }
+
+    def _agentic_recommend_to_result(
+        self,
+        task_input: TaskExecutionInput,
+        outcome: dict[str, Any],
+        item_type_by_id: dict[str, str] | None,
+        weather_facts: Any | None = None,
+        llm_call_count: int = 0,
+    ) -> dict[str, Any]:
+        """Wrap one Harness outcome into the recommend result contract.
+
+        Every StageCandidate entry becomes one recommendation; the batch
+        completes when at least one survives. ``needs_clarification`` surfaces
+        the Coordinator / Research clarification question, otherwise infeasible.
+        """
+        item_type_by_id = item_type_by_id or {}
+        evidence = outcome.get("research_evidence")
+        recommendations: list[dict[str, Any]] = []
+        skipped = 0
+        for candidate in outcome.get("candidates") or []:
+            item_ids = list(candidate.get("item_ids") or [])
+            if len(item_ids) < 2:
+                skipped += 1
+                continue
+            outfit_id = f"rec-{uuid.uuid4().hex[:8]}"
+            slot_items: dict[str, str] = {}
+            for item_id in item_ids:
+                slot = infer_slot(str(item_type_by_id.get(item_id, "")))
+                if slot and slot != "other":
+                    slot_items[slot] = item_id
+            recommendations.append(
+                {
+                    "outfit_id": outfit_id,
+                    "item_ids": item_ids,
+                    "slot_items": slot_items,
+                    "hard_valid": True,
+                    "score": 0.0,
+                    "reasons": self._harness_recommend_reasons(candidate, evidence),
+                }
+            )
+        base = {
+            "environment_context": (
+                {"weather": weather_facts.model_dump(mode="json")}
+                if weather_facts is not None
+                else {}
+            ),
+            "llm_enabled": True,
+            "llm_call_count": llm_call_count,
+        }
+        if not recommendations:
+            if str(outcome.get("status")) == "needs_clarification":
+                question = str(
+                    outcome.get("clarification_question") or "需要你进一步说明"
+                )
+                return {
+                    **base,
+                    "status": "needs_clarification",
+                    "message": question,
+                    "clarification_question": question,
+                    "structured_result": {
+                        "run_id": "",
+                        "status": "needs_clarification",
+                        "recommendations": [],
+                    },
+                }
+            return {
+                **base,
+                "status": "infeasible",
+                "message": "推荐失败，请换个说法重试",
+                "structured_result": {
+                    "run_id": "",
+                    "status": "infeasible",
+                    "recommendations": [],
+                },
+            }
+        detail = f"已为你搭配 {len(recommendations)} 套方案"
+        if skipped:
+            detail += f"，另有 {skipped} 套候选单品过少已跳过"
+        return {
+            **base,
+            "status": "completed",
+            "message": detail,
+            "structured_result": {
+                "run_id": "",
+                "status": "completed",
+                "recommendations": recommendations,
+            },
+        }
+
+    @staticmethod
+    def _harness_recommend_reasons(
+        candidate: dict[str, Any],
+        evidence: Any,
+    ) -> list[str]:
+        """Human-readable rationale for one Harness recommendation.
+
+        The candidate's own Stylist reasoning, then the shared ResearchEvidence
+        facts the Stylist grounded on (dress context / theme / uncertainties) —
+        the "联网搜索查到 xx → 考虑主题 → 搭配 xx" narrative the front end shows.
+        """
+        reasons: list[str] = []
+        outfit = candidate.get("outfit")
+        reasoning = str((outfit.reasoning if outfit is not None else None) or "").strip()
+        if reasoning:
+            reasons.append(reasoning[:240])
+        if evidence is not None:
+            for ctx in getattr(evidence, "dress_context", None) or []:
+                if ctx and ctx not in reasons:
+                    reasons.append(ctx[:240])
+            for theme in getattr(evidence, "theme_elements", None) or []:
+                text = f"主题：{theme}"
+                if text not in reasons:
+                    reasons.append(text[:240])
+            for uncertainty in getattr(evidence, "uncertainties", None) or []:
+                text = f"（未确认）{uncertainty}"
+                if text not in reasons:
+                    reasons.append(text[:240])
+        return reasons
+
+    def _agentic_outcomes_to_recommend_result(
+        self,
+        task_input: TaskExecutionInput,
+        outcomes: list[dict[str, Any]],
+        item_type_by_id: dict[str, str] | None,
+        weather_facts: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Wrap the batch of loop outcomes into the recommend result contract.
+
+        Every successful loop becomes one recommendation in
+        ``structured_result.recommendations`` (the front-end contract); the
+        batch completes when at least one survives. An ask_user outcome surfaces
+        as ``needs_clarification``, otherwise infeasible.
+        """
+        item_type_by_id = item_type_by_id or {}
+        recommendations: list[dict[str, Any]] = []
+        skipped = 0
+        first_failure: dict[str, Any] | None = None
+        for outcome in outcomes:
+            agentic_status = str(outcome.get("status", "timeout"))
+            if agentic_status != "success":
+                if first_failure is None:
+                    first_failure = outcome
+                continue
+            candidate = outcome.get("candidate") or {}
+            item_ids = list(candidate.get("item_ids") or [])
+            if len(item_ids) < 2:
+                skipped += 1
+                continue
+            outfit_id = f"rec-{uuid.uuid4().hex[:8]}"
+            slot_items: dict[str, str] = {}
+            for item_id in item_ids:
+                slot = infer_slot(str(item_type_by_id.get(item_id, "")))
+                if slot and slot != "other":
+                    slot_items[slot] = item_id
+            recommendations.append(
+                {
+                    "outfit_id": outfit_id,
+                    "item_ids": item_ids,
+                    "slot_items": slot_items,
+                    "hard_valid": True,
+                    "score": 0.0,
+                    "reasons": self._recommend_reasons(outcome),
+                }
+            )
+        call_count = sum(
+            int(outcome.get("llm_call_count", 0)) for outcome in outcomes
+        )
+        base = {
+            "environment_context": (
+                {"weather": weather_facts} if weather_facts else {}
+            ),
+            "llm_enabled": True,
+            "llm_call_count": call_count,
+        }
+        if not recommendations:
+            if (
+                first_failure is not None
+                and str(first_failure.get("status")) == "ask_user"
+            ):
+                question = str(
+                    (first_failure.get("ask_user") or {}).get("question")
+                    or "需要你进一步说明"
+                )
+                return {
+                    **base,
+                    "status": "needs_clarification",
+                    "message": question,
+                    "clarification_question": question,
+                    "structured_result": {
+                        "run_id": "",
+                        "status": "needs_clarification",
+                        "recommendations": [],
+                    },
+                }
+            return {
+                **base,
+                "status": "infeasible",
+                "message": "推荐超时，请换个说法重试",
+                "structured_result": {
+                    "run_id": "",
+                    "status": "infeasible",
+                    "recommendations": [],
+                },
+            }
+        detail = f"已为你搭配 {len(recommendations)} 套方案"
+        if skipped:
+            detail += f"，另有 {skipped} 套候选单品过少已跳过"
+        return {
+            **base,
+            "status": "completed",
+            "message": detail,
+            "structured_result": {
+                "run_id": "",
+                "status": "completed",
+                "recommendations": recommendations,
+            },
+        }
+
+    @staticmethod
+    def _recommend_reasons(outcome: dict[str, Any]) -> list[str]:
+        """Human-readable rationale for one recommendation.
+
+        Priority: the reviewer's verdict, then the Agent's own plan rationale,
+        then the external facts (web search / weather) it acted on — the
+        "联网搜索查到 xx → 考虑主题/时间 → 搭配 xx" narrative the front end shows.
+        """
+        reasons: list[str] = []
+        review = outcome.get("review") or {}
+        intent = outcome.get("intent") or {}
+        feedback = str(review.get("feedback") or "").strip()
+        goal = str(intent.get("goal") or "").strip()
+        if feedback:
+            reasons.append(feedback)
+        elif goal:
+            reasons.append(goal)
+        for step in outcome.get("steps", []):
+            action = step.get("action")
+            if action == "modify_outfit":
+                reasoning = (
+                    ((step.get("args") or {}).get("plan") or {}).get("reasoning")
+                    or ""
+                )
+                reasoning = str(reasoning).strip()
+                if reasoning and reasoning not in reasons:
+                    reasons.append(reasoning[:240])
+                continue
+            if action not in ("search_web", "get_weather"):
+                continue
+            observation = str(step.get("observation") or "").strip()
+            if not observation:
+                continue
+            text = observation
+            for prefix in (
+                "联网搜索摘要：",
+                "联网搜索结果（仅供知识参考）：",
+                "天气（",
+            ):
+                if text.startswith(prefix):
+                    text = observation[len(prefix) :]
+                    break
+            text = text.replace("\n", "；").strip()
+            if text and text not in reasons:
+                reasons.append(text[:240])
+        return reasons
+
+    def _persist_agentic_recommend(
+        self,
+        task_input: TaskExecutionInput,
+        result: dict[str, Any],
+    ) -> None:
+        """Commit each completed recommendation so a later turn can re-anchor.
+
+        A subsequent ``在此基础上修改`` sends the chosen outfit_id back as
+        ``current_outfit_id``; ``resolve_active_outfit`` resolves it via
+        candidate_outfits JOIN styling_runs, so each agentic recommendation
+        must land there for multi-turn modification to keep grounding.
+        """
+        structured = result.get("structured_result") or {}
+        recommendations = structured.get("recommendations") or []
+        candidates: list[OutfitCandidate] = []
+        for recommendation in recommendations:
+            item_ids = list(recommendation.get("item_ids") or [])
+            outfit_id = str(recommendation.get("outfit_id", ""))
+            if len(item_ids) < 2 or not outfit_id:
+                continue
+            candidates.append(
+                OutfitCandidate(
+                    outfit_id=outfit_id,
+                    item_ids=tuple(item_ids),
+                    slot_items=dict(recommendation.get("slot_items") or {}),
+                    hard_valid=True,
+                    score=float(recommendation.get("score") or 0.0),
+                    reasons=tuple(recommendation.get("reasons") or []),
+                )
+            )
+        if not candidates:
+            return
+        with database_session(self.database_path) as connection:
+            styling_run_id = start_run(
+                connection, TaskSpec(user_id=task_input.user_id, max_results=3)
+            )
+            save_candidates(connection, styling_run_id, candidates)
+            finish_run(
+                connection,
+                RecommendationResult(
+                    run_id=styling_run_id,
+                    status="completed",
+                    recommendations=tuple(candidates),
+                ),
+            )
 
     def _agentic_targets(
         self,
