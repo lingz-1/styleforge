@@ -193,6 +193,8 @@ class PromptAssembler:
             sections.append(_format_evidence(context.research_evidence))
         if view.enabled("raw_evidence") and context.raw_evidence:
             sections.append(_format_raw_evidence(context.raw_evidence))
+        if view.enabled("extension_facts") and context.extension_facts:
+            sections.append(_format_extension_facts(context.extension_facts))
         if view.enabled("candidates") and context.candidates:
             sections.append(_format_candidates(context.candidates))
         if view.enabled("drafts"):
@@ -370,6 +372,126 @@ def _format_drafts(working_draft: Any, base_draft: Any, candidate_count: int = 0
             )
         return "当前搭配：（空）——从零组合一套完整搭配。"
     return f"当前搭配：{outfit_text(outfit)}"
+
+
+def _format_extension_facts(facts: dict[str, Any]) -> str:
+    """【确定性分析事实】— the execute-side Agent1 facts for an extension task.
+
+    Rendered from ``extension_facts`` (Agent1TaskOutput.model_dump(mode="json")).
+    This deterministic anchor is what the Extension agent reasons over; the LLM
+    enriches it via the search tools and the closing node turns it into the
+    final task result. Rendering is defensive (``facts`` may be any task_type's
+    shape); unknown detail rides a compact JSON line instead of dropping out.
+    """
+    lines = ["【确定性分析事实】"]
+    task_type = str(facts.get("task_type") or "")
+    intent = facts.get("intent_summary")
+    if intent:
+        lines.append(f"任务意图：{intent}")
+    resolved_target = facts.get("resolved_target")
+    if isinstance(resolved_target, dict) and resolved_target:
+        if task_type == "wardrobe_gap":
+            mode = resolved_target.get("analysis_mode") or ""
+            style = resolved_target.get("style") or ""
+            text = f"分析模式：{mode}" if mode else ""
+            if style:
+                text += f"，目标风格：{style}"
+            if text:
+                lines.append(text)
+        else:
+            lines.append(f"解析目标：{json.dumps(resolved_target, ensure_ascii=False)}")
+    if facts.get("needs_clarification"):
+        lines.append(f"⚠ 需要向用户澄清：{facts.get('clarification_question') or '信息不足'}")
+    body = _format_extension_fact_body(facts)
+    if body:
+        lines.append(body)
+    return "\n".join(lines)
+
+
+def _format_extension_fact_body(facts: dict[str, Any]) -> str:
+    """The task_type-specific facts payload rendered into the C layer."""
+    body: list[str] = []
+    matches = facts.get("wardrobe_matches")
+    if matches:
+        body.append("衣橱相关单品：" + "；".join(_item_short(match) for match in matches))
+    anchor = facts.get("anchor_item")
+    if anchor:
+        source = facts.get("anchor_source") or "wardrobe"
+        body.append(f"锚点单品：{_item_short(anchor)}（来源：{source}）")
+    elif facts.get("anchor_candidates"):
+        body.append(
+            "候选锚点（请向用户确认）：" + "；".join(_item_short(item) for item in facts["anchor_candidates"])
+        )
+    candidate_item = facts.get("candidate_item")
+    if candidate_item:
+        slot = facts.get("candidate_slot") or "?"
+        body.append(f"候选新品：{_candidate_short(candidate_item)}（槽位：{slot}）")
+    compatible = facts.get("compatible_items_by_slot")
+    if isinstance(compatible, dict) and compatible:
+        rows = []
+        for slot, items in compatible.items():
+            if items:
+                rows.append(f"{slot}：{'、'.join(_item_short(item) for item in items)}")
+        if rows:
+            body.append("可搭配单品：" + "；".join(rows))
+    similar = facts.get("similar_wardrobe_items")
+    if similar:
+        body.append("衣橱相似单品：" + "；".join(_item_short(item) for item in similar))
+    if facts.get("wardrobe_item_count") is not None:
+        body.append(f"衣橱单品数：{facts['wardrobe_item_count']}")
+        slot_counts = facts.get("slot_counts")
+        if isinstance(slot_counts, dict) and slot_counts:
+            body.append("槽位分布：" + "、".join(f"{slot}×{count}" for slot, count in slot_counts.items()))
+        type_counts = facts.get("item_type_counts")
+        if isinstance(type_counts, dict) and type_counts:
+            body.append("品类分布：" + "、".join(f"{kind}×{count}" for kind, count in type_counts.items()))
+        top_colors = facts.get("top_colors")
+        if top_colors:
+            body.append("主色：" + "、".join(f"{color}×{count}" for color, count in top_colors))
+    missing = facts.get("missing_elements")
+    if missing:
+        body.append("缺失元素：" + "；".join(str(element.get("label") or element.get("id")) for element in missing))
+    covered = facts.get("covered_elements")
+    if covered:
+        body.append("已覆盖元素：" + "；".join(str(element.get("label") or element.get("id")) for element in covered))
+    entries = facts.get("knowledge_entries")
+    if entries:
+        body.append("相关知识条目：" + "；".join(_entry_short(entry) for entry in entries[:6]))
+    return "\n".join(body)
+
+
+def _item_short(item: dict[str, Any]) -> str:
+    """One catalog item on one line: name/color/item_type (defensive)."""
+    parts = [str(item.get("name") or item.get("item_id") or "?")]
+    color = item.get("color")
+    if color:
+        parts.append(str(color))
+    kind = item.get("item_type") or item.get("slot")
+    if kind:
+        parts.append(str(kind))
+    return "(" + "/".join(parts) + ")"
+
+
+def _candidate_short(item: dict[str, Any]) -> str:
+    """A transient candidate (no catalog id yet): name/subtype/color."""
+    name = item.get("name") or item.get("item_type") or "?"
+    bits = [str(name)]
+    subtype = item.get("subtype")
+    if subtype:
+        bits.append(str(subtype))
+    color = item.get("color")
+    if color:
+        bits.append(str(color))
+    return "/".join(bits)
+
+
+def _entry_short(entry: dict[str, Any]) -> str:
+    """One knowledge entry on one line, content truncated."""
+    title = entry.get("title") or entry.get("id") or "?"
+    content = str(entry.get("content") or "")
+    if content:
+        return f"{title}（{content[:MAX_OBSERVATION_CHARS]}…）"
+    return str(title)
 
 
 def _format_facts(facts: Any) -> str:

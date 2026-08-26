@@ -38,6 +38,9 @@ class PromptContext:
     # the Research subgraph's private RawEvidenceBuffer — only the Evidence
     # Synthesizer's view enables this (frozen #18/#22).
     raw_evidence: list[dict[str, Any]] = field(default_factory=list)
+    # execute-side precomputed deterministic facts for extension tasks
+    # (Agent1TaskOutput.model_dump(mode="json")); only the Extension view enables it.
+    extension_facts: dict[str, Any] | None = None
     candidates: list[dict[str, Any]] = field(default_factory=list)
     working_draft: Any = None
     base_draft: Any = None
@@ -84,6 +87,8 @@ class ContextAssembler:
             context.research_evidence = state.get("research_evidence")
         if view.raw_evidence:
             context.raw_evidence = list(state.get("raw_evidence") or [])
+        if view.extension_facts:
+            context.extension_facts = state.get("extension_facts")
         if view.candidates:
             context.candidates = list(state.get("candidates") or [])
         if view.drafts:

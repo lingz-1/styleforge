@@ -46,6 +46,7 @@ from styleforge.models.agentic_contract import ModifyPlan, PlanState
 AGENT_COORDINATOR = "coordinator"
 AGENT_RESEARCH = "research"
 AGENT_STYLIST = "stylist"
+AGENT_EXTENSION = "extension"
 AGENT_CRITIC = "critic"
 AGENT_RESEARCH_SYNTHESIZER = "research_synthesizer"
 
@@ -232,14 +233,14 @@ def register_local_tools(
             description="查看某套搭配的详情；outfit_id 不填或填 active 表示当前正在编辑的搭配",
             input_model=InspectOutfitInput,
             handler=h.inspect,
-            agents=frozenset({AGENT_STYLIST}),
+            agents=frozenset({AGENT_STYLIST, AGENT_EXTENSION}),
         ),
         ToolCapability(
             name="search_wardrobe",
             description="在用户衣橱中搜索单品（中英文关键词均可，结果有数量上限）",
             input_model=SearchWardrobeInput,
             handler=h.search_wardrobe,
-            agents=frozenset({AGENT_STYLIST}),
+            agents=frozenset({AGENT_STYLIST, AGENT_EXTENSION}),
         ),
         ToolCapability(
             name="search_web",
@@ -247,7 +248,7 @@ def register_local_tools(
             input_model=SearchWebInput,
             handler=h.search_web,
             requires=frozenset({CAP_WEB_SEARCH}),
-            agents=frozenset({AGENT_RESEARCH, AGENT_STYLIST}),
+            agents=frozenset({AGENT_RESEARCH, AGENT_STYLIST, AGENT_EXTENSION}),
         ),
         ToolCapability(
             name="get_weather",
@@ -263,7 +264,7 @@ def register_local_tools(
             input_model=SearchKnowledgeInput,
             handler=h.knowledge,
             requires=frozenset({CAP_KNOWLEDGE}),
-            agents=frozenset({AGENT_RESEARCH, AGENT_STYLIST}),
+            agents=frozenset({AGENT_RESEARCH, AGENT_STYLIST, AGENT_EXTENSION}),
         ),
         ToolCapability(
             name="load_skill",

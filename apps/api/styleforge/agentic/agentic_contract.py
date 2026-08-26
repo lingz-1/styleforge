@@ -75,7 +75,7 @@ class CoordinatorDecision(BaseModel):
 
     decision_summary: str  # observable summary; Trace records it, never hidden reasoning
     goal: str
-    next_agent: Literal["RESEARCH", "STYLIST"] | None = None
+    next_agent: Literal["RESEARCH", "STYLIST", "EXTENSION"] | None = None
     need_plan_update: bool = False
     need_user: bool = False
     clarification: ClarificationRequest | None = None
@@ -106,6 +106,22 @@ class StylistDecision(BaseModel):
     )
 
 
+class ExtensionDecision(BaseModel):
+    """Extension decides when the analysis is ready to synthesize (frozen).
+
+    Extension runs no outfit verification chain: it either keeps investigating
+    (CONTINUE), ships the synthesized task result (READY), or suspends for the
+    user (NEED_USER) — e.g. ITEM_ADVICE with an ambiguous anchor item.
+    """
+
+    decision_summary: str
+    control: Literal["CONTINUE", "READY", "NEED_USER"]
+    clarification: ClarificationRequest | None = None  # NEED_USER → required
+    _empty_clarification = field_validator("clarification", mode="before")(
+        staticmethod(_clarification_before)
+    )
+
+
 # ── Harness-side state-machine check (frozen #16/#14) ───────────────────────
 # The frozen contracts are enforced *here*, not in pydantic field validators,
 # so the exact same rules run on every decision, every re-entry, and on
@@ -120,8 +136,8 @@ def check_decision_contract(decision: BaseModel) -> list[str]:
                    required, next_agent=None, 0 tools) / need_plan_update
                    (next_agent=None, exactly one update_plan, handoff next
                    turn) / otherwise next_agent required.
-      Research/Stylist: NEED_USER requires clarification; clarification is
-                   only meaningful with NEED_USER.
+      Research/Stylist/Extension: NEED_USER requires clarification;
+                   clarification is only meaningful with NEED_USER.
     """
     if isinstance(decision, CoordinatorDecision):
         violations: list[str] = []
@@ -143,7 +159,7 @@ def check_decision_contract(decision: BaseModel) -> list[str]:
         if decision.clarification is not None and not decision.need_user:
             violations.append("clarification is only meaningful with need_user")
         return violations
-    if isinstance(decision, (ResearchDecision, StylistDecision)):
+    if isinstance(decision, (ResearchDecision, StylistDecision, ExtensionDecision)):
         if decision.control == "NEED_USER":
             if decision.clarification is None or not decision.clarification.question.strip():
                 return ["NEED_USER requires a clarification.question"]
@@ -287,6 +303,14 @@ class StyleForgeState(TypedDict, total=False):
     raw_preferences: list[Any]  # normalized memory_profile for PreferenceRetriever
     grounding_attempted_kinds: list[str]
     grounding_resolved_kinds: list[str]
+
+    # Extension task products (STYLE_ADVICE / ITEM_ADVICE / WARDROBE_*). The
+    # deterministic facts are pre-computed by the execute side (Runtime deps live
+    # there, never in state) and consumed by both the Extension agent and its
+    # closing node; the closing node ships the finalized task result through
+    # ``extension_result`` so the Main Graph can end without an outfit chain.
+    extension_facts: Any  # Agent1TaskOutput.model_dump(mode="json") (deterministic)
+    extension_result: Any  # {task_type, status, summary, result} — task contract dict
 
     research_evidence: ResearchEvidence | None
     base_draft: Any  # OutfitDraft: recommend=empty base, modify=original snapshot

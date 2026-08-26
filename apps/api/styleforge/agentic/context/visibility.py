@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from styleforge.agentic.tools.local_tools import (
     AGENT_COORDINATOR,
     AGENT_CRITIC,
+    AGENT_EXTENSION,
     AGENT_RESEARCH,
     AGENT_RESEARCH_SYNTHESIZER,
     AGENT_STYLIST,
@@ -52,6 +53,7 @@ class AgentContextView:
     wardrobe: bool = False
     research_evidence: bool = False
     raw_evidence: bool = False  # the Research subgraph's private RawEvidenceBuffer
+    extension_facts: bool = False  # execute-side precomputed deterministic facts (Agent1)
     candidates: bool = False
     drafts: bool = False
     thread_context: bool = False
@@ -70,6 +72,7 @@ _VIEWS: dict[str, AgentContextView] = {
         task_state=True,
         plan=True,
         research_evidence=True,
+        extension_facts=True,  # presence marks the task as EXTENSION (ext dispatch)
         candidates=True,
         thread_context=True,
         grounding=True,  # H3a: today's date / current city / decision
@@ -112,6 +115,22 @@ _VIEWS: dict[str, AgentContextView] = {
         goal=True,
         raw_evidence=True,
         trajectory=True,  # the Research subgraph's own tool observations
+    ),
+    # Extension: the deterministic facts layer is its anchor input (analyze
+    # results for the task_type), plus the wardrobe/knowledge/search tooling and
+    # layered preferences. It never sees drafts/staged candidates — no outfit
+    # product, no verification chain.
+    AGENT_EXTENSION: AgentContextView(
+        user_request=True,
+        task_state=True,
+        plan=True,
+        environment_facts=True,
+        wardrobe=True,
+        extension_facts=True,
+        thread_context=True,
+        memories=True,
+        grounding=True,  # H3a: date/city/season basis for style analysis
+        trajectory=True,  # its own ReAct loop observations
     ),
 }
 

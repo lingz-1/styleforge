@@ -62,6 +62,20 @@ def _legacy_recommend_mode_default() -> Iterator[None]:
     os.environ.pop("STYLEFORGE_RECOMMEND_MODE", None)
 
 
+@pytest.fixture(autouse=True)
+def _legacy_extension_mode_default() -> Iterator[None]:
+    """Keep the legacy three-agent extension chain the default for existing tests.
+
+    Stage 1 primary-mode tests opt in explicitly with ``extend_mode="agentic"``
+    (the explicit argument wins over the env flag); everything else keeps the
+    old Agent 1/2/3 chain so the staged migration stays fully verifiable until
+    the legacy graph is retired in Stage 2.
+    """
+    os.environ["STYLEFORGE_EXTEND_MODE"] = "legacy"
+    yield
+    os.environ.pop("STYLEFORGE_EXTEND_MODE", None)
+
+
 @pytest.fixture()
 def db_schema(_test_dsn: str) -> Iterator[str]:
     """A throwaway schema, created before and dropped after the test."""

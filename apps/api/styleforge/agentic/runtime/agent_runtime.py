@@ -24,6 +24,7 @@ from pydantic import BaseModel, ValidationError
 
 from styleforge.agentic.agentic_contract import (
     CoordinatorDecision,
+    ExtensionDecision,
     ResearchDecision,
     StylistDecision,
     check_decision_contract,
@@ -94,6 +95,7 @@ class AgentCallResult:
 _TOOL_COUNT_RULES: dict[str, dict[str, tuple[int, int | None]]] = {
     "stylist": {"CONTINUE": (1, None), "CANDIDATE_READY": (0, 0), "NEED_USER": (0, 0)},
     "research": {"CONTINUE": (1, None), "RESEARCH_COMPLETE": (0, 0), "NEED_USER": (0, 0)},
+    "extension": {"CONTINUE": (1, None), "READY": (0, 0), "NEED_USER": (0, 0)},
 }
 
 
@@ -324,9 +326,10 @@ def _retry_hint_for(agent: str, parse_error: str) -> str:
     converts most of those into a valid decision block.
     """
     templates = {
-        "coordinator": '{"decision_summary": "...", "goal": "...", "next_agent": "STYLIST" | "RESEARCH"}',
+        "coordinator": '{"decision_summary": "...", "goal": "...", "next_agent": "STYLIST" | "RESEARCH" | "EXTENSION"}',
         "research": '{"decision_summary": "...", "control": "CONTINUE" | "RESEARCH_COMPLETE"}',
         "stylist": '{"decision_summary": "...", "control": "CONTINUE" | "CANDIDATE_READY"}',
+        "extension": '{"decision_summary": "...", "control": "CONTINUE" | "READY"}',
     }
     example = templates.get(agent, '{"decision_summary": "..."}')
     return (
@@ -361,6 +364,13 @@ def _tool_count_observation(agent: str, control: str | None, expectation: str) -
             "CONTINUE 必须伴随恰好一个工具调用；若外部事实已查够，请直接输出 "
             'control: "RESEARCH_COMPLETE"（0 工具调用）收尾。'
         )
+    if agent == "extension":
+        return (
+            f"你的控制信号 {control} 需要{expectation}，但你这次没有发出工具调用。"
+            "CONTINUE 必须伴随恰好一个工具调用（search_wardrobe / search_knowledge / "
+            "search_web / inspect_outfit）；若确定性事实已足够，请直接输出 "
+            'control: "READY"（0 工具调用）进入结果综合。'
+        )
     return (
         f"{agent} control {control} requires {expectation}"
     )
@@ -380,6 +390,7 @@ def _parse_error_observation(agent: str, parse_error: str) -> str:
         "coordinator": '{"decision_summary": "...", "goal": "...", "next_agent": "STYLIST"}',
         "research": '{"decision_summary": "...", "control": "RESEARCH_COMPLETE"}',
         "stylist": '{"decision_summary": "...", "control": "CANDIDATE_READY"}',
+        "extension": '{"decision_summary": "...", "control": "READY"}',
     }.get(agent, '{"decision_summary": "..."}')
     return (
         f"你上一条输出无法解析为决策 JSON（{parse_error[:200]}）。"
@@ -491,6 +502,8 @@ def _infer_decision(
         return ResearchDecision(decision_summary="", control="CONTINUE"), tool_blocks, None
     if agent == "stylist" and decision_model is StylistDecision:
         return StylistDecision(decision_summary="", control="CONTINUE"), tool_blocks, None
+    if agent == "extension" and decision_model is ExtensionDecision:
+        return ExtensionDecision(decision_summary="", control="CONTINUE"), tool_blocks, None
     return None, tool_blocks, "empty decision block with tool calls"
 
 

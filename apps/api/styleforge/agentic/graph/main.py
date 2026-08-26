@@ -27,6 +27,7 @@ from styleforge.agentic.agentic_contract import StyleForgeState
 from styleforge.agentic.agents.coordinator.graph import build_coordinator_subgraph
 from styleforge.agentic.agents.critic.graph import make_critic_node
 from styleforge.agentic.context.grounding import pending_field_for_question
+from styleforge.agentic.agents.extension.graph import build_extension_subgraph
 from styleforge.agentic.agents.research.graph import build_research_subgraph
 from styleforge.agentic.agents.stylist.graph import build_stylist_subgraph
 from styleforge.agentic.gates.environment import make_environment_gate
@@ -96,6 +97,7 @@ def _build_main_graph(
     environment_gate = make_environment_gate(environment)
     goal_gate = make_goal_gate(target_candidates)
     research_subgraph = build_research_subgraph(runtime)
+    extension_subgraph = build_extension_subgraph(runtime)
 
     def bootstrap(state: StyleForgeState) -> dict[str, Any]:
         updates: dict[str, Any] = {}
@@ -124,6 +126,12 @@ def _build_main_graph(
         ):
             evidence_store.save(result["research_evidence"], state.get("run_id", ""))
         return result
+
+    def extension(state: StyleForgeState) -> dict[str, Any]:
+        # Extension task: the subgraph ships ``extension_result`` (the task
+        # contract) + the envelope; the Main Graph routes the envelope only —
+        # no outfit chain, no gates, straight to end_node on COMPLETED.
+        return extension_subgraph.invoke(state)
 
     def critic(state: StyleForgeState) -> dict[str, Any]:
         result = critic_node(state)
@@ -229,7 +237,19 @@ def _build_main_graph(
         # COMPLETED — the Coordinator's product is the TaskState (frozen #5).
         task_state = state.get("task_state")
         next_agent = task_state.next_agent if task_state is not None else None
-        return {"STYLIST": "stylist", "RESEARCH": "research"}.get(next_agent, "end_node")
+        return {"STYLIST": "stylist", "RESEARCH": "research", "EXTENSION": "extension"}.get(
+            next_agent, "end_node"
+        )
+
+    def route_after_extension(state: StyleForgeState) -> str:
+        handoff = state.get("handoff_result")
+        if handoff is None:
+            return "end_node"
+        return {
+            "COMPLETED": "end_node",  # extension_result already carries the status
+            "NEEDS_CLARIFICATION": "clarification",
+            "PROTOCOL_ERROR": "end_node",
+        }[handoff.status]
 
     def route_after_research(state: StyleForgeState) -> str:
         handoff = state.get("handoff_result")
@@ -273,6 +293,7 @@ def _build_main_graph(
     if with_coordinator:
         builder.add_node("coordinator", build_coordinator_subgraph(runtime))
         builder.add_node("research", research)
+        builder.add_node("extension", extension)
 
     builder.add_edge(START, "bootstrap")
 
@@ -284,6 +305,7 @@ def _build_main_graph(
             {
                 "stylist": "stylist",
                 "research": "research",
+                "extension": "extension",
                 "clarification": "clarification",
                 "end_node": "end_node",
             },
@@ -295,6 +317,14 @@ def _build_main_graph(
                 "coordinator": "coordinator",  # evidence back to the manager
                 "clarification": "clarification",
                 "end_node": "end_node",
+            },
+        )
+        builder.add_conditional_edges(
+            "extension",
+            route_after_extension,
+            {
+                "end_node": "end_node",
+                "clarification": "clarification",
             },
         )
     else:

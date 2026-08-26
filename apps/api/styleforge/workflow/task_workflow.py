@@ -61,6 +61,7 @@ from styleforge.services.memory_resolver import (
 )
 from styleforge.services.presentation import present_result
 from styleforge.services.recommendation import recommend_for_user
+from styleforge.tools.extension_analysis import analyze_extension_task
 
 # H3a-2 Memory scope gate: turn-scoped requests never feed long-term memory.
 # EvidenceScope only distinguishes global/contextual (no turn type), so the gate
@@ -82,6 +83,19 @@ _FOLLOW_UP_ADJUST_WORDS = (
 _FRESH_SCENARIO_WORDS = (
     "推荐", "面试", "聚会", "约会", "通勤", "上班", "旅行", "婚礼",
     "出席", "晚宴", "周末", "今天", "明天", "穿什么", "搭配", "选一套",
+)
+
+# The four extension task types migrated into the Multi-Agent Harness (Stage
+# 4c). Each runs Coordinator → Extension subgraph → closing node; no outfit
+# chain, and — like the legacy ``run_extension`` they replace — no fallback:
+# no LLM → ``LlmUnavailable`` (503).
+_EXTENSION_TYPES = frozenset(
+    {
+        TaskType.STYLE_ADVICE,
+        TaskType.ITEM_ADVICE,
+        TaskType.WARDROBE_COMPATIBILITY,
+        TaskType.WARDROBE_GAP,
+    }
 )
 
 
@@ -145,6 +159,24 @@ def _resolve_recommend_mode(recommend_mode: str | None) -> str:
     return mode if mode in _RECOMMEND_MODES else "agentic"
 
 
+_EXTENSION_MODES = ("agentic", "legacy")
+
+
+def _resolve_extend_mode(extend_mode: str | None) -> str:
+    """Resolve which extension-task chain is primary.
+
+    ``agentic`` (default) runs the extension tasks through the Multi-Agent
+    Harness (Coordinator → Extension subgraph → closing node); ``legacy`` keeps
+    the old three-agent chain. An explicit argument wins; otherwise the
+    ``STYLEFORGE_EXTEND_MODE`` env flag is read; anything unrecognised falls
+    back to ``agentic`` (the primary chain). ``legacy`` exists so the staged
+    migration keeps the old chain running side-by-side (its tests stay green)
+    until it is retired.
+    """
+    mode = (extend_mode or os.environ.get("STYLEFORGE_EXTEND_MODE", "")).strip().lower()
+    return mode if mode in _EXTENSION_MODES else "agentic"
+
+
 class TaskWorkflowState(TypedDict, total=False):
     task_input: TaskExecutionInput
     route: TaskRoute
@@ -193,6 +225,10 @@ class MultiTaskWorkflow:
         web_search_provider: Any | None = None,
         # OUTFIT_RECOMMEND chain selection: ``agentic`` (default) or ``legacy``.
         recommend_mode: str | None = None,
+        # Extension-task chain selection: ``agentic`` (default) or ``legacy``.
+        # ``legacy`` keeps the old three-agent chain running side-by-side so the
+        # staged migration stays verifiable until retirement (Stage 2).
+        extend_mode: str | None = None,
         # Agentic recommend extras: ``get_weather`` provider + Task Skill root
         # (``knowledge/skills``). None degrades each tool to "unconfigured".
         weather_provider: Any | None = None,
@@ -225,6 +261,7 @@ class MultiTaskWorkflow:
         self.graph = self._build_graph()
         self.modify_mode = _resolve_modify_mode(modify_mode)
         self.recommend_mode = _resolve_recommend_mode(recommend_mode)
+        self.extend_mode = _resolve_extend_mode(extend_mode)
         # H3a-3: deterministic Search-before-Ask resolver. ``today_provider`` is
         # injectable so tests freeze "today"; the legacy LocationResolver derives
         # the current city from device → profile → global default.
@@ -727,6 +764,18 @@ class MultiTaskWorkflow:
             and self.llm_client is not None
         ):
             return self._run_agentic_recommend(
+                task_input, route, initial_context, run_id, session_context
+            )
+        # Extension tasks run through the Harness as the primary chain too
+        # (Coordinator → Extension subgraph → closing node); no LLM → 503,
+        # matching the legacy ``run_extension`` that had no fallback either.
+        # ``extend_mode == "legacy"`` (staged migration) falls through to the
+        # legacy three-agent graph below.
+        if (
+            route.task_type in _EXTENSION_TYPES
+            and self.extend_mode == "agentic"
+        ):
+            return self._run_agentic_extension(
                 task_input, route, initial_context, run_id, session_context
             )
         try:
@@ -1367,6 +1416,157 @@ class MultiTaskWorkflow:
             "llm_enabled": True,
             "llm_call_count": harness.model_calls,
         }
+
+    # --- Stage 4c: agentic primary extension chain ------------------------
+
+    def _run_agentic_extension(
+        self,
+        task_input: TaskExecutionInput,
+        route: TaskRoute,
+        initial_context: ContextPack,
+        run_id: str,
+        session_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run the four extension task types through the Multi-Agent Harness.
+
+        The deterministic facts (``analyze_extension_task``) are pre-computed
+        here — that analysis carries Runtime Dependencies (database_path /
+        knowledge_root) that must never enter the Execution State, so it is not
+        a tool; it is handed to the Extension subgraph as ``extension_facts``.
+        The Extension agent enriches the facts via the search tools, the closing
+        node hard-validates the task contract, and ``extension_result`` rides
+        ``agentic_outcome`` so the front end keeps rendering the exact legacy
+        ``payload.result`` shape.
+
+        Requires an LLM: no model → ``LlmUnavailable`` (503), matching the
+        legacy ``run_extension`` which had no fallback either.
+        """
+        if self.llm_client is None:
+            raise LlmUnavailable("OUTFIT extension tasks require an LLM client")
+        context_json = initial_context.model_dump(mode="json")
+        harness: StyleForgeHarness | None = None
+        try:
+            with database_session(self.database_path) as connection:
+                wardrobe_items = list_items(connection, task_input.user_id)
+                facts = build_facts(
+                    connection, task_input, initial_context, wardrobe_items
+                )
+                environment = Environment(
+                    connection,
+                    wardrobe_items,
+                    facts,
+                    search_limit=12,
+                    web_search_provider=self.web_search_provider,
+                    weather_provider=self.weather_provider,
+                    skills_root=self.skills_root,
+                )
+                extension_facts = analyze_extension_task(
+                    database_path=self.database_path,
+                    knowledge_root=self.knowledge_root,
+                    task_input=task_input,
+                    route=route,
+                    context_pack=initial_context,
+                    knowledge_retriever=self.knowledge_retriever,
+                ).model_dump(mode="json")
+                harness = self._harness(environment)
+                thread_context = self._thread_context(session_context)
+                outcome = harness.invoke(
+                    {
+                        "run_id": run_id,
+                        "request": task_input.request,
+                        "base_draft": Draft(
+                            outfit=OutfitSnapshot(
+                                outfit_id="base", item_ids=[], items=[]
+                            ),
+                            layers={},
+                        ),
+                        "thread_context": thread_context,
+                        "grounding_context": self._grounding_context(
+                            task_input, initial_context, connection, thread_context
+                        ),
+                        "raw_preferences": self._raw_preferences(initial_context),
+                        "grounding_attempted_kinds": [],
+                        "grounding_resolved_kinds": [],
+                        "extension_facts": extension_facts,
+                    }
+                )
+            assert harness is not None
+            result = self._agentic_extension_to_result(task_input, outcome)
+            status = str(result.get("status", "infeasible"))
+            with database_session(self.database_path) as connection:
+                finish_task_run(
+                    connection,
+                    run_id=run_id,
+                    status=status,
+                    context_pack=context_json,
+                    result=result,
+                )
+            self._extract_memories(task_input)
+        except Exception as error:
+            with database_session(self.database_path) as connection:
+                fail_task_run(
+                    connection,
+                    run_id=run_id,
+                    error=error,
+                    context_pack=context_json,
+                )
+            raise
+        return {
+            "run_id": run_id,
+            "user_id": task_input.user_id,
+            "request": task_input.request,
+            "task_type": route.task_type.value,
+            "selected_subgraph": "agentic_harness",
+            "route": route.to_dict(),
+            "status": status,
+            "context_pack": context_json,
+            "result": result,
+            "trace": [],
+            "diagnostics": {},
+            "image_endpoint_template": "/items/{item_id}/image",
+            "agents": {"harness": "styleforge_harness"},
+            "agentic_outcome": outcome,
+            "llm_enabled": True,
+            "llm_call_count": harness.model_calls,
+        }
+
+    def _agentic_extension_to_result(
+        self,
+        task_input: TaskExecutionInput,
+        outcome: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Wrap one Harness outcome into the legacy extension task result contract.
+
+        Three paths, mirroring the legacy chain's own statuses:
+          * ``extension_result.status == needs_clarification`` — the closing node
+            shipped a contract-shaped clarification (question inside the result);
+          * Main-Graph NEEDS_CLARIFICATION — a subgraph (agent/coordinator)
+            suspended and the ClarificationNode surfaced the question;
+          * otherwise — the validated task contract, verbatim (the front end's
+            ``payload.result`` shape is unchanged).
+        """
+        del task_input
+        ext = outcome.get("extension_result") or {}
+        if ext.get("status") == "needs_clarification":
+            result = dict(ext.get("result") or {})
+            return {
+                "status": "needs_clarification",
+                "message": result.get("clarification_question") or "需要补充信息后才能继续。",
+                **result,
+            }
+        if outcome.get("status") == "needs_clarification":
+            question = outcome.get("clarification_question") or "需要补充信息后才能继续。"
+            return {
+                "status": "needs_clarification",
+                "message": question,
+                "clarification_question": question,
+            }
+        if ext:
+            return {
+                "status": ext.get("status", "infeasible"),
+                **(ext.get("result") or {}),
+            }
+        return {"status": "infeasible"}
 
     def _agentic_recommend_to_result(
         self,

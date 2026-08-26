@@ -25,8 +25,6 @@ from styleforge.models.agentic_contract import (
     GarmentLayer,
     InteractionContext,
     ItemSnapshot,
-    ModifyOp,
-    ModifyOutcome,
     ModifyPlan,
     OutfitSnapshot,
     Placement,
