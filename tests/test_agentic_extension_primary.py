@@ -62,7 +62,6 @@ def _workflow(database_path: str, llm: Any) -> MultiTaskWorkflow:
         database_path=database_path,
         knowledge_root=KNOWLEDGE_ROOT,
         llm_client=llm,
-        extend_mode="agentic",  # explicit opt-in: the primary Harness chain
     )
 
 
@@ -391,11 +390,12 @@ def test_item_advice_unresolved_anchor_ships_clarification(db_dsn: str) -> None:
 
 def test_extension_without_llm_raises(db_dsn: str) -> None:
     # Matches the legacy ``run_extension``: no model → LlmUnavailable (503),
-    # never a deterministic fallback.
+    # never a deterministic fallback. The failed run is still persisted so a
+    # no-key request leaves an honest task_runs record (legacy contract).
     database_path = _seed(db_dsn)
     workflow = _workflow(database_path, None)
 
-    with pytest.raises(LlmUnavailable):
+    with pytest.raises(LlmUnavailable, match="OUTFIT extension tasks require an LLM client"):
         workflow.execute(
             TaskExecutionInput(
                 user_id="u",
@@ -403,3 +403,10 @@ def test_extension_without_llm_raises(db_dsn: str) -> None:
                 requested_task_type=TaskType.STYLE_ADVICE,
             )
         )
+
+    with database_session(database_path) as connection:
+        stored = connection.execute(
+            "SELECT status, error_message FROM task_runs ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    assert stored["status"] == "failed"
+    assert "OUTFIT extension tasks require an LLM client" in stored["error_message"]

@@ -86,22 +86,3 @@ class ScriptedExtensionLlm:
             completion_tokens=10,
             retries=0,
         )
-
-
-def intent_response(summary: str) -> dict[str, Any]:
-    return {
-        "intent_summary": summary,
-        "target_style": "",
-        "target_occasion": "",
-        "target_item_terms": [],
-        "optional_context": [],
-    }
-
-
-def approved_review(summary: str = "方案有事实依据并满足任务约束") -> dict[str, Any]:
-    return {
-        "approved": True,
-        "grounded": True,
-        "summary": summary,
-        "issues": [],
-    }

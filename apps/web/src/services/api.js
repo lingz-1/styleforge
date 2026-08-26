@@ -56,14 +56,6 @@ export const commitImport = (userId, batchId, selections, autoEmbed = true) =>
     auto_embed: autoEmbed,
   })
 
-// Recommendation
-export const recommend = (userId, request, maxResults = 3) =>
-  http.post('/recommendations', {
-    user_id: userId,
-    request,
-    max_results: maxResults,
-  })
-
 // Unified v3.3 task execution (recommend / modify / advice / compatibility / gap)
 export const executeTask = (payload) => http.post('/tasks/execute', payload)
 export const getTaskRun = (userId, runId) => http.get(`/tasks/${userId}/${runId}`)

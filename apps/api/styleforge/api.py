@@ -16,7 +16,12 @@ from pydantic import BaseModel, Field
 
 from styleforge.core.config import Settings
 from styleforge.core.taxonomy import build_taxonomy
-from styleforge.llm.client import LlmInvalidJson, LlmSchemaViolation, LlmUnavailable
+from styleforge.llm.client import (
+    LlmInvalidJson,
+    LlmSchemaViolation,
+    LlmUnavailable,
+    llm_client_from_settings,
+)
 from styleforge.llm.extension_prompts import EXTENSION_PROMPT_VERSION
 from styleforge.integrations.embeddings.text_embedder import TextEmbedder
 from styleforge.integrations.vectorstores.chroma_store import ChromaStore
@@ -25,11 +30,11 @@ from styleforge.orchestration.graph import MultiTaskGraph
 from styleforge.orchestration.task_router import TaskType
 from styleforge.repositories.database import database_session, initialize_database
 from styleforge.tools.weather.schemas import (
-    DeviceLocationContext,
     WeatherFacts,
     WeatherToolInput,
 )
 from styleforge.tools.weather import OpenMeteoProvider
+from styleforge.tools.weather.client import WeatherTool
 from styleforge.tools.web_search import TavilySearchProvider
 from styleforge.repositories.dataset_source_repository import (
     get_source_image_root,
@@ -112,15 +117,7 @@ from styleforge.vision.vision_client import (
     VisionUnavailable,
     vision_client_from_settings,
 )
-from styleforge.workflow.graph import StyleForgeWorkflow
 from styleforge.workflow.task_workflow import MultiTaskWorkflow
-
-
-class RecommendationRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=128)
-    request: str = Field(min_length=1, max_length=2000)
-    max_results: int = Field(default=3, ge=1, le=10)
-    location_context: DeviceLocationContext | None = None
 
 
 class TaskRoutingRequest(BaseModel):
@@ -255,16 +252,6 @@ app = FastAPI(
 
 
 @lru_cache(maxsize=1)
-def get_workflow() -> StyleForgeWorkflow:
-    return StyleForgeWorkflow(
-        database_path=settings.database_dsn,
-        embedding_dir=settings.embedding_dir,
-        model_dir=settings.artifact_root / "models",
-        device="cuda",
-    )
-
-
-@lru_cache(maxsize=1)
 def get_task_graph() -> MultiTaskGraph:
     return MultiTaskGraph()
 
@@ -301,13 +288,11 @@ def _ensure_knowledge_chroma() -> tuple[Any, Any] | None:
 
 @lru_cache(maxsize=1)
 def get_multi_task_workflow() -> MultiTaskWorkflow:
-    workflow = get_workflow()
     chroma = _ensure_knowledge_chroma()
     return MultiTaskWorkflow(
         database_path=settings.database_dsn,
         knowledge_root=settings.knowledge_root,
-        llm_client=workflow.llm_client,
-        recommendation_runner=lambda **kwargs: workflow.recommend_payload(**kwargs),
+        llm_client=llm_client_from_settings(settings),
         chroma_store=chroma[0] if chroma else None,
         text_embedder=chroma[1] if chroma else None,
         # Always construct the provider (even without a key); degradation is
@@ -444,7 +429,8 @@ def weather_now(
         )
 
     today_iso = date.today().isoformat()
-    tool = get_workflow().weather_tool
+    provider = get_multi_task_workflow().weather_provider
+    tool = None if provider is None else WeatherTool(provider)
     if tool is None:
         return WeatherFacts.unavailable(
             requested_location="",
@@ -734,30 +720,6 @@ def delete_user_chat_session(
         pass
     delete_session_outfit_cache(_redis_client, session_id)
     return {"session_id": session_id, "deleted": True}
-
-
-@app.post("/recommendations")
-def recommend(request: RecommendationRequest) -> dict[str, Any]:
-    try:
-        payload = get_workflow().recommend_payload(
-            user_id=request.user_id,
-            request=request.request,
-            max_results=request.max_results,
-            location_context=(
-                request.location_context.model_dump(exclude_none=True)
-                if request.location_context is not None
-                else None
-            ),
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-    except BaseException as error:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Recommendation workflow failed: {type(error).__name__}: {error}",
-        ) from error
-    payload["image_endpoint_template"] = "/items/{item_id}/image"
-    return payload
 
 
 @app.post("/tasks/route")

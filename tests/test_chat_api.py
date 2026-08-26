@@ -11,8 +11,8 @@ from styleforge.repositories.database import database_session, initialize_databa
 from styleforge.repositories.wardrobe_repository import add_items
 from styleforge.workflow.task_workflow import MultiTaskWorkflow
 
-from tests.extension_llm import ScriptedExtensionLlm, approved_review, intent_response
 from tests.helpers import make_item
+from tests.llm.fake_llm import FakeLlm
 
 
 def _import_api(db_dsn: str, monkeypatch) -> dict:
@@ -75,11 +75,11 @@ def test_execute_task_persists_user_and_assistant_messages(
         upsert_items(connection, items, "test")
         add_items(connection, "u", [item.item_id for item in items])
 
-    llm = ScriptedExtensionLlm(
+    llm = FakeLlm(
         [
-            intent_response("理解风格请求"),
+            {"decision_summary": "识别为风格建议任务", "goal": "给出风格建议", "next_agent": "EXTENSION"},
+            {"decision_summary": "事实足够", "control": "READY"},
             {
-                "task_type": "style_advice",
                 "status": "completed",
                 "summary": "用已有衬衫落实风格",
                 "result": {
@@ -94,10 +94,7 @@ def test_execute_task_persists_user_and_assistant_messages(
                     "evidence": [{"source_id": "style-american-vintage"}],
                     "limitations": [],
                 },
-                "used_item_ids": ["shirt"],
-                "evidence_source_ids": ["style-american-vintage"],
             },
-            approved_review(),
             # Successful execute also runs one memory-extraction call.
             {"evidence": []},
         ]
@@ -150,11 +147,11 @@ def test_execute_task_persists_auto_memory(db_dsn: str, monkeypatch) -> None:
         upsert_items(connection, items, "test")
         add_items(connection, "u", [item.item_id for item in items])
 
-    llm = ScriptedExtensionLlm(
+    llm = FakeLlm(
         [
-            intent_response("理解风格请求"),
+            {"decision_summary": "识别为风格建议任务", "goal": "给出风格建议", "next_agent": "EXTENSION"},
+            {"decision_summary": "事实足够", "control": "READY"},
             {
-                "task_type": "style_advice",
                 "status": "completed",
                 "summary": "用已有衬衫落实风格",
                 "result": {
@@ -169,10 +166,7 @@ def test_execute_task_persists_auto_memory(db_dsn: str, monkeypatch) -> None:
                     "evidence": [{"source_id": "style-american-vintage"}],
                     "limitations": [],
                 },
-                "used_item_ids": ["shirt"],
-                "evidence_source_ids": ["style-american-vintage"],
             },
-            approved_review(),
             # Successful execute also runs one memory-extraction call.
             {
                 "evidence": [
@@ -237,7 +231,7 @@ def test_execute_task_failure_still_records_failed_message(
     workflow = MultiTaskWorkflow(
         database_path=database_path,
         knowledge_root=Path("knowledge"),
-        llm_client=ScriptedExtensionLlm([]),
+        llm_client=FakeLlm([]),
     )
     monkeypatch.setattr(api, "get_multi_task_workflow", lambda: workflow)
 

@@ -114,9 +114,9 @@ def aggregate_score(
 ) -> float:
     """Weighted five-dimension score on a 0-100 scale (0 when unscored).
 
-    Matches ``workflow.graph._critic_score`` byte-for-byte so the runtime critic
-    and the offline evaluation share one aggregation formula; unscored/missing
-    dimensions fall back to the neutral 5.
+    Shares one aggregation formula with the runtime critic so offline evaluation
+    matches what the agent produces; unscored/missing dimensions fall back to the
+    neutral 5.
     """
     if not dimension_scores:
         return 0.0

@@ -31,7 +31,6 @@ from styleforge.agentic.context.thread_preferences import (
     thread_preferences_to_prompt,
     update_thread_preferences,
 )
-from styleforge.agentic.context.visibility import ContextVisibilityPolicy
 from styleforge.agentic.runtime.capability_registry import CapabilityRegistry
 from styleforge.agentic.tools.local_tools import (
     AGENT_STYLIST,

@@ -1,6 +1,19 @@
+"""Multi-turn session propagation over the agentic primary chains.
+
+The session contract (recommend -> follow-up modify -> follow-up modify) now
+runs entirely through the Multi-Agent Harness: a recommendation produces
+candidate outfits persisted for re-anchoring, and a follow-up modification
+without an explicit outfit choice expands to "modify all three" (one Harness
+run per recent candidate, ``_agentic_targets``). Round-1 recommendations are
+harness-driven with a scripted ``FakeLlm`` so the candidate item sets are
+deterministic; the no-LLM path (``_deterministic_recommend``) covers the
+degrade-to-recommend cases.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from styleforge.models.task import TaskExecutionInput
 from styleforge.repositories import preference_evidence_repository
@@ -11,8 +24,8 @@ from styleforge.repositories.wardrobe_repository import add_items, deactivate_al
 from styleforge.services.chat_service import outfit_context_from_payload
 from styleforge.workflow.task_workflow import MultiTaskWorkflow, is_follow_up
 
-from tests.extension_llm import ScriptedExtensionLlm, approved_review, intent_response
 from tests.helpers import make_item
+from tests.llm.fake_llm import FakeLlm
 
 
 def _seed_wardrobe(database_path: str) -> None:
@@ -30,92 +43,129 @@ def _seed_wardrobe(database_path: str) -> None:
         add_items(connection, "u", [item.item_id for item in items])
 
 
-def _fake_recommendation_runner(**kwargs) -> dict:
+def _workflow(database_path: str, llm: Any | None) -> MultiTaskWorkflow:
+    return MultiTaskWorkflow(
+        database_path=database_path,
+        knowledge_root=Path("knowledge"),
+        llm_client=llm,
+    )
+
+
+# ── Harness script builders ────────────────────────────────────────────────
+
+# (region, layer) per seed item — the Environment would resolve placement from
+# structure facts anyway; explicit values keep the plans self-documenting.
+_PLACEMENT: dict[str, tuple[str, str]] = {
+    "top-1": ("upper_body", "base"),
+    "bottom-1": ("lower_body", "base"),
+    "coat-1": ("upper_body", "outer"),
+    "blazer-1": ("upper_body", "outer"),
+    "shoes-1": ("feet", "base"),
+    "heels-1": ("feet", "base"),
+    "loafers-1": ("feet", "base"),
+    "dress-1": ("full_body", "base"),
+    "dark-pants-2": ("lower_body", "base"),
+}
+
+_APPROVE = {"approved": True, "issues": [], "feedback": "方案合理"}
+
+
+def _add_plan(*item_ids: str) -> dict[str, Any]:
+    """One modify_outfit plan building an outfit from the empty base."""
+    ops = []
+    for item_id in item_ids:
+        region, layer = _PLACEMENT[item_id]
+        ops.append(
+            {
+                "action": "add",
+                "item_id": item_id,
+                "placement": {"region": region, "layer": layer},
+            }
+        )
+    return {"plan": {"ops": ops, "reasoning": "组合完整搭配"}}
+
+
+def _replace_plan(item_id: str, replacement_item_id: str) -> dict[str, Any]:
+    """Swap one item for another, keeping the rest of the outfit."""
+    region, layer = _PLACEMENT[replacement_item_id]
     return {
-        "structured_result": {
-            "status": "completed",
-            "advice": ["这是一套通勤搭配"],
-            "recommendations": [
+        "plan": {
+            "ops": [
                 {
-                    "outfit_id": "outfit-1",
-                    "item_ids": ["top-1", "bottom-1", "coat-1", "shoes-1"],
+                    "action": "replace",
+                    "item_id": item_id,
+                    "replacement_item_id": replacement_item_id,
+                    "placement": {"region": region, "layer": layer},
                 }
             ],
-        },
-        "result": {
-            "status": "completed",
-            "recommendations": [
-                {
-                    "outfit_id": "outfit-1",
-                    "item_ids": ["top-1", "bottom-1", "coat-1", "shoes-1"],
-                }
-            ],
-        },
+            "reasoning": "按用户要求替换单品",
+        }
     }
 
 
-ROUND2_MODIFY = {
-    "task_type": "outfit_modify",
-    "status": "completed",
-    "summary": "已把外套换成西装外套",
-    "result": {
-        "status": "completed",
-        "current_outfit_id": "outfit-1",
-        "target_slot": "outerwear",
-        "replaced_item_ids": ["coat-1"],
-        "locked_item_ids": ["top-1", "bottom-1", "shoes-1"],
-        "alternatives": [
+def _rebuild_plan(remove_ids: list[str], add_ids: list[str]) -> dict[str, Any]:
+    """Full rebuild: remove the base items, then add the target set."""
+    ops = [{"action": "remove", "item_id": item_id} for item_id in remove_ids]
+    for item_id in add_ids:
+        region, layer = _PLACEMENT[item_id]
+        ops.append(
             {
-                "outfit_id": "outfit-2",
-                "item_ids": ["blazer-1", "top-1", "bottom-1", "shoes-1"],
-                "reasoning": "换成深蓝色西装外套，保持通勤正式感",
+                "action": "add",
+                "item_id": item_id,
+                "placement": {"region": region, "layer": layer},
             }
-        ],
-        "message": "已为你更换外套",
-    },
-    "used_item_ids": ["blazer-1", "top-1", "bottom-1", "shoes-1"],
-    "evidence_source_ids": [],
-}
+        )
+    return {"plan": {"ops": ops, "reasoning": "整体调整搭配"}}
 
-ROUND3_MODIFY = {
-    "task_type": "outfit_modify",
-    "status": "completed",
-    "summary": "整体调整为更正式的搭配",
-    "result": {
-        "status": "completed",
-        "current_outfit_id": "outfit-1",
-        "target_slot": "",
-        "replaced_item_ids": [],
-        "locked_item_ids": [],
-        "alternatives": [
-            {
-                "outfit_id": "outfit-3",
-                "item_ids": ["dress-1", "heels-1"],
-                "reasoning": "换上连衣裙与高跟鞋，整体更正式",
-            },
-            {
-                "outfit_id": "outfit-3b",
-                "item_ids": ["dress-1", "heels-1", "blazer-1"],
-                "reasoning": "连衣裙搭配高跟鞋，再披深蓝西装外套，正式感更强",
-            },
-            {
-                "outfit_id": "outfit-3c",
-                "item_ids": ["top-1", "bottom-1", "coat-1", "heels-1"],
-                "reasoning": "白衬衫配黑西裤与灰色大衣，脚踩高跟鞋，通勤偏正式",
-            },
-        ],
-        "message": "已调整为更正式的搭配",
-    },
-    "used_item_ids": [
-        "dress-1",
-        "heels-1",
-        "blazer-1",
-        "top-1",
-        "bottom-1",
-        "coat-1",
-    ],
-    "evidence_source_ids": [],
-}
+
+def _recommend_block(
+    goal: str,
+    item_ids: list[str],
+    feedback: str = "方案合理",
+) -> list[Any]:
+    """One recommend round: Coordinator -> STYLIST + three candidate cycles.
+
+    The Main-Graph goal gate demands three candidates (``target_candidates=3``
+    in ``_run_agentic_recommend``); all three are scripted to the same item set
+    so a later "modify all three" can share one tool call per target.
+    """
+    block: list[Any] = [
+        {"decision_summary": "识别为搭配推荐", "goal": goal, "next_agent": "STYLIST"},
+    ]
+    tool = {"name": "modify_outfit", "arguments": _add_plan(*item_ids)}
+    for _ in range(3):
+        block.extend(
+            [
+                ({"decision_summary": "组合候选", "control": "CONTINUE"}, [tool]),
+                {"decision_summary": "完成", "control": "CANDIDATE_READY"},
+                {**_APPROVE, "feedback": feedback},
+            ]
+        )
+    return block
+
+
+def _modify_block(
+    goal: str,
+    tool_args: dict[str, Any],
+    feedback: str = "已按你的要求调整搭配",
+) -> list[Any]:
+    """One Harness run for ONE modify target: coordinator + stylist + critic."""
+    return [
+        {"decision_summary": "调整搭配", "goal": goal, "next_agent": "STYLIST"},
+        (
+            {"decision_summary": "执行调整", "control": "CONTINUE"},
+            [{"name": "modify_outfit", "arguments": tool_args}],
+        ),
+        {"decision_summary": "完成", "control": "CANDIDATE_READY"},
+        {**_APPROVE, "feedback": feedback},
+    ]
+
+
+def _empty_extraction() -> dict[str, Any]:
+    return {"evidence": []}
+
+
+# ── multi-turn chain: recommend -> modify -> overall adjust ────────────────
 
 
 def test_session_multiturn_reuses_outfit_context(db_dsn: str) -> None:
@@ -123,11 +173,13 @@ def test_session_multiturn_reuses_outfit_context(db_dsn: str) -> None:
     initialize_database(database_path)
     _seed_wardrobe(database_path)
 
-    # Every successful execute runs one memory-extraction call afterwards, so
-    # each round needs an extraction response before the next round's agents.
-    script = [
-        # Round 1 is a deterministic recommendation (no LLM); its extraction
-        # returns one contextual style claim so persistence is observable.
+    script: list[Any] = []
+    # R1: agentic recommendation, three identical candidates on the base set.
+    script += _recommend_block(
+        "通勤搭配", ["top-1", "bottom-1", "coat-1", "shoes-1"], feedback="符合通勤正式感"
+    )
+    # R1 memory extraction distills one contextual style claim (observable).
+    script.append(
         {
             "evidence": [
                 {
@@ -139,67 +191,61 @@ def test_session_multiturn_reuses_outfit_context(db_dsn: str) -> None:
                     "scope": {"type": "contextual", "occasions": ["通勤"]},
                 }
             ]
-        },
-        intent_response("理解换外套请求"),
-        ROUND2_MODIFY,
-        approved_review(),
-        # Round 2 extraction: nothing durable to keep.
-        {"evidence": []},
-        intent_response("理解整体调整请求"),
-        ROUND3_MODIFY,
-        approved_review(),
-        # Round 3 extraction: nothing durable to keep.
-        {"evidence": []},
-    ]
-    workflow = MultiTaskWorkflow(
-        database_path=database_path,
-        knowledge_root=Path("knowledge"),
-        llm_client=ScriptedExtensionLlm(script),
-        recommendation_runner=_fake_recommendation_runner,
+        }
     )
+    # R2: explicit slot follow-up -> "modify all three", coat -> blazer.
+    for _ in range(3):
+        script += _modify_block(
+            "换一件外套", _replace_plan("coat-1", "blazer-1"), feedback="已换成深蓝西装外套"
+        )
+    script.append(_empty_extraction())  # R2 extraction
+    # R3: slot-less follow-up -> session_follow_up, full formal rebuild.
+    for _ in range(3):
+        script += _modify_block(
+            "整体调整更正式",
+            _rebuild_plan(["top-1", "bottom-1", "blazer-1", "shoes-1"], ["dress-1", "heels-1"]),
+            feedback="已调整为正式连衣裙搭配",
+        )
+    script.append(_empty_extraction())  # R3 extraction
 
-    # Round 1: plain recommendation (deterministic runner, no LLM).
+    workflow = _workflow(database_path, FakeLlm(script))
+
+    # R1: plain recommendation (agentic).
     payload1 = workflow.execute(
         TaskExecutionInput(user_id="u", request="帮我推荐一套通勤搭配")
     )
     assert payload1["task_type"] == "outfit_recommend"
     assert payload1["status"] == "completed"
-    # The round-1 request distills a contextual style preference into the model.
+    assert payload1["llm_call_count"] == 10  # coordinator + 3×(stylist×2 + critic)
     with database_session(database_path) as connection:
         memories = list_preferences(connection, "u")
     assert [(m["dimension"], m["attribute"], m["value"]) for m in memories] == [
         ("style", "style", "通勤")
     ]
 
-    # Round 2: explicit slot modification, reuse the round-1 outfit.
+    # R2: explicit slot modification reuses the round-1 outfit.
     session_context = outfit_context_from_payload(payload1)
     assert session_context["current_item_ids"] == [
-        "top-1",
-        "bottom-1",
-        "coat-1",
-        "shoes-1",
+        "top-1", "bottom-1", "coat-1", "shoes-1",
     ]
     payload2 = workflow.execute(
         TaskExecutionInput(user_id="u", request="换一件外套"),
         session_context=session_context,
     )
     assert payload2["task_type"] == "outfit_modify"
+    assert payload2["status"] == "completed"
+    assert payload2["llm_call_count"] == 12  # 3 targets × (coordinator + stylist×2 + critic)
     assert payload2["result"]["target_slot"] == "outerwear"
-    assert payload2["result"]["locked_item_ids"] == ["top-1", "bottom-1", "shoes-1"]
-    assert payload2["result"]["alternatives"][0]["item_ids"] == [
-        "blazer-1",
-        "top-1",
-        "bottom-1",
-        "shoes-1",
-    ]
+    assert len(payload2["result"]["alternatives"]) == 3  # modify all three
+    alternative = payload2["result"]["alternatives"][0]
+    assert alternative["item_ids"] == ["top-1", "bottom-1", "blazer-1", "shoes-1"]
+    assert alternative["replaced_item_ids"] == ["coat-1"]
+    assert alternative["locked_item_ids"] == ["top-1", "bottom-1", "shoes-1"]
 
-    # Round 3: slot-less follow-up becomes an overall adjustment.
+    # R3: slot-less follow-up becomes an overall adjustment.
     next_context = outfit_context_from_payload(payload2)
     assert next_context["current_item_ids"] == [
-        "blazer-1",
-        "top-1",
-        "bottom-1",
-        "shoes-1",
+        "top-1", "bottom-1", "blazer-1", "shoes-1",
     ]
     payload3 = workflow.execute(
         TaskExecutionInput(user_id="u", request="更正式一点"),
@@ -207,12 +253,6 @@ def test_session_multiturn_reuses_outfit_context(db_dsn: str) -> None:
     )
     assert payload3["task_type"] == "outfit_modify"
     assert payload3["route"]["reason"] == "session_follow_up"
-    agent1_facts = payload3["agent_outputs"]["agent1"]["facts"]
-    assert agent1_facts["adjustment_mode"] == "flexible"
-    assert agent1_facts["locked_item_ids"] == []
-    assert agent1_facts["replaced_item_ids"] == []
-    assert payload3["result"]["target_slot"] == ""
-    assert payload3["result"]["locked_item_ids"] == []
     assert payload3["result"]["alternatives"][0]["item_ids"] == ["dress-1", "heels-1"]
 
 
@@ -220,12 +260,7 @@ def test_follow_up_without_session_stays_recommend(db_dsn: str) -> None:
     database_path = db_dsn
     initialize_database(database_path)
     _seed_wardrobe(database_path)
-    workflow = MultiTaskWorkflow(
-        database_path=database_path,
-        knowledge_root=Path("knowledge"),
-        llm_client=None,
-        recommendation_runner=_fake_recommendation_runner,
-    )
+    workflow = _workflow(database_path, None)
     # Without session context, a slot-less request is routed as a fresh
     # recommendation rather than being forced into a modification.
     payload = workflow.execute(
@@ -237,39 +272,6 @@ def test_follow_up_without_session_stays_recommend(db_dsn: str) -> None:
 # ---------------------------------------------------------------------------
 # M3: multi-turn dialogue with natural, colloquial user input
 # ---------------------------------------------------------------------------
-
-ROUND3_MODIFY_BOTTOM = {
-    "task_type": "outfit_modify",
-    "status": "completed",
-    "summary": "已把裤子换成深色西裤",
-    "result": {
-        "status": "completed",
-        "current_outfit_id": "outfit-1",
-        "target_slot": "bottom",
-        "replaced_item_ids": ["bottom-1"],
-        "locked_item_ids": ["blazer-1", "top-1", "shoes-1"],
-        "alternatives": [
-            {
-                "outfit_id": "outfit-2",
-                "item_ids": ["blazer-1", "top-1", "dark-pants-2", "shoes-1"],
-                "reasoning": "换成深色西裤，保持通勤正式感",
-            },
-            {
-                "outfit_id": "outfit-2b",
-                "item_ids": ["blazer-1", "top-1", "dark-pants-2", "heels-1"],
-                "reasoning": "深色西裤配黑色高跟鞋，正式度更高",
-            },
-            {
-                "outfit_id": "outfit-2c",
-                "item_ids": ["blazer-1", "dark-pants-2", "shoes-1"],
-                "reasoning": "去掉白衬衫，深色西裤加西装外套更利落",
-            },
-        ],
-        "message": "已为你更换裤子",
-    },
-    "used_item_ids": ["blazer-1", "top-1", "dark-pants-2", "shoes-1", "heels-1"],
-    "evidence_source_ids": [],
-}
 
 
 def _seed_with_dark_pants(database_path: str) -> None:
@@ -291,18 +293,30 @@ def test_three_round_modify_chain_keeps_latest_outfit(db_dsn: str) -> None:
     initialize_database(database_path)
     _seed_with_dark_pants(database_path)
 
-    script = [
-        {"evidence": []},  # R1 extraction
-        intent_response("理解换外套请求"), ROUND2_MODIFY, approved_review(), {"evidence": []},  # R2
-        intent_response("理解换裤子请求"), ROUND3_MODIFY_BOTTOM, approved_review(), {"evidence": []},  # R3
-        intent_response("理解整体调整请求"), ROUND3_MODIFY, approved_review(), {"evidence": []},  # R4
-    ]
-    workflow = MultiTaskWorkflow(
-        database_path=database_path,
-        knowledge_root=Path("knowledge"),
-        llm_client=ScriptedExtensionLlm(script),
-        recommendation_runner=_fake_recommendation_runner,
-    )
+    script: list[Any] = []
+    script += _recommend_block("客户会面正式通勤", ["top-1", "bottom-1", "coat-1", "shoes-1"])
+    script.append(_empty_extraction())  # R1 extraction
+    for _ in range(3):
+        script += _modify_block(
+            "换件西装外套", _replace_plan("coat-1", "blazer-1"), feedback="已换成深蓝西装外套"
+        )
+    script.append(_empty_extraction())  # R2 extraction
+    for _ in range(3):
+        script += _modify_block(
+            "换条深色裤子", _replace_plan("bottom-1", "dark-pants-2"), feedback="已换成深灰西裤"
+        )
+    script.append(_empty_extraction())  # R3 extraction
+    for _ in range(3):
+        script += _modify_block(
+            "整体再正式",
+            _rebuild_plan(
+                ["top-1", "dark-pants-2", "blazer-1", "shoes-1"], ["dress-1", "heels-1"]
+            ),
+            feedback="已调整为正式连衣裙搭配",
+        )
+    script.append(_empty_extraction())  # R4 extraction
+
+    workflow = _workflow(database_path, FakeLlm(script))
 
     # R1: colloquial fresh brief.
     payload1 = workflow.execute(
@@ -312,15 +326,18 @@ def test_three_round_modify_chain_keeps_latest_outfit(db_dsn: str) -> None:
     ctx1 = outfit_context_from_payload(payload1)
     assert ctx1["current_item_ids"] == ["top-1", "bottom-1", "coat-1", "shoes-1"]
 
-    # R2: replace the coat.
+    # R2: replace the coat; the blazer must carry into the next round.
     payload2 = workflow.execute(
         TaskExecutionInput(user_id="u", request="嗯，外套换件西装吧，这大衣太随意了"),
         session_context=ctx1,
     )
     assert payload2["task_type"] == "outfit_modify"
     assert payload2["result"]["target_slot"] == "outerwear"
+    assert payload2["result"]["alternatives"][0]["item_ids"] == [
+        "top-1", "bottom-1", "blazer-1", "shoes-1",
+    ]
     ctx2 = outfit_context_from_payload(payload2)
-    assert ctx2["current_item_ids"] == ["blazer-1", "top-1", "bottom-1", "shoes-1"]
+    assert ctx2["current_item_ids"] == ["top-1", "bottom-1", "blazer-1", "shoes-1"]
 
     # R3: replace the trousers; must carry the R2 coat (no fallback to R1).
     payload3 = workflow.execute(
@@ -329,10 +346,10 @@ def test_three_round_modify_chain_keeps_latest_outfit(db_dsn: str) -> None:
     )
     assert payload3["task_type"] == "outfit_modify"
     assert payload3["result"]["target_slot"] == "bottom"
-    assert payload3["result"]["replaced_item_ids"] == ["bottom-1"]
-    facts3 = payload3["agent_outputs"]["agent1"]["facts"]
-    assert "blazer-1" in facts3.get("current_item_ids", [])
-    assert "coat-1" not in facts3.get("current_item_ids", [])
+    alternative3 = payload3["result"]["alternatives"][0]
+    assert alternative3["replaced_item_ids"] == ["bottom-1"]
+    assert "blazer-1" in alternative3["item_ids"]
+    assert "coat-1" not in alternative3["item_ids"]
 
     # R4: slot-less follow-up becomes an overall adjustment.
     ctx3 = outfit_context_from_payload(payload3)
@@ -342,8 +359,7 @@ def test_three_round_modify_chain_keeps_latest_outfit(db_dsn: str) -> None:
     )
     assert payload4["task_type"] == "outfit_modify"
     assert payload4["route"]["reason"] == "session_follow_up"
-    assert payload4["agent_outputs"]["agent1"]["facts"]["adjustment_mode"] == "flexible"
-    assert payload4["result"]["target_slot"] == ""
+    assert payload4["result"]["alternatives"][0]["item_ids"] == ["dress-1", "heels-1"]
 
 
 def _seed_with_loafers(database_path: str) -> None:
@@ -358,30 +374,6 @@ def _seed_with_loafers(database_path: str) -> None:
         add_items(connection, "u", ["loafers-1"])
 
 
-ROUND_FOOTWEAR_MODIFY = {
-    "task_type": "outfit_modify",
-    "status": "completed",
-    "summary": "已把高跟鞋换成乐福鞋",
-    "result": {
-        "status": "completed",
-        "current_outfit_id": "outfit-2",
-        "target_slot": "footwear",
-        "replaced_item_ids": ["heels-1"],
-        "locked_item_ids": ["dress-1"],
-        "alternatives": [
-            {
-                "outfit_id": "outfit-3",
-                "item_ids": ["dress-1", "loafers-1"],
-                "reasoning": "换成乐福鞋，约会更轻松自在",
-            }
-        ],
-        "message": "已为你更换鞋子",
-    },
-    "used_item_ids": ["dress-1", "loafers-1"],
-    "evidence_source_ids": [],
-}
-
-
 def test_mixed_chain_fresh_scene_does_not_rewrite(db_dsn: str) -> None:
     """Recommend -> swap coat -> fresh wedding brief -> overall color adjust.
 
@@ -393,18 +385,24 @@ def test_mixed_chain_fresh_scene_does_not_rewrite(db_dsn: str) -> None:
     initialize_database(database_path)
     _seed_with_loafers(database_path)
 
-    script = [
-        {"evidence": []},  # R1 extraction
-        intent_response("理解换外套请求"), ROUND2_MODIFY, approved_review(), {"evidence": []},  # R2
-        {"evidence": []},  # R3 extraction
-        intent_response("理解整体改色请求"), ROUND3_MODIFY, approved_review(), {"evidence": []},  # R4
-    ]
-    workflow = MultiTaskWorkflow(
-        database_path=database_path,
-        knowledge_root=Path("knowledge"),
-        llm_client=ScriptedExtensionLlm(script),
-        recommendation_runner=_fake_recommendation_runner,
-    )
+    script: list[Any] = []
+    script += _recommend_block("通勤搭配", ["top-1", "bottom-1", "coat-1", "shoes-1"])
+    script.append(_empty_extraction())  # R1 extraction
+    for _ in range(3):
+        script += _modify_block(
+            "大衣换成西装", _replace_plan("coat-1", "blazer-1"), feedback="已换成深蓝西装外套"
+        )
+    script.append(_empty_extraction())  # R2 extraction
+    # R3 is a FRESH wedding recommend — a new baseline, no blazer leak.
+    script += _recommend_block("婚礼正式", ["top-1", "bottom-1", "coat-1", "shoes-1"], feedback="符合婚礼正式感")
+    script.append(_empty_extraction())  # R3 extraction
+    for _ in range(3):
+        script += _modify_block(
+            "整体改成红色系", _replace_plan("shoes-1", "heels-1"), feedback="已换成高跟鞋"
+        )
+    script.append(_empty_extraction())  # R4 extraction
+
+    workflow = _workflow(database_path, FakeLlm(script))
 
     # R1: plain recommend.
     payload1 = workflow.execute(
@@ -420,10 +418,11 @@ def test_mixed_chain_fresh_scene_does_not_rewrite(db_dsn: str) -> None:
     )
     assert payload2["task_type"] == "outfit_modify"
     assert payload2["result"]["target_slot"] == "outerwear"
-    assert payload2["result"]["replaced_item_ids"] == ["coat-1"]
-    assert payload2["result"]["locked_item_ids"] == ["top-1", "bottom-1", "shoes-1"]
+    alternative2 = payload2["result"]["alternatives"][0]
+    assert alternative2["replaced_item_ids"] == ["coat-1"]
+    assert alternative2["locked_item_ids"] == ["top-1", "bottom-1", "shoes-1"]
     ctx2 = outfit_context_from_payload(payload2)
-    assert ctx2["current_item_ids"] == ["blazer-1", "top-1", "bottom-1", "shoes-1"]
+    assert ctx2["current_item_ids"] == ["top-1", "bottom-1", "blazer-1", "shoes-1"]
 
     # R3: a fresh scenario must NOT be rewritten into a modification.
     payload3 = workflow.execute(
@@ -432,8 +431,8 @@ def test_mixed_chain_fresh_scene_does_not_rewrite(db_dsn: str) -> None:
     )
     assert payload3["task_type"] == "outfit_recommend"
     assert not is_follow_up("对了，下周末婚礼穿什么，帮我看看")
-    # The fresh plan starts over from the deterministic runner; the R2 swap
-    # (blazer) must not leak into the wedding plan.
+    # The fresh plan starts over from a new baseline; the R2 swap (blazer)
+    # must not leak into the wedding plan.
     ctx3 = outfit_context_from_payload(payload3)
     assert ctx3["current_item_ids"] == ["top-1", "bottom-1", "coat-1", "shoes-1"]
 
@@ -443,8 +442,9 @@ def test_mixed_chain_fresh_scene_does_not_rewrite(db_dsn: str) -> None:
         session_context=ctx3,
     )
     assert payload4["task_type"] == "outfit_modify"
-    assert payload4["result"]["target_slot"] == ""
-    assert payload4["agent_outputs"]["agent1"]["facts"]["adjustment_mode"] == "flexible"
+    alternative4 = payload4["result"]["alternatives"][0]
+    assert alternative4["item_ids"] == ["top-1", "bottom-1", "coat-1", "heels-1"]
+    assert "blazer-1" not in alternative4["item_ids"]
 
 
 def test_negative_feedback_then_footwear_swap(db_dsn: str) -> None:
@@ -458,17 +458,23 @@ def test_negative_feedback_then_footwear_swap(db_dsn: str) -> None:
     initialize_database(database_path)
     _seed_with_loafers(database_path)
 
-    script = [
-        {"evidence": []},  # R1 extraction
-        intent_response("理解整体严肃度调整"), ROUND3_MODIFY, approved_review(), {"evidence": []},  # R2
-        intent_response("理解换乐福鞋"), ROUND_FOOTWEAR_MODIFY, approved_review(), {"evidence": []},  # R3
-    ]
-    workflow = MultiTaskWorkflow(
-        database_path=database_path,
-        knowledge_root=Path("knowledge"),
-        llm_client=ScriptedExtensionLlm(script),
-        recommendation_runner=_fake_recommendation_runner,
-    )
+    script: list[Any] = []
+    script += _recommend_block("约会通勤", ["top-1", "bottom-1", "coat-1", "shoes-1"])
+    script.append(_empty_extraction())  # R1 extraction
+    for _ in range(3):
+        script += _modify_block(
+            "整体改休闲",
+            _rebuild_plan(["top-1", "bottom-1", "coat-1", "shoes-1"], ["dress-1", "heels-1"]),
+            feedback="已换成连衣裙与高跟鞋",
+        )
+    script.append(_empty_extraction())  # R2 extraction
+    for _ in range(3):
+        script += _modify_block(
+            "换乐福鞋", _replace_plan("heels-1", "loafers-1"), feedback="已换成乐福鞋"
+        )
+    script.append(_empty_extraction())  # R3 extraction
+
+    workflow = _workflow(database_path, FakeLlm(script))
 
     # R1: recommend for a date.
     payload1 = workflow.execute(
@@ -484,8 +490,7 @@ def test_negative_feedback_then_footwear_swap(db_dsn: str) -> None:
     )
     assert payload2["task_type"] == "outfit_modify"
     assert payload2["route"]["reason"] == "session_follow_up"
-    assert payload2["result"]["target_slot"] == ""
-    assert payload2["agent_outputs"]["agent1"]["facts"]["adjustment_mode"] == "flexible"
+    assert payload2["result"]["alternatives"][0]["item_ids"] == ["dress-1", "heels-1"]
     ctx2 = outfit_context_from_payload(payload2)
     assert ctx2["current_item_ids"] == ["dress-1", "heels-1"]
 
@@ -495,10 +500,10 @@ def test_negative_feedback_then_footwear_swap(db_dsn: str) -> None:
         session_context=ctx2,
     )
     assert payload3["task_type"] == "outfit_modify"
-    assert payload3["result"]["target_slot"] == "footwear"
-    assert payload3["result"]["replaced_item_ids"] == ["heels-1"]
-    assert payload3["result"]["locked_item_ids"] == ["dress-1"]
-    assert payload3["result"]["alternatives"][0]["item_ids"] == ["dress-1", "loafers-1"]
+    alternative3 = payload3["result"]["alternatives"][0]
+    assert alternative3["item_ids"] == ["dress-1", "loafers-1"]
+    assert alternative3["replaced_item_ids"] == ["heels-1"]
+    assert alternative3["locked_item_ids"] == ["dress-1"]
 
 
 def test_follow_up_ignores_stale_session_items(db_dsn: str) -> None:
@@ -507,17 +512,13 @@ def test_follow_up_ignores_stale_session_items(db_dsn: str) -> None:
     database_path = db_dsn
     initialize_database(database_path)
     _seed_wardrobe(database_path)
-    workflow = MultiTaskWorkflow(
-        database_path=database_path,
-        knowledge_root=Path("knowledge"),
-        llm_client=None,
-        recommendation_runner=_fake_recommendation_runner,
-    )
+    workflow = _workflow(database_path, None)
     payload1 = workflow.execute(
         TaskExecutionInput(user_id="u", request="帮我搭一套上班的")
     )
     ctx1 = outfit_context_from_payload(payload1)
-    assert ctx1["current_item_ids"] == ["top-1", "bottom-1", "coat-1", "shoes-1"]
+    # The deterministic pipeline picks a base outfit from the seed wardrobe.
+    assert "top-1" in ctx1["current_item_ids"]
 
     # 单品从活跃衣橱全部失效（模拟已删单品）。
     with database_session(database_path) as connection:
@@ -536,12 +537,7 @@ def test_new_intent_with_session_is_not_forced_to_modify(db_dsn: str) -> None:
     database_path = db_dsn
     initialize_database(database_path)
     _seed_wardrobe(database_path)
-    workflow = MultiTaskWorkflow(
-        database_path=database_path,
-        knowledge_root=Path("knowledge"),
-        llm_client=None,
-        recommendation_runner=_fake_recommendation_runner,
-    )
+    workflow = _workflow(database_path, None)
     payload1 = workflow.execute(
         TaskExecutionInput(user_id="u", request="帮我搭一套上班的")
     )
@@ -560,17 +556,16 @@ def test_ambiguous_short_follow_up_is_auditable(db_dsn: str) -> None:
     database_path = db_dsn
     initialize_database(database_path)
     _seed_wardrobe(database_path)
-    script = [
-        {"evidence": []},  # R1 extraction
-        # 无槽位调整 → agent1 走 overall；agent2 必须返回整体调整形式，否则硬校验报错。
-        intent_response("理解不要蓝色的调整"), ROUND3_MODIFY, approved_review(), {"evidence": []},  # R2
-    ]
-    workflow = MultiTaskWorkflow(
-        database_path=database_path,
-        knowledge_root=Path("knowledge"),
-        llm_client=ScriptedExtensionLlm(script),
-        recommendation_runner=_fake_recommendation_runner,
-    )
+    script: list[Any] = []
+    script += _recommend_block("休闲搭配", ["top-1", "bottom-1", "coat-1", "shoes-1"])
+    script.append(_empty_extraction())  # R1 extraction
+    for _ in range(3):
+        script += _modify_block(
+            "去掉蓝色", _replace_plan("shoes-1", "heels-1"), feedback="已换成高跟鞋"
+        )
+    script.append(_empty_extraction())  # R2 extraction
+
+    workflow = _workflow(database_path, FakeLlm(script))
     payload1 = workflow.execute(
         TaskExecutionInput(user_id="u", request="配一套休闲点的")
     )
@@ -582,7 +577,9 @@ def test_ambiguous_short_follow_up_is_auditable(db_dsn: str) -> None:
     )
     assert payload2["task_type"] == "outfit_modify"
     assert payload2["route"]["reason"] == "session_follow_up"
-    assert payload2["result"]["target_slot"] == ""
+    assert payload2["result"]["alternatives"][0]["item_ids"] == [
+        "top-1", "bottom-1", "coat-1", "heels-1",
+    ]
 
 
 def test_empty_session_context_degrades_to_recommend(db_dsn: str) -> None:
@@ -590,12 +587,7 @@ def test_empty_session_context_degrades_to_recommend(db_dsn: str) -> None:
     database_path = db_dsn
     initialize_database(database_path)
     _seed_wardrobe(database_path)
-    workflow = MultiTaskWorkflow(
-        database_path=database_path,
-        knowledge_root=Path("knowledge"),
-        llm_client=None,
-        recommendation_runner=_fake_recommendation_runner,
-    )
+    workflow = _workflow(database_path, None)
     payload = workflow.execute(
         TaskExecutionInput(user_id="u", request="更正式一点"),
         session_context={"current_outfit_id": "", "current_item_ids": []},
@@ -609,12 +601,7 @@ def test_no_llm_skips_memory_extraction_gracefully(db_dsn: str) -> None:
     database_path = db_dsn
     initialize_database(database_path)
     _seed_wardrobe(database_path)
-    workflow = MultiTaskWorkflow(
-        database_path=database_path,
-        knowledge_root=Path("knowledge"),
-        llm_client=None,
-        recommendation_runner=_fake_recommendation_runner,
-    )
+    workflow = _workflow(database_path, None)
     payload = workflow.execute(
         TaskExecutionInput(user_id="u", request="帮我搭一套通勤的")
     )

@@ -1,14 +1,17 @@
 """Offline tests for the home-card ``GET /weather/now`` endpoint.
 
-The endpoint reuses the workflow's ``weather_tool``; each case monkeypatches
-``api.get_workflow`` with a fake workflow whose tool records the resolved
-``WeatherToolInput`` and returns deterministic facts, so no provider is hit.
+The endpoint builds its tool from ``get_multi_task_workflow().weather_provider``
+(wrapping it in ``WeatherTool``), so each case monkeypatches
+``api.get_multi_task_workflow`` with a fake workflow whose ``weather_provider``
+drives construction, and swaps ``api.WeatherTool`` for a recording tool. No real
+provider is ever hit.
 """
 
 from __future__ import annotations
 
 import importlib
 import sys
+import types
 from datetime import date
 
 import pytest
@@ -78,16 +81,23 @@ def _import_api(
     return importlib.import_module("styleforge.api")
 
 
-def _fake_workflow(tool) -> object:
-    import types
+def _wire_weather(api, *, provider_enabled: bool, tool) -> None:
+    """Point the endpoint at a fake workflow + recording WeatherTool.
 
-    return types.SimpleNamespace(weather_tool=tool)
+    ``provider_enabled=False`` mirrors a configured-but-disabled weather provider
+    (``get_multi_task_workflow().weather_provider is None`` → tool is None).
+    """
+    provider = object() if provider_enabled else None
+    api.get_multi_task_workflow = lambda: types.SimpleNamespace(
+        weather_provider=provider
+    )
+    api.WeatherTool = lambda _provider: tool
 
 
 def test_location_param_resolves_named_city(db_dsn, monkeypatch) -> None:
     tool = RecordingWeatherTool()
     api = _import_api(monkeypatch, db_dsn, default_location="上海")
-    api.get_workflow = lambda: _fake_workflow(tool)
+    _wire_weather(api, provider_enabled=True, tool=tool)
     today = date.today().isoformat()
 
     with TestClient(api.app) as client:
@@ -104,7 +114,7 @@ def test_location_param_resolves_named_city(db_dsn, monkeypatch) -> None:
 def test_coordinates_bypass_city_name(db_dsn, monkeypatch) -> None:
     tool = RecordingWeatherTool()
     api = _import_api(monkeypatch, db_dsn, default_location="上海")
-    api.get_workflow = lambda: _fake_workflow(tool)
+    _wire_weather(api, provider_enabled=True, tool=tool)
 
     with TestClient(api.app) as client:
         response = client.get(
@@ -123,7 +133,7 @@ def test_location_and_coordinates_are_mutually_exclusive(
     db_dsn, monkeypatch
 ) -> None:
     api = _import_api(monkeypatch, db_dsn, default_location="上海")
-    api.get_workflow = lambda: _fake_workflow(RecordingWeatherTool())
+    _wire_weather(api, provider_enabled=True, tool=RecordingWeatherTool())
 
     with TestClient(api.app) as client:
         both = client.get(
@@ -139,7 +149,7 @@ def test_location_and_coordinates_are_mutually_exclusive(
 def test_no_params_uses_configured_default_city(db_dsn, monkeypatch) -> None:
     tool = RecordingWeatherTool()
     api = _import_api(monkeypatch, db_dsn, default_location="上海")
-    api.get_workflow = lambda: _fake_workflow(tool)
+    _wire_weather(api, provider_enabled=True, tool=tool)
     today = date.today().isoformat()
 
     with TestClient(api.app) as client:
@@ -153,7 +163,7 @@ def test_no_params_uses_configured_default_city(db_dsn, monkeypatch) -> None:
 
 def test_no_default_location_returns_honest_unavailable(db_dsn, monkeypatch) -> None:
     api = _import_api(monkeypatch, db_dsn, default_location=None)
-    api.get_workflow = lambda: _fake_workflow(RecordingWeatherTool())
+    _wire_weather(api, provider_enabled=True, tool=RecordingWeatherTool())
 
     with TestClient(api.app) as client:
         response = client.get("/weather/now")
@@ -166,7 +176,7 @@ def test_no_default_location_returns_honest_unavailable(db_dsn, monkeypatch) -> 
 
 def test_disabled_weather_tool_returns_unavailable(db_dsn, monkeypatch) -> None:
     api = _import_api(monkeypatch, db_dsn, default_location="上海")
-    api.get_workflow = lambda: _fake_workflow(None)
+    _wire_weather(api, provider_enabled=False, tool=RecordingWeatherTool())
 
     with TestClient(api.app) as client:
         response = client.get("/weather/now")

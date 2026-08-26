@@ -19,7 +19,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from styleforge.agentic.agents.stylist.graph import (
     FRESH_RESEARCH_CAP,

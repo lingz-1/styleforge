@@ -28,7 +28,6 @@ from typing import Any
 
 from styleforge.agentic.context.assembler import ContextAssembler
 from styleforge.agentic.context.grounding import (
-    GroundingContext,
     GroundingDecision,
     GroundingResolver,
     pending_field_for_question,

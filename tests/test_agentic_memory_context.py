@@ -26,7 +26,6 @@ from styleforge.agentic.context.prompt_assembler import PromptAssembler, _format
 from styleforge.agentic.runtime.capability_registry import CapabilityRegistry
 from styleforge.agentic.tools.local_tools import (
     AGENT_CRITIC,
-    AGENT_RESEARCH,
     AGENT_STYLIST,
     CAP_WEB_SEARCH,
     register_local_tools,

@@ -6,8 +6,9 @@ ONCE) → Evidence Synthesizer → Coordinator → Stylist ×3 sharing the evide
 Main-Graph gates → StageCandidate. The single outcome rides ``agentic_outcome``
 so the front end can show "联网搜索查到 xx → 考虑主题 → 搭配 xx", and the
 ``get_weather`` fact the Research Agent actually saw rides
-``environment_context``. A request without an LLM degrades to the legacy graph,
-keeping no-key behaviour unchanged.
+``environment_context``. A request without an LLM degrades to the deterministic
+recommendation pipeline (``llm_enabled=false``), keeping no-key behaviour
+unchanged.
 
 The harness is driven with a scripted ``FakeLlm``; web / weather / skill tools
 use fakes. Memory extraction (``extract_language_evidence``) runs outside the
@@ -20,7 +21,6 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request
 
-import pytest
 
 from styleforge.models.task import TaskExecutionInput
 from styleforge.orchestration.task_router import TaskType
@@ -63,8 +63,6 @@ def _workflow(
         database_path=database_path,
         knowledge_root=Path("knowledge"),
         llm_client=llm,
-        modify_mode="legacy",
-        recommend_mode="agentic",
         web_search_provider=web_provider,
         weather_provider=weather_provider,
         skills_root=skills_root,
@@ -297,15 +295,18 @@ def test_recommend_agentic_primary_returns_three_diverse_outfits(
     ]
 
 
-def test_recommend_agentic_without_llm_degrades_to_legacy(db_dsn: str) -> None:
+def test_recommend_without_llm_uses_deterministic_pipeline(db_dsn: str) -> None:
     initialize_database(db_dsn)
     _seed(db_dsn)
     workflow = _workflow(db_dsn, None)  # no LLM key
 
     payload = workflow.execute(_recommend_task())
 
-    # The agentic branch is gated on llm_client; the legacy graph takes over.
+    # The agentic branch is gated on llm_client; the deterministic pipeline
+    # (parse_request → recommend_for_user → present_result) takes over.
     assert payload["selected_subgraph"] == "outfit_recommend_subgraph"
-    assert payload["status"] in {"completed", "infeasible", "needs_clarification"}
+    assert payload["status"] in {"completed", "infeasible"}
+    assert payload["llm_enabled"] is False
+    assert payload["llm_call_count"] == 0
     assert "recommendations" in payload["result"]
     assert "agentic_outcome" not in payload

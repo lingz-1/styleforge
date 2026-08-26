@@ -8,9 +8,8 @@ over that snapshot as ``base_draft``, and the batch of outcomes is wrapped into
 a single OutfitModifyResult with one alternative per success. An explicit
 ``current_outfit_id`` keeps Stage 4's single-outfit path.
 
-Tests here opt in with ``modify_mode="agentic"`` and either exercise the pure
-wrappers or drive the harness with a scripted ``FakeLlm``; the conftest autouse
-fixture keeps the legacy chain the default for every other test.
+Tests here either exercise the pure ``_agentic_targets`` wrapper or drive the
+harness with a scripted ``FakeLlm`` (the legacy chain was retired in Stage 2).
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from styleforge.models.task import TaskExecutionInput
 from styleforge.orchestration.task_router import TaskType
@@ -50,7 +48,6 @@ def _workflow(database_path: str, llm: Any | None) -> MultiTaskWorkflow:
         database_path=database_path,
         knowledge_root=Path("knowledge"),
         llm_client=llm,
-        modify_mode="agentic",
     )
 
 
@@ -69,66 +66,6 @@ def _targets(*candidates: tuple[str, list[str]]) -> list[dict[str, Any]]:
         {"outfit_id": outfit_id, "item_ids": list(item_ids)}
         for outfit_id, item_ids in candidates
     ]
-
-
-def _success_outcome(
-    outfit_id: str,
-    item_ids: list[str],
-    *,
-    feedback: str = "已按要求修改",
-    llm_calls: int = 2,
-) -> dict[str, Any]:
-    return {
-        "status": "success",
-        "intent": {"message": "太正式了", "goal": "改休闲", "requirements": []},
-        "candidate": {"outfit_id": outfit_id, "item_ids": item_ids},
-        "review": {"approved": True, "issues": [], "feedback": feedback},
-        "ask_user": None,
-        "steps": [
-            {
-                "step": 1,
-                "action": "modify_outfit",
-                "args": {
-                    "plan": {
-                        "ops": [
-                            {
-                                "action": "replace",
-                                "item_id": "shoes-1",
-                                "replacement_item_id": "sneakers-1",
-                                "placement": {"region": "feet", "layer": "base"},
-                            }
-                        ]
-                    }
-                },
-                "observation": "已应用修改",
-            }
-        ],
-        "llm_call_count": llm_calls,
-    }
-
-
-def _timeout_outcome(outfit_id: str) -> dict[str, Any]:
-    return {
-        "status": "timeout",
-        "intent": {"message": "太正式了", "goal": "改休闲", "requirements": []},
-        "candidate": {"outfit_id": outfit_id, "item_ids": []},
-        "review": None,
-        "ask_user": None,
-        "steps": [{"step": 1, "action": "search_wardrobe", "args": {}, "observation": "x"}],
-        "llm_call_count": 8,
-    }
-
-
-def _ask_user_outcome(outfit_id: str) -> dict[str, Any]:
-    return {
-        "status": "ask_user",
-        "intent": {"message": "太正式了", "goal": "改休闲", "requirements": []},
-        "candidate": {"outfit_id": outfit_id, "item_ids": []},
-        "review": None,
-        "ask_user": {"question": "衣橱里没有合适的，换一种风格可以吗？"},
-        "steps": [],
-        "llm_call_count": 1,
-    }
 
 
 # ── _agentic_targets (pure) ─────────────────────────────────────────
@@ -180,108 +117,6 @@ def test_targets_no_session_degrades_to_empty(db_dsn: str) -> None:
     assert len(targets) == 1
     assert targets[0]["outfit_id"] == ""
     assert targets[0]["item_ids"] == []
-
-
-# ── _agentic_outcomes_to_result (pure) ──────────────────────────────
-
-
-def _targets_for_outcomes() -> list[dict[str, Any]]:
-    return _targets(("a", ["x", "y", "z"]), ("b", ["p", "q", "r"]))
-
-
-def test_outcomes_all_success_completed(db_dsn: str) -> None:
-    workflow = _workflow(db_dsn, None)
-    result = workflow._agentic_outcomes_to_result(
-        _no_outfit_task(),
-        _targets_for_outcomes(),
-        [_success_outcome("a", ["x", "y", "z"]), _success_outcome("b", ["p", "q", "r"])],
-        {"shoes-1": "shoes", "sneakers-1": "shoes"},
-    )
-
-    assert result["status"] == "completed"
-    assert len(result["alternatives"]) == 2
-    assert result["alternatives"][0]["outfit_id"].startswith("a-mod-")
-    assert result["alternatives"][1]["outfit_id"].startswith("b-mod-")
-    assert result["alternatives"][0]["outfit_id"] != result["alternatives"][1]["outfit_id"]
-    assert result["current_outfit_id"] == result["alternatives"][0]["outfit_id"]
-    assert result["message"] == "已按你的要求修改 2 套"
-    # Top-level replaced/locked merge across every alternative.
-    assert result["replaced_item_ids"] == ["shoes-1", "shoes-1"]
-    assert result["locked_item_ids"] == ["x", "y", "z", "p", "q", "r"]
-
-
-def test_outcomes_mixed_completed_with_partial(db_dsn: str) -> None:
-    workflow = _workflow(db_dsn, None)
-    result = workflow._agentic_outcomes_to_result(
-        _no_outfit_task(),
-        _targets_for_outcomes(),
-        [_success_outcome("a", ["x", "y", "z"]), _timeout_outcome("b")],
-        {},
-    )
-
-    assert result["status"] == "completed"
-    assert len(result["alternatives"]) == 1
-    assert result["message"] == "已按你的要求修改 1 套"
-
-
-def test_outcomes_all_timeout_infeasible(db_dsn: str) -> None:
-    workflow = _workflow(db_dsn, None)
-    result = workflow._agentic_outcomes_to_result(
-        _no_outfit_task(),
-        _targets_for_outcomes(),
-        [_timeout_outcome("a"), _timeout_outcome("b")],
-        {},
-    )
-
-    assert result["status"] == "infeasible"
-    assert result["alternatives"] == []
-
-
-def test_outcomes_all_ask_user_clarification(db_dsn: str) -> None:
-    workflow = _workflow(db_dsn, None)
-    result = workflow._agentic_outcomes_to_result(
-        _no_outfit_task(),
-        _targets_for_outcomes(),
-        [_ask_user_outcome("a"), _timeout_outcome("b")],
-        {},
-    )
-
-    assert result["status"] == "needs_clarification"
-    assert result["message"] == "衣橱里没有合适的，换一种风格可以吗？"
-    assert result["alternatives"] == []
-
-
-def test_outcomes_undersized_candidate_skipped(db_dsn: str) -> None:
-    workflow = _workflow(db_dsn, None)
-    undersized = _success_outcome("a", ["only-one"])
-    result = workflow._agentic_outcomes_to_result(
-        _no_outfit_task(),
-        _targets_for_outcomes(),
-        [undersized, _success_outcome("b", ["p", "q", "r"])],
-        {},
-    )
-
-    assert result["status"] == "completed"
-    assert len(result["alternatives"]) == 1
-    assert result["alternatives"][0]["outfit_id"].startswith("b-mod-")
-    assert result["message"] == "已修改 1 套，另有 1 套候选单品过少已跳过"
-
-
-def test_outcomes_single_delegates_to_single_wrapper(db_dsn: str) -> None:
-    # One outcome (no explicit choice but a single candidate) keeps the exact
-    # Stage 4 single-outfit behaviour, including its own outfit_id.
-    workflow = _workflow(db_dsn, None)
-    single = _success_outcome("a", ["x", "y", "z", "w"])
-    result = workflow._agentic_outcomes_to_result(
-        _no_outfit_task(),
-        _targets(("a", ["x", "y", "z", "w"])),
-        [single],
-        {"shoes-1": "shoes", "sneakers-1": "shoes"},
-    )
-
-    assert result["status"] == "completed"
-    assert len(result["alternatives"]) == 1
-    assert result["current_outfit_id"] == result["alternatives"][0]["outfit_id"]
 
 
 # ── outfit_context_from_payload keeps the full batch (pure) ──────────

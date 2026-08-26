@@ -1,3 +1,12 @@
+"""HTTP end-to-end for an extended task through the Multi-Agent Harness.
+
+The extension task types now execute the primary Harness chain
+(Coordinator → Extension subgraph → closing node), so the scripted model here
+mirrors ``test_agentic_extension_primary``: coordinator decision, one READY turn,
+a closing ``chat_json`` draft that satisfies the ``style_advice`` contract, and
+the post-run memory extraction.
+"""
+
 from __future__ import annotations
 
 import importlib
@@ -11,8 +20,8 @@ from styleforge.repositories.database import database_session, initialize_databa
 from styleforge.repositories.wardrobe_repository import add_items
 from styleforge.workflow.task_workflow import MultiTaskWorkflow
 
-from tests.extension_llm import ScriptedExtensionLlm, approved_review, intent_response
 from tests.helpers import make_item
+from tests.llm.fake_llm import FakeLlm
 
 
 def test_execute_and_read_extended_task_over_http(
@@ -34,11 +43,11 @@ def test_execute_and_read_extended_task_over_http(
         upsert_items(connection, items, "test")
         add_items(connection, "api-user", [item.item_id for item in items])
 
-    llm = ScriptedExtensionLlm(
+    llm = FakeLlm(
         [
-            intent_response("理解美式复古风格请求"),
+            {"decision_summary": "识别为风格建议任务", "goal": "给出风格建议", "next_agent": "EXTENSION"},
+            {"decision_summary": "事实足够", "control": "READY"},
             {
-                "task_type": "style_advice",
                 "status": "completed",
                 "summary": "用已有衬衫和牛仔裤落实风格",
                 "result": {
@@ -47,16 +56,18 @@ def test_execute_and_read_extended_task_over_http(
                     "title": "American Vintage 美式复古",
                     "summary": "以衣橱基础单品建立复古层次。",
                     "principles": [
-                        {"title": "层次", "content": "用基础单品控制复古元素数量。"}
+                        {
+                            "title": "层次",
+                            "section": "风格建议",
+                            "content": "用基础单品控制复古元素数量。",
+                            "description": "以衬衫叠穿或内搭形式建立层次。",
+                        }
                     ],
                     "wardrobe_matches": [{"item_id": "shirt", "name": "White shirt"}],
                     "evidence": [{"source_id": "style-american-vintage"}],
                     "limitations": [],
                 },
-                "used_item_ids": ["shirt"],
-                "evidence_source_ids": ["style-american-vintage"],
             },
-            approved_review(),
             # Successful execute also runs one memory-extraction call.
             {"evidence": []},
         ]
@@ -87,7 +98,10 @@ def test_execute_and_read_extended_task_over_http(
         assert response.status_code == 200
         payload = response.json()
         assert payload["task_type"] == "style_advice"
+        assert payload["status"] == "completed"
+        assert payload["selected_subgraph"] == "agentic_harness"
         assert payload["result"]["evidence"]
+        # coordinator + extension(READY) + closing = 3 (memory extraction excluded).
         assert payload["llm_call_count"] == 3
 
         stored = client.get(f"/tasks/api-user/{payload['run_id']}")

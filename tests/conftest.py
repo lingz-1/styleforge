@@ -35,47 +35,6 @@ def _test_dsn() -> str:
     return dsn
 
 
-@pytest.fixture(autouse=True)
-def _legacy_modify_mode_default() -> Iterator[None]:
-    """Keep the legacy OUTFIT_MODIFY chain the default for existing tests.
-
-    Stage 4 primary-mode tests opt in explicitly with ``modify_mode="agentic"``
-    (the explicit argument wins over the env flag); everything else keeps the
-    old three-agent chain so pre-切流 behaviour is unchanged.
-    """
-    os.environ["STYLEFORGE_MODIFY_MODE"] = "legacy"
-    yield
-    os.environ.pop("STYLEFORGE_MODIFY_MODE", None)
-
-
-@pytest.fixture(autouse=True)
-def _legacy_recommend_mode_default() -> Iterator[None]:
-    """Keep the legacy OUTFIT_RECOMMEND chain the default for existing tests.
-
-    Stage 4b primary-mode tests opt in explicitly with
-    ``recommend_mode="agentic"``; everything else keeps the legacy
-    recommendation graph so existing chat-session tests that drive recommend
-    with a generic fake LLM are unchanged.
-    """
-    os.environ["STYLEFORGE_RECOMMEND_MODE"] = "legacy"
-    yield
-    os.environ.pop("STYLEFORGE_RECOMMEND_MODE", None)
-
-
-@pytest.fixture(autouse=True)
-def _legacy_extension_mode_default() -> Iterator[None]:
-    """Keep the legacy three-agent extension chain the default for existing tests.
-
-    Stage 1 primary-mode tests opt in explicitly with ``extend_mode="agentic"``
-    (the explicit argument wins over the env flag); everything else keeps the
-    old Agent 1/2/3 chain so the staged migration stays fully verifiable until
-    the legacy graph is retired in Stage 2.
-    """
-    os.environ["STYLEFORGE_EXTEND_MODE"] = "legacy"
-    yield
-    os.environ.pop("STYLEFORGE_EXTEND_MODE", None)
-
-
 @pytest.fixture()
 def db_schema(_test_dsn: str) -> Iterator[str]:
     """A throwaway schema, created before and dropped after the test."""
