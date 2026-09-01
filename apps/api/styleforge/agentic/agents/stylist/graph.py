@@ -27,9 +27,10 @@ from styleforge.agentic.runtime.agent_runtime import AgentRuntime, ContextLimitE
 # subgraph returns PROTOCOL_ERROR as the harness-internal "did not produce" stop;
 # it is NOT a fabricated candidate. 12 rather than 8: a real provider exploring
 # a fresh candidate after a Critic rejection burns several tool turns before
-# converging (search + build + adjust); too tight a cap strangles a productive
-# run at its last step.
-MAX_STYLIST_STEPS = 12
+# converging (search + build + adjust). Eight tool turns still allow three slot
+# searches, one build and bounded corrections, while preventing one candidate
+# from monopolising a user request for minutes.
+MAX_STYLIST_STEPS = 8
 
 # Bounded revision (frozen #7 real-model deadlock): after a Critic / Env-Gate
 # rejection (gate_feedback set) the Stylist may keep editing for at most this
@@ -40,7 +41,7 @@ MAX_STYLIST_STEPS = 12
 # (MAX_CRITIC_RETRIES) accepts the candidate instead of burning the step cap.
 # Only revision rounds are bounded — a fresh candidate from the empty base draft
 # is unrestricted (MAX_STYLIST_STEPS still guards it).
-MAX_REVISION_STEPS = 3
+MAX_REVISION_STEPS = 2
 
 # Fresh-research cap (real-model "piacon" failure): a FRESH candidate (no
 # gate_feedback) may keep re-searching the same facts (search_web / get_weather /
@@ -52,7 +53,7 @@ MAX_REVISION_STEPS = 3
 # submit. The step-cap force-submit (below) is the backstop if the nudge is
 # ignored. Revision rounds do NOT get the nudge — they already hit the bounded
 # revision force-submit at MAX_REVISION_STEPS.
-FRESH_RESEARCH_CAP = 4
+FRESH_RESEARCH_CAP = 3
 
 
 class StylistState(TypedDict, total=False):
@@ -139,10 +140,10 @@ def build_stylist_subgraph(runtime: AgentRuntime):
                 return _envelope("COMPLETED", trace)
             return _envelope("PROTOCOL_ERROR", state.get("trace", []))
         # Frozen #21 hard cap: re-entry after a protocol error is bounded. A
-        # real provider can get stuck in a prose streak for a few turns; a valid
-        # turn (below) resets the counter, so the budget bounds CONSECUTIVE
-        # failures (≤ 5 in a row) — enough for DeepSeek's occasional narration
-        # mode to break, never an infinite loop.
+        # A valid turn below resets the counter, so this bounds CONSECUTIVE
+        # failures while preserving recovery from an occasional malformed
+        # DeepSeek response. The overall step/revision caps still prevent an
+        # otherwise productive candidate from looping forever.
         if state.get("trajectory_protocol_errors", 0) > 5:
             return _envelope("PROTOCOL_ERROR", state.get("trace", []))
         # Bounded revision: in a revision round (gate_feedback set by a rejected
@@ -177,8 +178,10 @@ def build_stylist_subgraph(runtime: AgentRuntime):
             nudge = (
                 f"你已连续 {state.get('trajectory_step_count', 0)} 轮只查证（搜索/天气/衣橱）"
                 "而未组合任何搭配。基于已有的衣橱搜索结果与【研究证据】，"
-                "立即用 modify_outfit 组合一套完整搭配（一次 add 上装+下装+鞋履，"
-                "按需外套/配饰），随后 CANDIDATE_READY 提交。不要再重复搜索或查证同一事实。"
+                "立即用 modify_outfit 组合一套完整搭配（二选一：一次 add 连衣裙/连体装"
+                "+鞋履，或上装+下装+鞋履；再按用户要求添加外套/配饰），随后 "
+                "CANDIDATE_READY 提交。不要继续寻找衣橱能力索引显示为 0 的槽位，"
+                "也不要重复搜索或查证同一事实。"
             )
             return {
                 "fresh_research_nudged": True,
@@ -200,7 +203,14 @@ def build_stylist_subgraph(runtime: AgentRuntime):
             return {
                 "trajectory_protocol_errors": state.get("trajectory_protocol_errors", 0) + 1,
                 "tool_observations": state.get("tool_observations", [])
-                + [{"tool": "__protocol__", "observation": result.protocol_error}],
+                + [
+                    {
+                        "tool": "__protocol__",
+                        "observation": result.protocol_error,
+                        "error_code": result.error_code,
+                        "retryable": result.retryable,
+                    }
+                ],
             }
 
         trace = state.get("trace", []) + [result.trace]
@@ -214,8 +224,7 @@ def build_stylist_subgraph(runtime: AgentRuntime):
             # order (e.g. search_wardrobe + inspect_outfit in one model turn).
             return {
                 "pending_tools": [
-                    {"name": item.name, "arguments": item.arguments}
-                    for item in result.tool_uses
+                    {"name": item.name, "arguments": item.arguments} for item in result.tool_uses
                 ],
                 "trace": trace,
                 "trajectory_protocol_errors": 0,
@@ -255,7 +264,14 @@ def build_stylist_subgraph(runtime: AgentRuntime):
         )
         updates: dict[str, Any] = {
             "tool_observations": state.get("tool_observations", [])
-            + [{"tool": pending["name"], "observation": tool_result.observation}],
+            + [
+                {
+                    "tool": pending["name"],
+                    "observation": tool_result.observation,
+                    "error_code": tool_result.error_code,
+                    "retryable": tool_result.retryable,
+                }
+            ],
             "trajectory_step_count": state.get("trajectory_step_count", 0) + 1,
             "pending_tools": remaining,
         }

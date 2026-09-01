@@ -113,7 +113,8 @@ def _full_state() -> dict:
 
 def test_full_stylist_bundle_has_all_h3a_sections() -> None:
     _, bundle = _bundle_for(_full_state())
-    text = bundle.system_text
+    text = bundle.model_user_message
+    assert "【环境定位】" not in bundle.system_text
     assert "【环境定位】" in text
     assert "【偏好上下文】" in text
     assert "【长期偏好】" in text
@@ -131,7 +132,7 @@ def test_full_stylist_bundle_has_all_h3a_sections() -> None:
 
 def test_full_bundle_stays_under_guard_budget() -> None:
     _, bundle = _bundle_for(_full_state())
-    assert len(bundle.system_text) < 40_000  # the old wardrobe dump was ~262 K
+    assert len(bundle.system_text) + len(bundle.model_user_message) < 40_000
     result = ContextGuard(char_budget=40_000).check(bundle)
     assert result.status == CONTEXT_OK
 
@@ -139,7 +140,7 @@ def test_full_bundle_stays_under_guard_budget() -> None:
 def test_wardrobe_segment_stays_tiny() -> None:
     # the quantified root-cause fix: ~262 K item dump → ~1 K capability index
     _, bundle = _bundle_for(_full_state())
-    text = bundle.system_text
+    text = bundle.model_user_message
     start = text.index("衣橱：")
     end = text.find("\n", start)
     segment = text[start:end] if end != -1 else text[start:]
@@ -154,6 +155,6 @@ def test_layered_preferences_from_retriever_render_in_order() -> None:
         _pref(polarity="negative", confidence=0.8, value="运动鞋"),
     ]
     _, bundle = _bundle_for(state)
-    text = bundle.system_text
+    text = bundle.model_user_message
     assert text.index("【短期偏好】") < text.index("【长期偏好】")
     assert text.index("【长期偏好】") < text.index("【避免】")

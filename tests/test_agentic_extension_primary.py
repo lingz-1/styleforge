@@ -212,21 +212,6 @@ def test_style_advice_primary_end_to_end(db_dsn: str) -> None:
     assert route.task_type is TaskType.STYLE_ADVICE
     llm = FakeLlm(
         [
-            {"decision_summary": "识别为风格建议任务", "goal": "给出风格建议", "next_agent": "EXTENSION"},
-            # one grounding tool call, then READY
-            (
-                {"decision_summary": "补充知识检索", "control": "CONTINUE"},
-                [
-                    {
-                        "name": "search_knowledge",
-                        "arguments": {
-                            "query": str((agent1.resolved_target or {}).get("style") or ""),
-                            "kind": "style",
-                        },
-                    }
-                ],
-            ),
-            {"decision_summary": "事实足够", "control": "READY"},
             {"status": "completed", "summary": "风格建议", "result": _style_result(agent1)},
             {"evidence": []},  # memory extraction (outside the harness proxy)
         ]
@@ -243,9 +228,12 @@ def test_style_advice_primary_end_to_end(db_dsn: str) -> None:
     assert result["principles"]
     assert payload["selected_subgraph"] == "agentic_harness"
     assert payload["agents"] == {"harness": "styleforge_harness"}
-    # coordinator + extension(continue) + extension(ready) + closing = 4.
-    assert payload["llm_call_count"] == 4
+    assert payload["llm_call_count"] == 1  # complete facts route straight to closing
     assert payload["agentic_outcome"]["extension_result"]["status"] == "completed"
+    assert "结果综合模式" in llm.calls[0]["system"]
+    assert "禁止输出 control" in llm.calls[0]["system"]
+    assert "【本轮目标 JSON Schema】" in llm.calls[0]["user"]
+    assert '"principles"' in llm.calls[0]["user"]
 
 
 def test_item_advice_primary_end_to_end(db_dsn: str) -> None:
@@ -260,8 +248,6 @@ def test_item_advice_primary_end_to_end(db_dsn: str) -> None:
     assert agent1.facts.get("anchor_item")  # deterministic anchor resolved from wardrobe
     llm = FakeLlm(
         [
-            {"decision_summary": "识别为单品建议任务", "goal": "给出单品搭配建议", "next_agent": "EXTENSION"},
-            {"decision_summary": "事实足够", "control": "READY"},
             {"status": "completed", "summary": "单品搭配建议", "result": _item_result(agent1)},
             {"evidence": []},
         ]
@@ -278,8 +264,49 @@ def test_item_advice_primary_end_to_end(db_dsn: str) -> None:
     anchor_id = result["anchor_item"]["item_id"]
     assert result["sample_outfits"][0]["item_ids"][0] == anchor_id
     assert result["sample_outfits"][0]["item_ids"][0] in result["sample_outfits"][0]["item_ids"]
-    assert payload["llm_call_count"] == 3  # coordinator + extension + closing
+    assert payload["llm_call_count"] == 1  # direct closing; no coordinator planning
     assert payload["agentic_outcome"]["extension_result"]["status"] == "completed"
+
+
+def test_item_advice_closing_uses_grounded_fallback_after_false_infeasible(
+    db_dsn: str,
+) -> None:
+    database_path = _seed(db_dsn)
+    task_input = TaskExecutionInput(
+        user_id="u",
+        request="黑色夹克怎么搭配",
+        requested_task_type=TaskType.ITEM_ADVICE,
+    )
+    route, agent1 = _analyzed(database_path, task_input)
+    assert route.task_type is TaskType.ITEM_ADVICE
+    assert agent1.facts.get("anchor_item")
+    assert any((agent1.facts.get("compatible_items_by_slot") or {}).values())
+    false_infeasible = {
+        "status": "infeasible",
+        "summary": "无法搭配",
+        "result": {
+            "status": "infeasible",
+            "title": "单品搭配",
+            "summary": "无法搭配",
+        },
+    }
+    llm = FakeLlm(
+        [
+            false_infeasible,
+            {"evidence": []},
+        ]
+    )
+    payload = _workflow(database_path, llm).execute(task_input)
+
+    assert payload["status"] == "completed"
+    assert payload["llm_call_count"] == 1
+    assert payload["result"]["generation_mode"] == "deterministic_grounded_fallback"
+    assert payload["result"]["sample_outfits"]
+    anchor_id = agent1.facts["anchor_item"]["item_id"]
+    assert all(
+        anchor_id in outfit["item_ids"]
+        for outfit in payload["result"]["sample_outfits"]
+    )
 
 
 def test_wardrobe_compatibility_primary_end_to_end(db_dsn: str) -> None:
@@ -298,11 +325,14 @@ def test_wardrobe_compatibility_primary_end_to_end(db_dsn: str) -> None:
     )
     route, agent1 = _analyzed(database_path, task_input)
     assert route.task_type is TaskType.WARDROBE_COMPATIBILITY
+    draft = _compatibility_result(agent1)
+    draft["candidate_slot"] = "wrong-slot"
+    draft["compatible_items_by_slot"] = {
+        "one_piece": [{"item_id": "candidate-preview", "name": "transient"}]
+    }
     llm = FakeLlm(
         [
-            {"decision_summary": "识别为兼容性评估", "goal": "评估新品兼容性", "next_agent": "EXTENSION"},
-            {"decision_summary": "事实足够", "control": "READY"},
-            {"status": "completed", "summary": "兼容性评估", "result": _compatibility_result(agent1)},
+            {"status": "completed", "summary": "兼容性评估", "result": draft},
             {"evidence": []},
         ]
     )
@@ -317,7 +347,13 @@ def test_wardrobe_compatibility_primary_end_to_end(db_dsn: str) -> None:
     assert result["recommendation"] in ("recommended", "consider", "not_recommended")
     assert 0 <= result["compatibility_score"] <= 100
     assert result["candidate_item"]["item_id"] == "candidate-preview"
-    assert payload["llm_call_count"] == 3
+    assert result["candidate_slot"] == agent1.facts["candidate_slot"]
+    assert all(
+        item["item_id"] != "candidate-preview"
+        for items in result["compatible_items_by_slot"].values()
+        for item in items
+    )
+    assert payload["llm_call_count"] == 1
     assert payload["agentic_outcome"]["extension_result"]["status"] == "completed"
 
 
@@ -330,11 +366,12 @@ def test_wardrobe_gap_primary_end_to_end(db_dsn: str) -> None:
     )
     route, agent1 = _analyzed(database_path, task_input)
     assert route.task_type is TaskType.WARDROBE_GAP
+    draft = _gap_result(agent1)
+    draft["wardrobe_item_count"] = 999
+    draft["slot_counts"] = {"hallucinated": 999}
     llm = FakeLlm(
         [
-            {"decision_summary": "识别为衣橱缺口分析", "goal": "分析衣橱缺口", "next_agent": "EXTENSION"},
-            {"decision_summary": "事实足够", "control": "READY"},
-            {"status": "completed", "summary": "衣橱缺口分析", "result": _gap_result(agent1)},
+            {"status": "completed", "summary": "衣橱缺口分析", "result": draft},
             {"evidence": []},
         ]
     )
@@ -348,7 +385,9 @@ def test_wardrobe_gap_primary_end_to_end(db_dsn: str) -> None:
     assert result["status"] == "completed"
     assert result["gap_count"] == len(result["gaps"])
     assert result["analysis_mode"] in ("targeted", "general")
-    assert payload["llm_call_count"] == 3
+    assert result["wardrobe_item_count"] == agent1.facts["wardrobe_item_count"]
+    assert result["slot_counts"] == agent1.facts["slot_counts"]
+    assert payload["llm_call_count"] == 1
     assert payload["agentic_outcome"]["extension_result"]["status"] == "completed"
 
 

@@ -239,10 +239,11 @@ User Request → Task Router → TaskType → 选择子图
 
 ### 6.2 P2.5 路由评估切片（2026-08-09）
 
-- `evals/cases/task_routing.json` 固化 42 条中英文任务用例，六类任务各 7 条，避免类别不均衡掩盖少数类错误。
+- `evals/cases/task_routing.json` 已扩为 60 条中英文任务用例，六类任务各 10 条，避免类别不均衡掩盖少数类错误。
 - `evals/runners/evaluate_task_routing.py` 输出总准确率、逐类准确率、混淆矩阵、失败样本和评估限制，并将报告写入 `artifacts/evaluation/`。
 - `evals/` 与运行时 `styleforge/core/scoring.py` 保持分离；路由准确率不能替代五维穿搭质量。
-- 路由 runner 已验证 42/42 正确，六类逐类准确率均为 100%，失败 0。P2.5 尚未全部完成：Wardrobe Fixtures 和五维固定穿搭 benchmark 仍待实现。
+- 路由 runner 已验证 60/60 正确，六类逐类准确率均为 100%，失败 0。
+- Wardrobe Fixtures 已覆盖通勤、雨天、运动、有限衣柜、无解、连衣裙与 Polyvore 真实商品；推荐质量集共 60 条，其中 42 条无 LLM/GPU 子集已接入本地质量门禁和 CI，18 条 configured 用例覆盖六类任务并保留显式运行。另有 7 条 Polyvore 官方商品真实验收用例，六类任务 DeepSeek 基线 7/7 通过；权威任务路由、one-piece 完整结构、通用 accessory 物理结构和 grounded recovery 均已进入回归。
 
 ### 6.3 五类扩展业务实现记录（2026-08-09）
 

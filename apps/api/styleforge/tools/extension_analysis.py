@@ -103,6 +103,31 @@ OUTFIT_TEMPLATES = {
     "other": (("top", "bottom", "footwear"), ("one_piece", "footwear")),
 }
 
+_REQUESTED_SUPPORT_SLOT_TERMS = {
+    "top": ("上衣", "衬衫", "毛衣", "针织衫"),
+    "bottom": ("下装", "裤子", "半身裙"),
+    "footwear": ("鞋", "靴"),
+    "outerwear": ("外套", "外搭", "开衫", "风衣", "大衣", "夹克"),
+    "bag": ("包", "手拿包", "托特包"),
+    "accessory": ("配饰", "首饰", "耳环", "耳饰", "项链", "手链", "戒指", "帽子"),
+}
+
+
+def _requested_support_slots(request: str, anchor_slot: str) -> list[str]:
+    """Extract only support slots the user explicitly names.
+
+    Anchor words are deliberately narrower than the general router vocabulary:
+    a request containing ``连衣裙`` must not accidentally request a bottom slot.
+    The returned order follows the stable slot map so prompts and reports stay
+    reproducible.
+    """
+    text = request.strip().lower()
+    return [
+        slot
+        for slot, terms in _REQUESTED_SUPPORT_SLOT_TERMS.items()
+        if slot != anchor_slot and any(term in text for term in terms)
+    ]
+
 
 def _knowledge_match_score(item, entry: dict[str, Any]) -> tuple[float, list[str]]:
     score = 0.0
@@ -530,10 +555,15 @@ def _analyze_style_or_item(
             clarification = "请说明具体单品的品类、颜色，或从衣橱中选择一件单品。"
             anchor_source = "unresolved"
     compatible: dict[str, list[dict[str, Any]]] = {}
+    requested_support_slots: list[str] = []
     if anchor is not None:
         anchor_slot = infer_slot(anchor.item_type)
         templates = OUTFIT_TEMPLATES.get(anchor_slot, ())
         slots = {slot for template in templates for slot in template}
+        requested_support_slots = _requested_support_slots(
+            task_input.request, anchor_slot
+        )
+        slots.update(requested_support_slots)
         compatible = group_compatible_items(anchor, wardrobe, slots)
     facts = {
         "knowledge_entries": entries,
@@ -542,6 +572,7 @@ def _analyze_style_or_item(
         "anchor_source": anchor_source,
         "anchor_candidates": [item_summary(item) for item in anchors],
         "compatible_items_by_slot": compatible,
+        "requested_support_slots": requested_support_slots,
     }
     candidate_ids = [
         str(item["item_id"])
@@ -559,7 +590,11 @@ def _analyze_style_or_item(
             "color": extract_color(task_input.request),
             "anchor_source": anchor_source,
         },
-        constraints={"lock_anchor_item": True, "wardrobe_only_for_supporting_items": True},
+        constraints={
+            "lock_anchor_item": True,
+            "wardrobe_only_for_supporting_items": True,
+            "required_support_slots": requested_support_slots,
+        },
         facts=facts,
         evidence=evidence,
         candidate_item_ids=list(dict.fromkeys(candidate_ids)),
@@ -669,6 +704,43 @@ def _target_elements(entry: dict[str, Any]) -> list[dict[str, Any]]:
     return elements
 
 
+def _structural_gap_elements(request: str) -> list[dict[str, Any]]:
+    """Return narrowly scoped, scenario-specific wardrobe requirements."""
+    normalized = request.strip().lower()
+    commute_markers = ("通勤", "上班", "职场", "office", "commute", "workwear")
+    if not any(marker in normalized for marker in commute_markers):
+        return []
+    return [
+        {
+            "id": "slot:top",
+            "label": "通勤基础上装",
+            "item_types": ["top"],
+            "subtypes": [],
+            "colors": [],
+            "priority": "high",
+            "suggestion": "补充衬衫、针织衫等可重复组合的通勤基础上装",
+        },
+        {
+            "id": "slot:bottom",
+            "label": "通勤基础下装",
+            "item_types": ["pants", "skirt", "shorts"],
+            "subtypes": [],
+            "colors": [],
+            "priority": "high",
+            "suggestion": "补充西裤、半身裙等可重复组合的通勤基础下装",
+        },
+        {
+            "id": "slot:footwear",
+            "label": "通勤鞋履",
+            "item_types": ["shoes"],
+            "subtypes": [],
+            "colors": [],
+            "priority": "medium",
+            "suggestion": "补充适合长时间穿着的通勤鞋履",
+        },
+    ]
+
+
 def _analyze_gap(
     task_input: TaskExecutionInput,
     route: TaskRoute,
@@ -684,6 +756,14 @@ def _analyze_gap(
     missing_elements: list[dict[str, Any]] = []
     if entries:
         target_elements = _target_elements(entries[0])
+    structural_elements = _structural_gap_elements(task_input.request)
+    existing_element_ids = {str(element.get("id") or "") for element in target_elements}
+    target_elements.extend(
+        element
+        for element in structural_elements
+        if str(element.get("id") or "") not in existing_element_ids
+    )
+    if target_elements:
         for element in target_elements:
             item_types = set(element.get("item_types", []))
             subtypes = set(element.get("subtypes", []))
@@ -705,6 +785,8 @@ def _analyze_gap(
             else:
                 missing_elements.append(payload)
     target_title = str(entries[0]["title"]) if entries else "整体衣橱覆盖"
+    if structural_elements and not entries:
+        target_title = "日常通勤结构覆盖"
     return Agent1TaskOutput(
         task_type=route.task_type,
         intent_summary=(
@@ -713,7 +795,7 @@ def _analyze_gap(
             else "分析整体衣橱的完整搭配和场景覆盖"
         ),
         resolved_target={
-            "analysis_mode": "targeted" if entries else "general",
+            "analysis_mode": "targeted" if entries or structural_elements else "general",
             "style": target_title if entries else "",
             "knowledge_entry_ids": [entry["id"] for entry in entries],
         },

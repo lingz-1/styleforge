@@ -119,6 +119,7 @@ class _FakeEnvironmentWithFacts:
 
 # ── Stylist subgraph ────────────────────────────────────────────────────────
 
+
 def test_stylist_modify_roundtrip_returns_completed() -> None:
     llm = FakeLlm(
         [
@@ -128,7 +129,12 @@ def test_stylist_modify_roundtrip_returns_completed() -> None:
     )
     subgraph = build_stylist_subgraph(_runtime(llm))
     out = subgraph.invoke(
-        {"request": "下周看剧穿什么", "goal": "看剧", "base_draft": _base_draft(), "working_draft": _base_draft()}
+        {
+            "request": "下周看剧穿什么",
+            "goal": "看剧",
+            "base_draft": _base_draft(),
+            "working_draft": _base_draft(),
+        }
     )
 
     assert out["handoff_result"].status == "COMPLETED"
@@ -151,7 +157,12 @@ def test_stylist_need_user_returns_needs_clarification_envelope() -> None:
     )
     subgraph = build_stylist_subgraph(_runtime(llm))
     out = subgraph.invoke(
-        {"request": "看剧", "goal": "看剧", "base_draft": _base_draft(), "working_draft": _base_draft()}
+        {
+            "request": "看剧",
+            "goal": "看剧",
+            "base_draft": _base_draft(),
+            "working_draft": _base_draft(),
+        }
     )
 
     # Frozen #20: the subgraph only RETURNs the envelope; it never jumps to a
@@ -211,10 +222,7 @@ def test_stylist_step_cap_force_submits_draft_with_items() -> None:
     # hand. The cap now FORCES a CANDIDATE_READY instead of discarding it as
     # PROTOCOL_ERROR — the Main Graph's gates validate whatever was built.
     llm = FakeLlm(
-        [
-            ({"decision_summary": "继续", "control": "CONTINUE"}, [_MODIFY_TOP_1])
-        ]
-        * MAX_STYLIST_STEPS
+        [({"decision_summary": "继续", "control": "CONTINUE"}, [_MODIFY_TOP_1])] * MAX_STYLIST_STEPS
     )
     subgraph = build_stylist_subgraph(_runtime(llm))
     out = subgraph.invoke(
@@ -233,10 +241,7 @@ def test_stylist_step_cap_protocol_error_on_empty_draft() -> None:
     # candidate. The fresh-research nudge fires once mid-run but the script keeps
     # ignoring it, so the cap closes the subgraph.
     llm = FakeLlm(
-        [
-            ({"decision_summary": "查看", "control": "CONTINUE"}, [_INSPECT])
-        ]
-        * MAX_STYLIST_STEPS
+        [({"decision_summary": "查看", "control": "CONTINUE"}, [_INSPECT])] * MAX_STYLIST_STEPS
     )
     subgraph = build_stylist_subgraph(_runtime(llm))
     out = subgraph.invoke(
@@ -336,6 +341,7 @@ def test_stylist_revision_budget_forces_resubmit() -> None:
 
 # ── Main Graph validation chain ─────────────────────────────────────────────
 
+
 def test_main_happy_path_stages_three_candidates() -> None:
     script: list[Any] = []
     for index in range(3):
@@ -347,7 +353,12 @@ def test_main_happy_path_stages_three_candidates() -> None:
     llm = FakeLlm(script)
     graph = build_h1b_main_graph(_runtime(llm), environment=_FakeEnvironment(), target_candidates=3)
     out = graph.invoke(
-        {"run_id": "run-happy", "request": "下周看剧穿什么", "goal": "看剧", "base_draft": _base_draft()}
+        {
+            "run_id": "run-happy",
+            "request": "下周看剧穿什么",
+            "goal": "看剧",
+            "base_draft": _base_draft(),
+        }
     )
 
     assert out["status"] == "done"
@@ -382,21 +393,21 @@ def test_main_bootstrap_seeds_wardrobe_index_into_stylist_prompt() -> None:
         ]
     )
     graph = build_h1b_main_graph(_runtime(llm), environment=env, target_candidates=1)
-    out = graph.invoke(
-        {"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()}
-    )
+    out = graph.invoke({"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()})
 
     assert out["status"] == "done"
     assert len(out["candidates"]) == 1
     system = llm.calls[0]["system"]
-    # The facts are part of the runtime-context layer (system_text), not the
-    # D-layer user message — the Stylist's first call must see the index.
-    assert "衣橱：" in system
-    assert "共 2 件" in system
-    assert "品类 top 2" in system
+    user = llm.calls[0]["user"]
+    # The Stylist sees facts inside an untrusted runtime-data boundary, never
+    # in the system role.
+    assert "衣橱：" not in system
+    assert "衣橱：" in user
+    assert "共 2 件" in user
+    assert "品类 top 2" in user
     # Concrete ids no longer ride in the prompt; search_wardrobe fetches them.
-    assert "top-1" not in system
-    assert "top-2" not in system
+    assert "top-1" not in user
+    assert "top-2" not in user
 
 
 def test_main_reset_to_base_draft_not_previous_candidate() -> None:
@@ -415,9 +426,7 @@ def test_main_reset_to_base_draft_not_previous_candidate() -> None:
         ]
     )
     graph = build_h1b_main_graph(_runtime(llm), environment=_FakeEnvironment(), target_candidates=2)
-    out = graph.invoke(
-        {"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()}
-    )
+    out = graph.invoke({"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()})
 
     assert len(out["candidates"]) == 2
     assert set(out["working_draft"].outfit.item_ids) == {"top-2"}
@@ -435,9 +444,7 @@ def test_main_environment_fail_reenters_stylist_with_feedback() -> None:
     )
     environment = _FakeEnvironment(fail_first=1)
     graph = build_h1b_main_graph(_runtime(llm), environment=environment, target_candidates=1)
-    out = graph.invoke(
-        {"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()}
-    )
+    out = graph.invoke({"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()})
 
     assert out["status"] == "done"
     assert len(out["candidates"]) == 1
@@ -460,9 +467,7 @@ def test_main_critic_fail_feeds_back_and_reenters_stylist() -> None:
         script.append(_OK)
     llm = FakeLlm(script)
     graph = build_h1b_main_graph(_runtime(llm), environment=_FakeEnvironment(), target_candidates=3)
-    out = graph.invoke(
-        {"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()}
-    )
+    out = graph.invoke({"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()})
 
     assert out["status"] == "done"
     assert len(out["candidates"]) == 3  # the failed first attempt was never staged
@@ -484,9 +489,7 @@ def test_main_critic_replan_budget_accepts_degraded_candidate() -> None:
         script.append({"approved": False, "issues": ["与已存候选重复"], "feedback": "换个方向"})
     llm = FakeLlm(script)
     graph = build_h1b_main_graph(_runtime(llm), environment=_FakeEnvironment(), target_candidates=1)
-    out = graph.invoke(
-        {"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()}
-    )
+    out = graph.invoke({"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()})
 
     assert out["status"] == "done"
     assert len(out["candidates"]) == 1  # accepted despite 3 rejections
@@ -494,6 +497,8 @@ def test_main_critic_replan_budget_accepts_degraded_candidate() -> None:
     # The forced accept is logged honestly — the staged entry is
     # DEGRADED_ACCEPTED, never a fabricated PASS.
     assert out["candidates"][0]["status"] == "DEGRADED_ACCEPTED"
+    assert out["candidates"][0]["environment_valid"] is True
+    assert out["candidates"][0]["review"]["approved"] is False
 
 
 def test_main_clarification_sets_status_and_question() -> None:
@@ -507,9 +512,7 @@ def test_main_clarification_sets_status_and_question() -> None:
         ]
     )
     graph = build_h1b_main_graph(_runtime(llm), environment=_FakeEnvironment(), target_candidates=3)
-    out = graph.invoke(
-        {"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()}
-    )
+    out = graph.invoke({"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()})
 
     # Frozen #20: the ClarificationNode is a MAIN-Graph node; the question
     # comes from AgentHandoffResult.clarification.question.
@@ -522,9 +525,7 @@ def test_main_protocol_error_ends_with_agent_protocol_error() -> None:
     # the consecutive-failure cap (> 5) closes the subgraph and the Main Graph stops.
     llm = FakeLlm([{"control": "CONTINUE"}] * 12)
     graph = build_h1b_main_graph(_runtime(llm), environment=_FakeEnvironment(), target_candidates=3)
-    out = graph.invoke(
-        {"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()}
-    )
+    out = graph.invoke({"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()})
 
     assert out["status"] == "agent_protocol_error"
     assert out["handoff_result"].status == "PROTOCOL_ERROR"
@@ -541,9 +542,7 @@ def test_main_state_has_no_private_trajectory() -> None:
         ]
     )
     graph = build_h1b_main_graph(_runtime(llm), environment=_FakeEnvironment(), target_candidates=1)
-    out = graph.invoke(
-        {"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()}
-    )
+    out = graph.invoke({"run_id": "r", "request": "x", "goal": "g", "base_draft": _base_draft()})
 
     assert "tool_observations" not in out
     assert "trace" not in out
@@ -566,7 +565,12 @@ def test_critic_speaks_chat_json_with_assembled_bundle() -> None:
     )
     graph = build_h1b_main_graph(_runtime(llm), environment=_FakeEnvironment(), target_candidates=1)
     graph.invoke(
-        {"run_id": "r", "request": "下周看剧 DYNFACT_SHOW", "goal": "看剧", "base_draft": _base_draft()}
+        {
+            "run_id": "r",
+            "request": "下周看剧 DYNFACT_SHOW",
+            "goal": "看剧",
+            "base_draft": _base_draft(),
+        }
     )
 
     json_calls = [call for call in llm.calls if "json_schema" in call]

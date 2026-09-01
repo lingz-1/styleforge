@@ -18,7 +18,8 @@ def outfit_text(outfit: OutfitSnapshot | None) -> str:
     if outfit is None:
         return "（无）"
     items = [
-        f"{item.item_id}({item.item_type or '?'}/{item.color or '?'})"
+        f"{item.item_id}({item.item_type or '?'}/{item.color or '?'}"
+        f"/features={','.join(item.features) or '-'})"
         for item in outfit.items
     ]
     if not items:

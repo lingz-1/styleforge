@@ -28,7 +28,12 @@ vision = [
   "torch>=2.2",
   "transformers>=4.45",
 ]
-dev = ["httpx>=0.27", "pytest>=8.0", "ruff>=0.6"]
+mcp = [
+  "mcp>=1.29,<2",
+  "mcp-server-fetch>=2026.8.18,<2027",
+  "mcp-server-time>=2026.8.18,<2027",
+]
+dev = ["httpx>=0.27", "httpx2>=2.12,<3", "pytest>=8.0", "pyyaml>=6.0", "ruff>=0.6"]
 
 [project.scripts]
 styleforge-audit = "styleforge.pipelines.audit_dataset:main"
@@ -43,6 +48,7 @@ styleforge-api = "styleforge.api:main"
 styleforge-seed-wardrobe = "styleforge.pipelines.seed_balanced_wardrobe:main"
 styleforge-import-wardrobe = "styleforge.pipelines.import_wardrobe_orders:main"
 styleforge-knowledge-index = "styleforge.knowledge.indexer:main"
+styleforge-mcp = "styleforge.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["apps/api"]

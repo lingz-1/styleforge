@@ -46,6 +46,7 @@ class AgentContextView:
     """
 
     user_request: bool = False
+    task_type: bool = False
     goal: bool = False  # split from user_request: a fixed node may need the goal but not the raw request
     task_state: bool = False
     plan: bool = False
@@ -69,6 +70,7 @@ class AgentContextView:
 _VIEWS: dict[str, AgentContextView] = {
     AGENT_COORDINATOR: AgentContextView(
         user_request=True,
+        task_type=True,
         task_state=True,
         plan=True,
         research_evidence=True,

@@ -23,9 +23,14 @@ from urllib.request import Request
 
 
 from styleforge.models.task import TaskExecutionInput
+from styleforge.agentic.graph.main import (
+    _desired_features_for_request,
+    _request_needs_outerwear,
+)
 from styleforge.orchestration.task_router import TaskType
 from styleforge.repositories.catalog_repository import upsert_items
 from styleforge.repositories.database import database_session, initialize_database
+from styleforge.repositories.task_run_repository import get_task_run
 from styleforge.repositories.wardrobe_repository import add_items
 from styleforge.tools.weather.schemas import ResolvedLocation, WeatherDay, WeatherFacts
 from styleforge.tools.web_search import TavilySearchProvider
@@ -33,6 +38,18 @@ from styleforge.workflow.task_workflow import MultiTaskWorkflow
 
 from tests.helpers import make_item
 from tests.llm.fake_llm import FakeLlm
+
+
+def test_recovery_intent_features_cover_quality_benchmark_constraints() -> None:
+    commute = _desired_features_for_request("见客户，鞋要适合久站")
+    rain = _desired_features_for_request("明天有雨而且降温，要防水防滑")
+    sport = _desired_features_for_request("今晚打篮球，给我一套能直接上场的穿搭")
+
+    assert {"formal", "comfortable"} <= commute
+    assert {"waterproof", "non_slip", "warm"} <= rain
+    assert {"sport", "breathable", "cushioned", "non_slip"} <= sport
+    assert _request_needs_outerwear("明天有雨而且降温", rain) is True
+    assert _request_needs_outerwear("普通室内通勤", commute) is False
 
 
 def _seed(database_path: str) -> None:
@@ -45,6 +62,35 @@ def _seed(database_path: str) -> None:
         make_item("shoes-1", "shoes", "黑色皮鞋", "black"),
         make_item("shoes-2", "shoes", "白色运动鞋", "white"),
         make_item("coat-1", "outwear", "灰色大衣", "gray"),
+    ]
+    with database_session(database_path) as connection:
+        upsert_items(connection, items, "test")
+        add_items(connection, "u", [item.item_id for item in items])
+
+
+def _add_wedding_items(database_path: str) -> None:
+    items = [
+        make_item(
+            "dress-1",
+            "dress",
+            "Lace wedding guest dress",
+            "navy",
+            features=("wedding", "elegant"),
+        ),
+        make_item(
+            "wedding-shoes",
+            "shoes",
+            "Formal wedding sandals",
+            "gold",
+            features=("wedding", "formal"),
+        ),
+        make_item(
+            "accessory-1",
+            "accessory",
+            "Wedding hair accessory",
+            "gold",
+            features=("wedding",),
+        ),
     ]
     with database_session(database_path) as connection:
         upsert_items(connection, items, "test")
@@ -118,6 +164,30 @@ def _add_ops(*items: tuple[str, str]) -> dict[str, Any]:
 
 
 _APPROVE = {"approved": True, "issues": [], "feedback": "方案符合音乐剧正式场合要求"}
+
+_CRITIC_SCORES: list[dict[str, int]] = [
+    {
+        "request_relevance": 9,
+        "request_specificity": 9,
+        "outfit_coordination": 8,
+        "wearability": 8,
+        "freshness": 7,
+    },
+    {
+        "request_relevance": 6,
+        "request_specificity": 6,
+        "outfit_coordination": 7,
+        "wearability": 9,
+        "freshness": 9,
+    },
+    {
+        "request_relevance": 8,
+        "request_specificity": 8,
+        "outfit_coordination": 9,
+        "wearability": 7,
+        "freshness": 8,
+    },
+]
 
 
 class _FakeWeatherProvider:
@@ -221,7 +291,9 @@ def _build_script() -> list[Any]:
         _EVIDENCE,  # Evidence Synthesizer (chat_json)
         {"decision_summary": "开始搭配", "goal": _GOAL, "next_agent": "STYLIST"},
     ]
-    for tool_args in _CANDIDATE_TOOLS:
+    for tool_args, dimension_scores in zip(
+        _CANDIDATE_TOOLS, _CRITIC_SCORES, strict=True
+    ):
         script.extend(
             [
                 (
@@ -229,11 +301,303 @@ def _build_script() -> list[Any]:
                     [{"name": "modify_outfit", "arguments": tool_args}],
                 ),
                 {"decision_summary": "完成", "control": "CANDIDATE_READY"},
-                dict(_APPROVE),  # critic (chat_json)
+                {**_APPROVE, "dimension_scores": dimension_scores},
             ]
         )
     script.append({"evidence": []})  # memory extraction (chat_json, outside proxy)
     return script
+
+
+def test_simple_recommend_uses_authoritative_route_and_skips_coordinator(
+    db_dsn: str,
+) -> None:
+    initialize_database(db_dsn)
+    _seed(db_dsn)
+    llm = FakeLlm(
+        [
+            (
+                {"decision_summary": "组合一套日常搭配", "control": "CONTINUE"},
+                [{"name": "modify_outfit", "arguments": _CANDIDATE_TOOLS[0]}],
+            ),
+            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
+            {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
+            {"evidence": []},
+        ]
+    )
+    workflow = _workflow(
+        db_dsn,
+        llm,
+        web_provider=_web_provider(),
+        weather_provider=_FakeWeatherProvider(),
+    )
+
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="从衣柜里推荐一套日常穿搭",
+            requested_task_type=TaskType.OUTFIT_RECOMMEND,
+            max_results=1,
+        )
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["llm_call_count"] == 3
+    assert len(payload["result"]["recommendations"]) == 1
+    assert payload["agentic_outcome"]["task_type"] == "outfit_recommend"
+
+
+def test_coordinator_cannot_misroute_recommend_to_extension(db_dsn: str) -> None:
+    initialize_database(db_dsn)
+    _seed(db_dsn)
+    llm = FakeLlm(
+        [
+            {
+                "decision_summary": "错误地准备交给扩展任务",
+                "goal": "生成婚礼穿搭",
+                "next_agent": "EXTENSION",
+            },
+            (
+                {"decision_summary": "组合婚礼穿搭", "control": "CONTINUE"},
+                [{"name": "modify_outfit", "arguments": _CANDIDATE_TOOLS[0]}],
+            ),
+            {"decision_summary": "提交", "control": "CANDIDATE_READY"},
+            {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
+            {"evidence": []},
+        ]
+    )
+    workflow = _workflow(
+        db_dsn,
+        llm,
+        web_provider=_web_provider(),
+        weather_provider=_FakeWeatherProvider(),
+    )
+
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="今天去北京参加婚礼，推荐一套穿搭",
+            requested_task_type=TaskType.OUTFIT_RECOMMEND,
+            max_results=1,
+        )
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["llm_call_count"] == 4
+    assert payload["agentic_outcome"]["handoff_result"].trace_summary["agent"] == "stylist"
+    assert not payload["agentic_outcome"].get("extension_validation_failures")
+
+
+def test_empty_stylist_protocol_failure_recovers_grounded_candidate(
+    db_dsn: str,
+) -> None:
+    initialize_database(db_dsn)
+    _seed(db_dsn)
+    _add_wedding_items(db_dsn)
+    llm = FakeLlm(
+        [
+            (
+                {"decision_summary": "先加入上装", "control": "CONTINUE"},
+                [
+                    {
+                        "name": "modify_outfit",
+                        "arguments": _add_ops(("top-1", "upper_body")),
+                    }
+                ],
+            ),
+            *([{"control": "CONTINUE"}] * 12),
+            {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
+            {"evidence": []},
+        ]
+    )
+    workflow = _workflow(db_dsn, llm)
+
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="从衣柜里推荐一套婚礼宾客穿搭，要有连衣裙、鞋履和配饰",
+            requested_task_type=TaskType.OUTFIT_RECOMMEND,
+            max_results=1,
+        )
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["llm_call_count"] == 14
+    recommendation = payload["result"]["recommendations"][0]
+    assert recommendation["acceptance_status"] == "DEGRADED_ACCEPTED"
+    assert {"one_piece", "footwear", "accessory"} <= set(
+        recommendation["slot_items"]
+    )
+
+
+def test_severe_critic_intent_mismatch_rebuilds_from_grounded_features(
+    db_dsn: str,
+) -> None:
+    initialize_database(db_dsn)
+    _seed(db_dsn)
+    _add_wedding_items(db_dsn)
+    severe_reject = {
+        "approved": False,
+        "issues": ["候选与婚礼请求不相关"],
+        "feedback": "重新选择婚礼单品",
+        "dimension_scores": {
+            "request_relevance": 2,
+            "request_specificity": 2,
+            "outfit_coordination": 5,
+            "wearability": 6,
+            "freshness": 5,
+        },
+    }
+    llm = FakeLlm(
+        [
+            (
+                {"decision_summary": "组合了错误场景", "control": "CONTINUE"},
+                [{"name": "modify_outfit", "arguments": _CANDIDATE_TOOLS[0]}],
+            ),
+            {"decision_summary": "提交", "control": "CANDIDATE_READY"},
+            severe_reject,
+            {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
+            {"evidence": []},
+        ]
+    )
+    workflow = _workflow(db_dsn, llm)
+
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="推荐一套婚礼宾客穿搭，要有连衣裙、鞋履和配饰",
+            requested_task_type=TaskType.OUTFIT_RECOMMEND,
+            max_results=1,
+        )
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["llm_call_count"] == 4
+    recommendation = payload["result"]["recommendations"][0]
+    assert {"dress-1", "wedding-shoes", "accessory-1"} <= set(
+        recommendation["item_ids"]
+    )
+    assert recommendation["acceptance_status"] == "DEGRADED_ACCEPTED"
+
+
+def test_explicit_feature_gate_recovers_comfortable_client_outfit(
+    db_dsn: str,
+) -> None:
+    initialize_database(db_dsn)
+    _seed(db_dsn)
+    feature_items = [
+        make_item(
+            "formal-top",
+            "top",
+            "简约通勤衬衫",
+            "white",
+            features=("formal", "minimal"),
+        ),
+        make_item(
+            "formal-bottom",
+            "pants",
+            "正式直筒西裤",
+            "black",
+            features=("formal", "minimal"),
+        ),
+        make_item(
+            "standing-shoes",
+            "shoes",
+            "久站舒适乐福鞋",
+            "black",
+            features=("comfortable", "formal"),
+        ),
+    ]
+    with database_session(db_dsn) as connection:
+        upsert_items(connection, feature_items, "test")
+        add_items(connection, "u", [item.item_id for item in feature_items])
+
+    llm = FakeLlm(
+        [
+            (
+                {"decision_summary": "先给普通方案", "control": "CONTINUE"},
+                [{"name": "modify_outfit", "arguments": _CANDIDATE_TOOLS[0]}],
+            ),
+            {"decision_summary": "提交", "control": "CANDIDATE_READY"},
+            {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
+            {"evidence": []},
+        ]
+    )
+    workflow = _workflow(
+        db_dsn,
+        llm,
+        web_provider=_web_provider(),
+        weather_provider=_FakeWeatherProvider(),
+    )
+
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="明天见客户，鞋要适合久站，搭一套专业通勤穿搭",
+            requested_task_type=TaskType.OUTFIT_RECOMMEND,
+            max_results=1,
+        )
+    )
+
+    recommendation = payload["result"]["recommendations"][0]
+    assert payload["status"] == "completed"
+    assert "standing-shoes" in recommendation["item_ids"]
+    assert "features=comfortable,formal" not in llm.calls[2]["system"]
+    assert "features=comfortable,formal" in llm.calls[2]["user"]
+
+
+def test_indoor_basketball_with_time_skips_unneeded_research(db_dsn: str) -> None:
+    initialize_database(db_dsn)
+    sport_items = [
+        make_item("sport-top", "top", "透气篮球上衣", "black", features=("sport",)),
+        make_item("sport-bottom", "shorts", "篮球短裤", "black", features=("sport",)),
+        make_item(
+            "sport-shoes",
+            "shoes",
+            "缓震篮球鞋",
+            "black",
+            features=("sport", "cushioned"),
+        ),
+    ]
+    with database_session(db_dsn) as connection:
+        upsert_items(connection, sport_items, "test")
+        add_items(connection, "u", [item.item_id for item in sport_items])
+
+    sport_plan = _add_ops(
+        ("sport-top", "upper_body"),
+        ("sport-bottom", "lower_body"),
+        ("sport-shoes", "feet"),
+    )
+    llm = FakeLlm(
+        [
+            (
+                {"decision_summary": "组合篮球穿搭", "control": "CONTINUE"},
+                [{"name": "modify_outfit", "arguments": sport_plan}],
+            ),
+            {"decision_summary": "提交", "control": "CANDIDATE_READY"},
+            {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
+            {"evidence": []},
+        ]
+    )
+    workflow = _workflow(
+        db_dsn,
+        llm,
+        web_provider=_web_provider(),
+        weather_provider=_FakeWeatherProvider(),
+    )
+
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="今晚打篮球，给我一套能直接上场的穿搭",
+            requested_task_type=TaskType.OUTFIT_RECOMMEND,
+            max_results=1,
+        )
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["result"]["environment_context"] == {}
+    assert payload["agentic_outcome"].get("research_evidence") is None
+    assert payload["llm_call_count"] == 3
 
 
 def test_recommend_agentic_primary_returns_three_diverse_outfits(
@@ -259,13 +623,31 @@ def test_recommend_agentic_primary_returns_three_diverse_outfits(
     assert payload["llm_call_count"] == 16
     result = payload["result"]
     assert result["status"] == "completed"
+    assert result["schema_version"] == "styleforge.outfit-recommend-result.v1"
+    assert result["run_id"] == payload["run_id"]
+    assert result["structured_result"]["run_id"] == payload["run_id"]
     recommendations = result["structured_result"]["recommendations"]
+    assert result["recommendations"] == recommendations
     assert len(recommendations) == 3
     for recommendation in recommendations:
         assert recommendation["outfit_id"].startswith("rec-")
         assert len(recommendation["item_ids"]) >= 2
         assert recommendation["reasons"]
         assert recommendation["slot_items"]
+        assert recommendation["hard_valid"] is True
+        assert recommendation["score"] > 0
+        assert recommendation["score_source"] == "critic"
+        assert recommendation["llm_score"] == recommendation["score"]
+        assert set(recommendation["dimension_scores"]) == {
+            "request_relevance",
+            "request_specificity",
+            "outfit_coordination",
+            "wearability",
+            "freshness",
+        }
+    assert [item["score"] for item in recommendations] == sorted(
+        [item["score"] for item in recommendations], reverse=True
+    )
     # The three candidates are genuinely different item sets.
     item_sets = {frozenset(r["item_ids"]) for r in recommendations}
     assert len(item_sets) == 3
@@ -290,9 +672,67 @@ def test_recommend_agentic_primary_returns_three_diverse_outfits(
         rows = connection.execute(
             "SELECT outfit_id FROM candidate_outfits ORDER BY rank"
         ).fetchall()
+        stored = get_task_run(
+            connection,
+            user_id=payload["user_id"],
+            run_id=payload["run_id"],
+        )
     assert [r["outfit_id"] for r in rows] == [
         r["outfit_id"] for r in recommendations
     ]
+    assert stored is not None
+    assert stored["result"]["schema_version"] == result["schema_version"]
+    assert stored["result"]["structured_result"] == result["structured_result"]
+
+
+def test_harness_score_respects_user_evaluation_weights() -> None:
+    candidate = {
+        "status": "STAGED",
+        "review": {
+            "dimension_scores": {
+                "request_relevance": 10,
+                "request_specificity": 5,
+                "outfit_coordination": 5,
+                "wearability": 1,
+                "freshness": 5,
+            }
+        },
+    }
+
+    relevance_first = MultiTaskWorkflow._score_harness_candidate(
+        candidate,
+        {
+            "request_relevance": 0.8,
+            "request_specificity": 0.05,
+            "outfit_coordination": 0.05,
+            "wearability": 0.05,
+            "freshness": 0.05,
+        },
+    )
+    wearability_first = MultiTaskWorkflow._score_harness_candidate(
+        candidate,
+        {
+            "request_relevance": 0.05,
+            "request_specificity": 0.05,
+            "outfit_coordination": 0.05,
+            "wearability": 0.8,
+            "freshness": 0.05,
+        },
+    )
+
+    assert relevance_first["score"] > wearability_first["score"]
+    assert relevance_first["score_source"] == "critic"
+
+
+def test_harness_score_uses_explicit_neutral_fallback_for_v1_review() -> None:
+    score = MultiTaskWorkflow._score_harness_candidate(
+        {"status": "STAGED", "review": {"approved": True}},
+        None,
+    )
+
+    assert score["score"] == 50.0
+    assert score["llm_score"] is None
+    assert score["score_source"] == "neutral_fallback"
 
 
 def test_recommend_without_llm_uses_deterministic_pipeline(db_dsn: str) -> None:
@@ -308,5 +748,10 @@ def test_recommend_without_llm_uses_deterministic_pipeline(db_dsn: str) -> None:
     assert payload["status"] in {"completed", "infeasible"}
     assert payload["llm_enabled"] is False
     assert payload["llm_call_count"] == 0
-    assert "recommendations" in payload["result"]
+    result = payload["result"]
+    assert result["schema_version"] == "styleforge.outfit-recommend-result.v1"
+    assert result["run_id"] == payload["run_id"]
+    assert result["structured_result"]["run_id"] == payload["run_id"]
+    assert result["structured_result"]["status"] == payload["status"]
+    assert result["structured_result"]["recommendations"] == result["recommendations"]
     assert "agentic_outcome" not in payload

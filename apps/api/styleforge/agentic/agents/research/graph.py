@@ -30,8 +30,10 @@ from styleforge.agentic.agents.research.synthesize import make_evidence_synthesi
 from styleforge.agentic.context.grounding import grounding_progress_for_tool
 from styleforge.agentic.runtime.agent_runtime import AgentRuntime, ContextLimitError
 
-# Research is bounded: at most a few web/weather/knowledge/skill calls per goal.
-MAX_RESEARCH_STEPS = 6
+# Research is bounded: one turn may batch independent native tool calls, so
+# four executions cover skill + web + weather + local knowledge without a long
+# model/tool ping-pong. Missing facts become explicit uncertainties.
+MAX_RESEARCH_STEPS = 4
 
 # tool name → EvidenceSource.kind (frozen #6 source taxonomy).
 _TOOL_KIND = {
@@ -118,7 +120,14 @@ def build_research_subgraph(runtime: AgentRuntime):
             return {
                 "trajectory_protocol_errors": state.get("trajectory_protocol_errors", 0) + 1,
                 "tool_observations": state.get("tool_observations", [])
-                + [{"tool": "__protocol__", "observation": result.protocol_error}],
+                + [
+                    {
+                        "tool": "__protocol__",
+                        "observation": result.protocol_error,
+                        "error_code": result.error_code,
+                        "retryable": result.retryable,
+                    }
+                ],
             }
 
         trace = state.get("trace", []) + [result.trace]
@@ -130,8 +139,7 @@ def build_research_subgraph(runtime: AgentRuntime):
             # order, every observation into the private buffer.
             return {
                 "pending_tools": [
-                    {"name": item.name, "arguments": item.arguments}
-                    for item in result.tool_uses
+                    {"name": item.name, "arguments": item.arguments} for item in result.tool_uses
                 ],
                 "trace": trace,
                 "trajectory_protocol_errors": 0,
@@ -168,7 +176,14 @@ def build_research_subgraph(runtime: AgentRuntime):
         observation = tool_result.observation
         updates: dict[str, Any] = {
             "tool_observations": state.get("tool_observations", [])
-            + [{"tool": pending["name"], "observation": observation}],
+            + [
+                {
+                    "tool": pending["name"],
+                    "observation": observation,
+                    "error_code": tool_result.error_code,
+                    "retryable": tool_result.retryable,
+                }
+            ],
             "trajectory_step_count": state.get("trajectory_step_count", 0) + 1,
             "pending_tools": remaining,
         }

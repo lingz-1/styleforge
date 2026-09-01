@@ -18,6 +18,7 @@ control is not allowed to.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, Callable, Type
 
 from pydantic import BaseModel, ValidationError
@@ -37,6 +38,8 @@ from styleforge.agentic.context.visibility import ContextVisibilityPolicy
 from styleforge.agentic.hooks.manager import HookManager
 from styleforge.agentic.runtime.capability_registry import CapabilityRegistry
 from styleforge.agentic.runtime.tool_runtime import ToolRuntime
+from styleforge.common.errors import ErrorCode
+from styleforge.common.observability import observability
 from styleforge.llm.client import LlmUnavailable, ToolDefinition, ToolUseBlock
 
 
@@ -63,11 +66,41 @@ class _CountingLlm:
 
     def chat_tools(self, *args: Any, **kwargs: Any) -> Any:
         self._bump()
-        return self._inner.chat_tools(*args, **kwargs)
+        return self._observed("chat_tools", self._inner.chat_tools, *args, **kwargs)
 
     def chat_json(self, *args: Any, **kwargs: Any) -> Any:
         self._bump()
-        return self._inner.chat_json(*args, **kwargs)
+        return self._observed("chat_json", self._inner.chat_json, *args, **kwargs)
+
+    @staticmethod
+    def _observed(operation: str, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        started_at = perf_counter()
+        try:
+            outcome = callback(*args, **kwargs)
+        except Exception as error:
+            retryable = isinstance(error, (LlmUnavailable, TimeoutError, ConnectionError))
+            observability.record_operation(
+                "llm_call",
+                success=False,
+                duration_ms=(perf_counter() - started_at) * 1000.0,
+                retryable=retryable,
+                error_code=ErrorCode.LLM_UNAVAILABLE.value,
+                component="llm",
+                method=operation,
+                error_type=type(error).__name__,
+            )
+            raise
+        diagnostics = outcome[-1] if isinstance(outcome, tuple) and outcome else None
+        observability.record_operation(
+            "llm_call",
+            success=True,
+            duration_ms=(perf_counter() - started_at) * 1000.0,
+            retries=int(getattr(diagnostics, "retries", 0) or 0),
+            degraded=bool(getattr(diagnostics, "degraded_reason", "")),
+            component="llm",
+            method=operation,
+        )
+        return outcome
 
 
 @dataclass(frozen=True)
@@ -83,6 +116,8 @@ class AgentCallResult:
     tool_uses: list[ToolUseBlock] = field(default_factory=list)
     tool_use: ToolUseBlock | None = None
     protocol_error: str | None = None
+    error_code: str | None = None
+    retryable: bool = False
     trace: dict[str, Any] = field(default_factory=dict)
     bundle: PromptBundle | None = None
 
@@ -152,9 +187,42 @@ class AgentRuntime:
         *,
         decision_model: Type[BaseModel],
     ) -> AgentCallResult:
+        started_at = perf_counter()
+
+        def observed(result: AgentCallResult) -> AgentCallResult:
+            observability.record_operation(
+                "agent_call",
+                success=result.protocol_error is None,
+                duration_ms=(perf_counter() - started_at) * 1000.0,
+                retryable=result.retryable,
+                error_code=result.error_code or "",
+                component="agent_runtime",
+                agent=agent,
+                run_id=str(state.get("run_id") or ""),
+            )
+            return result
+
         bundle = self.assemble_bundle(agent, state)
+        if bundle.security_report.signal_count:
+            observability.record_operation(
+                "prompt_security",
+                success=True,
+                degraded=True,
+                component="prompt_security",
+                agent=agent,
+                signal_count=bundle.security_report.signal_count,
+            )
         guard = self.guard.check(bundle)
         if guard.bundle is None:
+            observability.record_operation(
+                "agent_call",
+                success=False,
+                duration_ms=(perf_counter() - started_at) * 1000.0,
+                error_code=ErrorCode.AGENT_EXECUTION_FAILED.value,
+                component="context_guard",
+                agent=agent,
+                run_id=str(state.get("run_id") or ""),
+            )
             raise ContextLimitError(f"context guard: {guard.status}: {'；'.join(guard.warnings)}")
         bundle = guard.bundle
 
@@ -178,15 +246,47 @@ class AgentRuntime:
             # logic error in the Agent: report it as a recoverable protocol
             # error so the graph re-enters (bounded by the frozen #21 protocol
             # budget) instead of crashing the whole run.
-            return AgentCallResult(protocol_error=f"provider unavailable: {error}")
+            return observed(
+                AgentCallResult(
+                    protocol_error=f"provider unavailable: {error}",
+                    error_code=ErrorCode.LLM_UNAVAILABLE.value,
+                    retryable=True,
+                )
+            )
         if parse_error is not None:
-            return AgentCallResult(protocol_error=_parse_error_observation(agent, parse_error))
+            return observed(
+                AgentCallResult(
+                    protocol_error=_parse_error_observation(agent, parse_error),
+                    error_code=ErrorCode.AGENT_PROTOCOL_ERROR.value,
+                    retryable=True,
+                )
+            )
 
         violations = check_decision_contract(decision)
         if violations:
-            return AgentCallResult(
-                protocol_error="；".join(violations),
-                decision=decision,
+            return observed(
+                AgentCallResult(
+                    protocol_error="；".join(violations),
+                    error_code=ErrorCode.AGENT_PROTOCOL_ERROR.value,
+                    retryable=True,
+                    decision=decision,
+                )
+            )
+
+        allowed_tools = {tool.name for tool in bundle.tools}
+        unauthorized_tools = sorted(
+            {tool.name for tool in tool_blocks if tool.name not in allowed_tools}
+        )
+        if unauthorized_tools:
+            return observed(
+                AgentCallResult(
+                    protocol_error=(
+                        "本轮 Agent 无权调用这些工具：" + "、".join(unauthorized_tools)
+                    ),
+                    error_code=ErrorCode.TOOL_NOT_AUTHORIZED.value,
+                    retryable=False,
+                    decision=decision,
+                )
             )
 
         expected = _expected_tool_count(agent, decision)
@@ -200,13 +300,17 @@ class AgentRuntime:
                     label = f"at least {min_calls}"
                 else:
                     label = f"{min_calls}..{max_calls}"
-                return AgentCallResult(
-                    protocol_error=_tool_count_observation(
-                        agent,
-                        getattr(decision, "control", None),
-                        f"{label} tool call(s), got {count}",
-                    ),
-                    decision=decision,
+                return observed(
+                    AgentCallResult(
+                        protocol_error=_tool_count_observation(
+                            agent,
+                            getattr(decision, "control", None),
+                            f"{label} tool call(s), got {count}",
+                        ),
+                        error_code=ErrorCode.AGENT_PROTOCOL_ERROR.value,
+                        retryable=True,
+                        decision=decision,
+                    )
                 )
         # H3a-5 (frozen gap 3): SEARCH_FIRST is a lifecycle contract, not a
         # prompt hint. Under a search_first grounding decision the research
@@ -224,14 +328,18 @@ class AgentRuntime:
                     )
                     attempted = set(state.get("grounding_attempted_kinds") or [])
                     if not required <= attempted:
-                        return AgentCallResult(
-                            protocol_error=(
-                                "Grounding requires verification first. Missing kinds "
-                                f"resolvable by your tools: {sorted(required)}; you have only "
-                                f"attempted {sorted(attempted)}. Use search_web/get_weather to "
-                                "check these before completing or asking the user."
-                            ),
-                            decision=decision,
+                        return observed(
+                            AgentCallResult(
+                                protocol_error=(
+                                    "Grounding requires verification first. Missing kinds "
+                                    f"resolvable by your tools: {sorted(required)}; you have only "
+                                    f"attempted {sorted(attempted)}. Use search_web/get_weather to "
+                                    "check these before completing or asking the user."
+                                ),
+                                error_code=ErrorCode.AGENT_PROTOCOL_ERROR.value,
+                                retryable=True,
+                                decision=decision,
+                            )
                         )
         # Frozen #14: need_plan_update must be the update_plan tool, never a
         # wardrobe mutation.
@@ -241,15 +349,21 @@ class AgentRuntime:
             and tool_blocks
             and any(item.name != "update_plan" for item in tool_blocks)
         ):
-            return AgentCallResult(
-                protocol_error=(
-                    "need_plan_update requires exactly the update_plan tool, "
-                    f"got {[item.name for item in tool_blocks]}"
-                ),
-                decision=decision,
+            return observed(
+                AgentCallResult(
+                    protocol_error=(
+                        "need_plan_update requires exactly the update_plan tool, "
+                        f"got {[item.name for item in tool_blocks]}"
+                    ),
+                    error_code=ErrorCode.AGENT_PROTOCOL_ERROR.value,
+                    retryable=True,
+                    decision=decision,
+                )
             )
 
-        tool_use = tool_blocks[0] if len(tool_blocks) == 1 else (tool_blocks[0] if tool_blocks else None)
+        tool_use = (
+            tool_blocks[0] if len(tool_blocks) == 1 else (tool_blocks[0] if tool_blocks else None)
+        )
         trace = {
             "agent": agent,
             "decision_summary": getattr(decision, "decision_summary", ""),
@@ -257,12 +371,14 @@ class AgentRuntime:
             "prompt_profile_key": bundle.prompt_profile_key,
             "stable_prefix_fingerprint": bundle.stable_prefix_fingerprint,
         }
-        return AgentCallResult(
-            decision=decision,
-            tool_uses=list(tool_blocks),
-            tool_use=tool_use,
-            trace=trace,
-            bundle=bundle,
+        return observed(
+            AgentCallResult(
+                decision=decision,
+                tool_uses=list(tool_blocks),
+                tool_use=tool_use,
+                trace=trace,
+                bundle=bundle,
+            )
         )
 
     def assemble_bundle(
@@ -292,7 +408,7 @@ class AgentRuntime:
         state: dict[str, Any],
         retry_hint: str | None = None,
     ) -> tuple[BaseModel | None, list[ToolUseBlock], str | None]:
-        user_message = bundle.user_message
+        user_message = bundle.model_user_message
         if retry_hint:
             user_message = f"{user_message}\n\n{retry_hint}"
         decision_text, tool_blocks, _ = self.llm.chat_tools(
@@ -353,15 +469,15 @@ def _tool_count_observation(agent: str, control: str | None, expectation: str) -
         return (
             f"你的控制信号 {control} 需要{expectation}，但你这次没有发出工具调用。"
             "你只有两个选择：\n"
-            "1) CONTINUE → 必须伴随恰好一个工具调用（modify_outfit / search_wardrobe / "
-            "search_web / get_weather 等），直接动手；\n"
+            "1) CONTINUE → 必须伴随至少一个工具调用（modify_outfit / search_wardrobe / "
+            "search_web / get_weather 等）；互不依赖的查询应并行发出；\n"
             "2) CANDIDATE_READY → 当前搭配已满足目标，直接提交（0 工具调用）。\n"
             "不要只描述你打算做什么——要么调用工具，要么提交当前方案。"
         )
     if agent == "research":
         return (
             f"你的控制信号 {control} 需要{expectation}，但你这次没有发出工具调用。"
-            "CONTINUE 必须伴随恰好一个工具调用；若外部事实已查够，请直接输出 "
+            "CONTINUE 必须伴随至少一个工具调用，互不依赖的查询应并行发出；若外部事实已查够，请直接输出 "
             'control: "RESEARCH_COMPLETE"（0 工具调用）收尾。'
         )
     if agent == "extension":
@@ -371,9 +487,7 @@ def _tool_count_observation(agent: str, control: str | None, expectation: str) -
             "search_web / inspect_outfit）；若确定性事实已足够，请直接输出 "
             'control: "READY"（0 工具调用）进入结果综合。'
         )
-    return (
-        f"{agent} control {control} requires {expectation}"
-    )
+    return f"{agent} control {control} requires {expectation}"
 
 
 def _parse_error_observation(agent: str, parse_error: str) -> str:
@@ -404,7 +518,9 @@ def _parse_error_observation(agent: str, parse_error: str) -> str:
     )
 
 
-def _parse_decision(text: str, decision_model: Type[BaseModel]) -> tuple[BaseModel | None, str | None]:
+def _parse_decision(
+    text: str, decision_model: Type[BaseModel]
+) -> tuple[BaseModel | None, str | None]:
     cleaned = _strip_code_fence(text).strip()
     if not cleaned:
         return None, "empty decision block"
@@ -485,9 +601,7 @@ def _infer_decision(
         # hand off (frozen #14: "next round hands off"). Where to goes follows
         # the evidence: gathered → STYLIST; still missing → RESEARCH.
         if state is not None and state.get("plan") is not None:
-            next_agent = (
-                "STYLIST" if state.get("research_evidence") is not None else "RESEARCH"
-            )
+            next_agent = "STYLIST" if state.get("research_evidence") is not None else "RESEARCH"
             return (
                 CoordinatorDecision(decision_summary="", goal="", next_agent=next_agent),
                 [],

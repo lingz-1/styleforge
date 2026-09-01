@@ -1,6 +1,48 @@
 import axios from 'axios'
 
 const http = axios.create({ baseURL: '/api', timeout: 120000 })
+const taskTimeoutMs = Number(import.meta.env.VITE_TASK_TIMEOUT_MS || 120000)
+
+export class ApiError extends Error {
+  constructor(message, options = {}) {
+    super(message)
+    this.name = 'ApiError'
+    this.code = options.code || 'UNKNOWN_ERROR'
+    this.status = options.status || 0
+    this.requestId = options.requestId || ''
+    this.retryable = Boolean(options.retryable)
+    this.details = options.details || null
+    // Preserve Axios compatibility for existing views during migration.
+    this.response = options.response
+  }
+}
+
+export function normalizeApiError(error) {
+  if (error instanceof ApiError) return error
+  const response = error?.response
+  const payload = response?.data || {}
+  const envelope = payload?.error || {}
+  const detail = typeof payload?.detail === 'string' ? payload.detail : ''
+  const status = Number(response?.status || 0)
+  const message = envelope.message || detail || error?.message || '网络请求失败'
+  const requestId = envelope.request_id || response?.headers?.['x-request-id'] || ''
+  const retryable = typeof envelope.retryable === 'boolean'
+    ? envelope.retryable
+    : (!response || status === 429 || status >= 500)
+  return new ApiError(message, {
+    code: envelope.code || error?.code || (response ? 'HTTP_ERROR' : 'NETWORK_ERROR'),
+    status,
+    requestId,
+    retryable,
+    details: envelope.details || null,
+    response,
+  })
+}
+
+http.interceptors.response.use(
+  (response) => response,
+  (error) => Promise.reject(normalizeApiError(error)),
+)
 
 // Health
 export const getHealth = () => http.get('/health')
@@ -33,6 +75,14 @@ export const listBatchRecognition = (userId, limit = 20) =>
   http.get(`/wardrobes/${userId}/recognition-batches`, { params: { limit } })
 export const deleteBatchRecognition = (userId, batchId) =>
   http.delete(`/wardrobes/${userId}/recognition-batches/${batchId}`)
+export const retryBatchEmbedding = (userId, batchId) =>
+  http.post(`/wardrobes/${userId}/recognition-batches/${batchId}/retry-embedding`)
+export const retryBatchRecognition = (userId, batchId) =>
+  http.post(`/wardrobes/${userId}/recognition-batches/${batchId}/retry`)
+export const batchRecognitionImageUrl = (userId, batchId, itemIndex) =>
+  `/api/wardrobes/${encodeURIComponent(userId)}/recognition-batches/${encodeURIComponent(batchId)}/items/${itemIndex}/image`
+export const retryPersonalEmbeddings = (userId, itemIds = []) =>
+  http.post(`/wardrobes/${userId}/embeddings/retry`, { item_ids: itemIds })
 export const updateItem = (userId, itemId, fields) =>
   http.put(`/wardrobes/${userId}/items/${itemId}`, fields)
 export const uploadItemImage = (userId, itemId, filename, contentBase64) =>
@@ -57,7 +107,7 @@ export const commitImport = (userId, batchId, selections, autoEmbed = true) =>
   })
 
 // Unified v3.3 task execution (recommend / modify / advice / compatibility / gap)
-export const executeTask = (payload) => http.post('/tasks/execute', payload)
+export const executeTask = (payload) => http.post('/tasks/execute', payload, { timeout: taskTimeoutMs })
 export const getTaskRun = (userId, runId) => http.get(`/tasks/${userId}/${runId}`)
 
 // Evaluation weights (五维偏好)

@@ -152,11 +152,24 @@ def _validate_item_advice(agent1: Agent1TaskOutput, result: dict[str, Any]) -> l
     referenced = _grouped_item_ids(result.get("compatible_items_by_slot", {}))
     referenced.update(_item_ids(result.get("wardrobe_matches", [])))
     referenced.update(_grouped_item_ids(result.get("wardrobe_matches_by_slot", {})))
+    completed = result.get("status") == "completed"
+    requested_slots = facts.get("requested_support_slots") or []
+    compatible = facts.get("compatible_items_by_slot") or {}
+    required_by_slot = {
+        slot: _item_ids(compatible.get(slot, [])) for slot in requested_slots
+    }
+    for slot, candidate_ids in required_by_slot.items():
+        if completed and not candidate_ids:
+            issues.append(f"用户点名槽位 {slot} 在当前衣橱没有候选单品")
     for outfit in result.get("sample_outfits", []):
         outfit_ids = set(outfit.get("item_ids", outfit.get("wardrobe_item_ids", [])))
         referenced.update(outfit_ids)
         if expected_anchor and expected_anchor.get("item_id") not in outfit_ids:
             issues.append("单品建议示例搭配没有保留锚点单品")
+        if completed:
+            for slot, candidate_ids in required_by_slot.items():
+                if candidate_ids and not (outfit_ids & candidate_ids):
+                    issues.append(f"单品建议示例搭配缺少用户点名槽位 {slot}")
     if result.get("anchor_source") == "candidate" and expected_anchor:
         referenced.discard(str(expected_anchor.get("item_id", "")))
     if not referenced <= set(agent1.candidate_item_ids):
@@ -272,6 +285,66 @@ def _sanitize_item_advice_result(
     return pruned
 
 
+def _sanitize_compatibility_result(
+    agent1: Agent1TaskOutput,
+    result: dict[str, Any],
+    allowed_ids: set[str],
+) -> dict[str, Any]:
+    """Restore authoritative candidate facts and prune wardrobe references."""
+    facts = agent1.facts
+    grouped = _filter_slot_refs(
+        facts.get("compatible_items_by_slot") or {}, allowed_ids
+    )
+    similar = _filter_item_refs(
+        facts.get("similar_wardrobe_items") or [], allowed_ids
+    )
+    outfits: list[dict[str, Any]] = []
+    for outfit in result.get("sample_outfits") or []:
+        kept_ids = [
+            str(item_id)
+            for item_id in outfit.get("wardrobe_item_ids") or []
+            if str(item_id) in allowed_ids
+        ]
+        if not kept_ids:
+            continue
+        copy = dict(outfit)
+        copy["wardrobe_item_ids"] = kept_ids
+        outfits.append(copy)
+    return {
+        **result,
+        "candidate_item": dict(facts.get("candidate_item") or {}),
+        "candidate_slot": str(facts.get("candidate_slot") or ""),
+        "compatible_items_by_slot": grouped,
+        "compatible_item_counts": {
+            slot: len(items) for slot, items in grouped.items()
+        },
+        "similar_wardrobe_items": similar,
+        "sample_outfits": outfits,
+        "complete_outfit_count": len(outfits),
+    }
+
+
+def _sanitize_gap_result(
+    agent1: Agent1TaskOutput,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Restore deterministic wardrobe counts and gap identities."""
+    facts = agent1.facts
+    gaps = list(facts.get("missing_elements") or [])
+    return {
+        **result,
+        "analysis_mode": str(
+            (agent1.resolved_target or {}).get("analysis_mode") or "general"
+        ),
+        "target": dict(agent1.resolved_target or {}),
+        "wardrobe_item_count": int(facts.get("wardrobe_item_count") or 0),
+        "slot_counts": dict(facts.get("slot_counts") or {}),
+        "covered_elements": list(facts.get("covered_elements") or []),
+        "gaps": gaps,
+        "gap_count": len(gaps),
+    }
+
+
 def _prune_flexible_duplicates(
     agent1: Agent1TaskOutput,
     result: dict[str, Any],
@@ -351,6 +424,10 @@ def sanitize_extension_references(
         if anchor_id:
             allowed.add(anchor_id)
         result = _sanitize_item_advice_result(result, allowed, anchor_id)
+    elif agent1.task_type is TaskType.WARDROBE_COMPATIBILITY:
+        result = _sanitize_compatibility_result(agent1, result, wardrobe_scope)
+    elif agent1.task_type is TaskType.WARDROBE_GAP:
+        result = _sanitize_gap_result(agent1, result)
     elif agent1.task_type is TaskType.OUTFIT_MODIFY and agent1.facts.get(
         "adjustment_mode"
     ) == "flexible":
@@ -381,6 +458,22 @@ def validate_extension_draft(
     """Return passed check labels or raise when a hard boundary is violated."""
     issues = _validate_used_ids(agent1, agent2, wardrobe_ids)
     result = agent2.result
+    result_status = str(result.get("status") or "")
+    if result_status and result_status != agent2.status:
+        issues.append("结果正文状态与 Agent 2 状态不一致")
+    if agent1.task_type is TaskType.ITEM_ADVICE and not agent1.needs_clarification:
+        facts = agent1.facts
+        anchor = facts.get("anchor_item") or {}
+        compatible = facts.get("compatible_items_by_slot") or {}
+        requested_slots = facts.get("requested_support_slots") or []
+        requested_available = all(compatible.get(slot) for slot in requested_slots)
+        any_compatible = any(compatible.values())
+        facts_are_feasible = bool(anchor) and requested_available and any_compatible
+        expected_status = "completed" if facts_are_feasible else "infeasible"
+        if agent2.status != expected_status:
+            issues.append(
+                f"单品建议状态与确定性候选事实不一致，应为 {expected_status}"
+            )
     if agent1.task_type is TaskType.OUTFIT_MODIFY:
         issues.extend(_validate_modify(agent1, result))
     elif agent1.task_type is TaskType.ITEM_ADVICE:

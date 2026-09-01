@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from functools import lru_cache
 from pathlib import Path
+from threading import RLock
 from typing import TYPE_CHECKING, Sequence
 
 if TYPE_CHECKING:
@@ -133,3 +135,55 @@ class FashionClipEncoder:
             features = self.model.get_text_features(**inputs)
         features = functional.normalize(features.float(), p=2, dim=-1)
         return features.cpu().numpy()
+
+
+class SharedFashionClipEncoder:
+    """Thread-safe process-local wrapper shared by query and personal embedding."""
+
+    def __init__(self, model_dir: Path, *, device: str, precision: str) -> None:
+        self._encoder = FashionClipEncoder(
+            model_dir,
+            device=device,
+            precision=precision,
+        )
+        self.inference_lock = RLock()
+
+    @property
+    def dimension(self) -> int:
+        return self._encoder.dimension
+
+    def encode_images(self, images: Sequence["Image.Image"], batch_size: int = 64) -> "np.ndarray":
+        with self.inference_lock:
+            return self._encoder.encode_images(images, batch_size=batch_size)
+
+    def encode_texts(self, texts: Sequence[str]) -> "np.ndarray":
+        with self.inference_lock:
+            return self._encoder.encode_texts(texts)
+
+
+@lru_cache(maxsize=4)
+def _shared_runtime(
+    model_dir: str,
+    device: str,
+    precision: str,
+) -> SharedFashionClipEncoder:
+    return SharedFashionClipEncoder(
+        Path(model_dir),
+        device=device,
+        precision=precision,
+    )
+
+
+def shared_fashion_clip_encoder(
+    model_dir: Path,
+    *,
+    device: str = "cuda",
+    precision: str = "float16",
+) -> SharedFashionClipEncoder:
+    """Return the shared encoder for one resolved model/device configuration."""
+    return _shared_runtime(str(model_dir.resolve()), device, precision)
+
+
+def clear_shared_fashion_clip_runtime_cache() -> None:
+    """Release process-local references; intended for tests and maintenance."""
+    _shared_runtime.cache_clear()

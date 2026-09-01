@@ -112,16 +112,18 @@ def test_synthesizer_uses_own_profile_and_returns_evidence() -> None:
     assert evidence.venue.name == "北京保利剧院"
     assert evidence.uncertainties == ["未找到官方着装要求"]
     assert evidence.sources[0].kind == "web"
-    # Own profile (frozen #22): research goal + raw evidence + tool observations
-    # — never the raw user request. The user message starts at the goal line, so
-    # the request text (看剧穿什么) is provably absent.
+    # Own profile (frozen #22): stable instructions stay in system; untrusted
+    # research evidence and tool observations are scoped to the user message.
     system = llm.calls[0]["system"]
-    assert "【研究原始证据】" in system
-    assert "保利剧院演出信息" in system
+    assert "【研究原始证据】" not in system
+    assert "保利剧院演出信息" not in system
     user = llm.calls[0]["user"]
-    assert user.startswith("用户消息：\n已确认目标：看剧穿搭")
+    assert "已确认目标：看剧穿搭" in user
+    assert "【研究原始证据】" in user
+    assert "保利剧院演出信息" in user
     assert "【最近工具观察】" in user
     assert "search_web：演出信息" in user
+    assert "看剧穿什么" not in user
 
 
 # ── Research subgraph ───────────────────────────────────────────────────────
@@ -254,8 +256,10 @@ def test_h2b_research_then_stylist_full_chain() -> None:
     assert out["status"] == "done"
     assert out["research_evidence"].event.name == "莫里哀音乐剧"
     assert len(out["candidates"]) == 1
-    # Evidence crossed the subgraph boundary into the Stylist's prompt (C-layer).
-    assert "莫里哀音乐剧" in llm.calls[5]["system"]
+    # Evidence crossed the subgraph boundary as untrusted runtime data, never
+    # as a system instruction.
+    assert "莫里哀音乐剧" not in llm.calls[5]["system"]
+    assert "莫里哀音乐剧" in llm.calls[5]["user"]
     # Private research trajectory never leaked into the parent state (frozen #18).
     assert "raw_evidence" not in out
     assert "trajectory_step_count" not in out
@@ -297,8 +301,11 @@ def test_h2b_research_runs_once_shared_across_candidates() -> None:
         c for c in llm.calls if "dress_context" in str(c.get("json_schema") or "")
     ]
     assert len(synth_calls) == 1
-    # Evidence reached every Stylist turn (C-layer re-assembly, frozen #15).
-    assert "莫里哀音乐剧" in llm.calls[5]["system"] and "莫里哀音乐剧" in llm.calls[8]["system"]
+    # Evidence reached every Stylist turn as scoped untrusted data.
+    assert "莫里哀音乐剧" not in llm.calls[5]["system"]
+    assert "莫里哀音乐剧" not in llm.calls[8]["system"]
+    assert "莫里哀音乐剧" in llm.calls[5]["user"]
+    assert "莫里哀音乐剧" in llm.calls[8]["user"]
 
 
 def test_h2b_harness_journals_evidence() -> None:

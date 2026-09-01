@@ -27,8 +27,38 @@ _CRITIC_SCHEMA: dict[str, Any] = {
         "approved": {"type": "boolean"},
         "issues": {"type": "array", "items": {"type": "string"}},
         "feedback": {"type": "string"},
+        "dimension_scores": {
+            "type": "object",
+            "properties": {
+                "request_relevance": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                },
+                "request_specificity": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                },
+                "outfit_coordination": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                },
+                "wearability": {"type": "integer", "minimum": 1, "maximum": 10},
+                "freshness": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            "required": [
+                "request_relevance",
+                "request_specificity",
+                "outfit_coordination",
+                "wearability",
+                "freshness",
+            ],
+            "additionalProperties": False,
+        },
     },
-    "required": ["approved", "issues", "feedback"],
+    "required": ["approved", "issues", "feedback", "dimension_scores"],
     "additionalProperties": False,
 }
 
@@ -45,7 +75,7 @@ def make_critic_node(runtime: AgentRuntime):
             )
         payload, _ = runtime.llm.chat_json(
             system=guard.bundle.system_text,
-            user=guard.bundle.user_message,
+            user=guard.bundle.model_user_message,
             json_schema=_CRITIC_SCHEMA,
         )
         return {"critic_result": ReviewResult.model_validate(payload)}

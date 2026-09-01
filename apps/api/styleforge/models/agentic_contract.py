@@ -35,7 +35,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── InteractionContext ─────────────────────────────────────────────
@@ -66,6 +66,7 @@ class ItemSnapshot(BaseModel):
     name: str = ""
     item_type: str = ""
     color: str = ""
+    features: list[str] = Field(default_factory=list)
     structure: GarmentStructure | None = None  # forward ref; see §8 ontology
 
 
@@ -231,6 +232,9 @@ class WardrobeSearchResult(BaseModel):
     results: list[ItemSnapshot] = Field(default_factory=list)
     matched: int = 0
     query: str = ""
+    retrieval_mode: Literal["keyword", "semantic", "hybrid"] = "keyword"
+    semantic_available: bool = False
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class WebSearchHit(BaseModel):
@@ -319,10 +323,26 @@ class ReviewInput(BaseModel):
     user_intent: UserIntent | None = None
 
 
+class ReviewDimensionScores(BaseModel):
+    """Five-dimension semantic assessment on the shared 1-10 rubric."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_relevance: int = Field(ge=1, le=10)
+    request_specificity: int = Field(ge=1, le=10)
+    outfit_coordination: int = Field(ge=1, le=10)
+    wearability: int = Field(ge=1, le=10)
+    freshness: int = Field(ge=1, le=10)
+
+
 class ReviewResult(BaseModel):
     approved: bool
     issues: list[str] = Field(default_factory=list)
     feedback: str = ""  # for the Agent to replan on
+    # Optional for backward compatibility with stored/fake v1 responses. New
+    # Critic prompts always request it; callers use an explicit neutral fallback
+    # when an older provider response omits the field.
+    dimension_scores: ReviewDimensionScores | None = None
 
 
 # ── SaveOutfit command ─────────────────────────────────────────────

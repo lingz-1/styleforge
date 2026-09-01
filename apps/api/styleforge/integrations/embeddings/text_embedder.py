@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Sequence
 if TYPE_CHECKING:
     import numpy as np
 
-from styleforge.vision.fashion_clip import FashionClipEncoder
+from styleforge.vision.fashion_clip import shared_fashion_clip_encoder
 
 
 class TextEmbedder:
@@ -27,7 +27,7 @@ class TextEmbedder:
         device: str = "cuda",
         precision: str = "float16",
     ) -> None:
-        self._encoder = FashionClipEncoder(
+        self._encoder = shared_fashion_clip_encoder(
             model_dir,
             device=device,
             precision=precision,

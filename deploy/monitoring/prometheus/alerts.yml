@@ -1,0 +1,85 @@
+groups:
+  - name: styleforge-availability
+    rules:
+      - alert: StyleForgeApiDown
+        expr: up{job="styleforge-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: StyleForge API cannot be scraped
+          description: Prometheus has been unable to scrape the StyleForge API for one minute.
+
+      - alert: StyleForgeHighHttpFailureRatio
+        expr: |
+          (
+            increase(styleforge_http_request_failures_total[10m])
+            /
+            clamp_min(increase(styleforge_http_requests_total[10m]), 1)
+          ) > 0.10
+          and increase(styleforge_http_requests_total[10m]) >= 10
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: StyleForge HTTP failure ratio is above 10%
+          description: At least ten requests were observed and more than 10% failed during the last ten minutes.
+
+      - alert: StyleForgeHighAverageHttpLatency
+        expr: |
+          (
+            rate(styleforge_http_request_duration_milliseconds_sum[5m])
+            /
+            clamp_min(rate(styleforge_http_requests_total[5m]), 0.001)
+          ) > 5000
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: StyleForge average HTTP latency is above five seconds
+          description: The rolling average HTTP duration has remained above five seconds for five minutes.
+
+  - name: styleforge-agent-pipeline
+    rules:
+      - alert: StyleForgeDatabaseOperationFailure
+        expr: increase(styleforge_operation_failures_total{operation="database_session"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: StyleForge database operation failed
+          description: A database session failure was recorded during the last five minutes.
+
+      - alert: StyleForgeRepeatedLlmFailures
+        expr: increase(styleforge_operation_failures_total{operation="llm_call"}[10m]) >= 3
+        for: 2m
+        labels:
+          severity: warning
+          component: llm
+        annotations:
+          summary: StyleForge recorded repeated LLM failures
+          description: Three or more LLM calls failed during the last ten minutes.
+
+      - alert: StyleForgeRetryStorm
+        expr: increase(styleforge_operation_retries_total[10m]) >= 5
+        for: 2m
+        labels:
+          severity: warning
+          component: runtime
+        annotations:
+          summary: StyleForge is retrying operations frequently
+          description: Five or more operation retries were recorded during the last ten minutes.
+
+      - alert: StyleForgeDegradedExecution
+        expr: increase(styleforge_operation_degraded_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: runtime
+        annotations:
+          summary: StyleForge completed an operation in degraded mode
+          description: At least one task component used a degraded path during the last fifteen minutes.

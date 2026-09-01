@@ -37,7 +37,7 @@ def make_evidence_synthesizer(runtime: AgentRuntime):
             )
         payload, _ = runtime.llm.chat_json(
             system=guard.bundle.system_text,
-            user=guard.bundle.user_message,
+            user=guard.bundle.model_user_message,
             json_schema=_SYNTH_SCHEMA,
         )
         return {"research_evidence": ResearchEvidence.model_validate(payload)}

@@ -1,7 +1,9 @@
 # 天气上下文工具
 
 > 实现日期：2026-08-10  
-> 当前形态：进程内 typed Tool + Open-Meteo Provider；不是 MCP Server。
+> 当前形态：Agent 侧保持进程内 typed Tool；Provider 主路径通过官方 Time/Fetch MCP 调用
+> Open-Meteo，失败时回退原有直连 Provider。StyleForge 自身另在 `/mcp/` 提供 MCP Server。
+> 具体协议边界见 [MCP 集成](MCP_INTEGRATION.md)。
 > 下一阶段：隐含天气需求、设备定位、时间/事件上下文和可解释建议见[天气与时空上下文 V2 详细方案](WEATHER_CONTEXT_V2_PLAN.md)，该方案尚未实现。
 
 ## 1. 业务边界

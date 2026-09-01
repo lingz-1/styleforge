@@ -33,6 +33,8 @@ def test_known_types_map_to_structures() -> None:
     ]
     assert structure_for("shoes").allowed_region is BodyRegion.feet
     assert structure_for("necklace").exclusive is False
+    assert structure_for("accessory").allowed_region is BodyRegion.accessory
+    assert structure_for("accessory").exclusive is False
 
 
 def test_unknown_type_stays_unknown() -> None:

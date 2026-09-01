@@ -83,9 +83,32 @@ def test_execute_and_read_extended_task_over_http(
         health = client.get("/health")
         assert health.status_code == 200
         assert health.json()["extension_prompt_version"] == "extension-three-agent-v3.2"
+        assert health.json()["outfit_recommend_result_schema"] == (
+            "styleforge.outfit-recommend-result.v1"
+        )
         assert health.json()["api_started_at"]
-        assert health.json()["weather"]["provider"] == "open-meteo"
+        assert health.json()["weather"]["provider"] == "mcp-fetch+open-meteo"
         assert health.json()["weather"]["enabled"] is True
+        assert health.json()["weather"]["mcp_primary"] is True
+        assert health.json()["mcp"]["server"]["endpoint"] == "/mcp/"
+        assert len(health.json()["mcp"]["server"]["tools"]) == 5
+        assert {
+            "official-fetch",
+            "official-time",
+        }.issubset(
+            {server["name"] for server in health.json()["mcp"]["client"]["servers"]}
+        )
+        assert health.json()["database"] == {
+            "backend": "postgresql",
+            "status": "connected",
+        }
+        retrieval_health = health.json()["wardrobe_retrieval"]
+        assert retrieval_health["strategy"] == (
+            "fashionclip_hybrid_with_keyword_fallback"
+        )
+        assert "semantic_artifacts_available" in retrieval_health
+        assert "model_loaded" in retrieval_health
+        assert database_path not in str(health.json())
 
         response = client.post(
             "/tasks/execute",
@@ -107,6 +130,7 @@ def test_execute_and_read_extended_task_over_http(
         stored = client.get(f"/tasks/api-user/{payload['run_id']}")
         assert stored.status_code == 200
         assert stored.json()["result"]["title"] == payload["result"]["title"]
+        assert stored.json()["diagnostics"] == payload["diagnostics"]
 
         missing = client.get(f"/tasks/other-user/{payload['run_id']}")
         assert missing.status_code == 404

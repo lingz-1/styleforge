@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: styleforge-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: styleforge
+          POSTGRES_PASSWORD: styleforge
+          POSTGRES_DB: styleforge_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U styleforge -d styleforge_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      STYLEFORGE_DATABASE_DSN: postgresql://styleforge:styleforge@127.0.0.1:5432/styleforge_test
+      STYLEFORGE_TEST_DATABASE_DSN: postgresql://styleforge:styleforge@127.0.0.1:5432/styleforge_test
+      STYLEFORGE_E2E_DATABASE_DSN: postgresql://styleforge:styleforge@127.0.0.1:5432/styleforge_test
+      STYLEFORGE_REDIS_ENABLED: "false"
+      STYLEFORGE_LLM_ENABLED: "false"
+      STYLEFORGE_VISION_ENABLED: "false"
+      STYLEFORGE_WEATHER_ENABLED: "false"
+      STYLEFORGE_WEB_SEARCH_ENABLED: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install Python dependencies
+        run: >-
+          python -m pip install -e
+          ".[api,agents,llm-openai,db,cache,rag,images,orders,dev]"
+
+      - name: Ruff
+        run: python -m ruff check apps/api/styleforge tests evals scripts
+
+      - name: Pytest
+        run: |
+          mkdir -p .ci-tmp
+          python -m pytest -q --basetemp .ci-tmp/pytest
+
+      - name: Lightweight wardrobe quality benchmark
+        run: >-
+          python -m evals.runners.evaluate_wardrobe_quality
+          --mode deterministic
+          --report .ci-tmp/wardrobe-quality-lightweight.json
+
+      - name: API health smoke
+        shell: bash
+        run: |
+          python tests/e2e/run_api.py >.ci-tmp/api.log 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18000/health >.ci-tmp/health.json; then
+              break
+            fi
+            if ! kill -0 "$api_pid" 2>/dev/null; then
+              cat .ci-tmp/api.log
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:18000/health | python -m json.tool
+
+      - name: Install web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Build web
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-diagnostics
+          path: .ci-tmp/
+          if-no-files-found: ignore

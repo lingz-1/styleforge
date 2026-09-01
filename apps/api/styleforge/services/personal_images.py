@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from styleforge.repositories.database import database_session, initialize_database
+from styleforge.repositories.personal_embedding_repository import (
+    invalidate_personal_embeddings,
+    mark_personal_embedding_failed,
+)
 from styleforge.repositories.wardrobe_import_repository import (
     personal_image_root,
 )
@@ -85,6 +89,11 @@ def bind_personal_image(
     if row is None:
         raise ValueError("Personal wardrobe item not found")
 
+    # Invalidate first: the destination filename is stable per item, so replacing
+    # the file before this transaction could expose a stale vector for new bytes.
+    with database_session(database_path) as connection:
+        invalidate_personal_embeddings(connection, [item_id])
+
     root = personal_image_root(artifact_root, user_id)
     filename = save_personal_image(root, item_id, image_bytes)
 
@@ -121,11 +130,15 @@ def bind_personal_image(
             device=device,
             batch_size=1,
         )
-    except BaseException as error:
+    except Exception as error:  # noqa: BLE001 - image is durable; expose safe retry state
+        with database_session(database_path) as connection:
+            mark_personal_embedding_failed(connection, [item_id])
         embedding = {
             "status": "failed",
             "error_type": type(error).__name__,
-            "error": str(error),
+            "error_code": "PERSONAL_EMBEDDING_FAILED",
+            "error": "图片已保存，但向量生成失败，可稍后重试",
+            "retryable": True,
         }
     return {
         "item_id": item_id,

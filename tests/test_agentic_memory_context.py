@@ -227,6 +227,7 @@ def test_stylist_prompt_carries_layered_preferences() -> None:
     register_local_tools(registry, object())
     tools = registry.runtime_available(AGENT_STYLIST, frozenset({CAP_WEB_SEARCH}))
     bundle = PromptAssembler(instructions_root=_INSTRUCTIONS).build(AGENT_STYLIST, context, tools)
-    assert "【偏好上下文】" in bundle.system_text
-    assert "【长期偏好】" in bundle.system_text
-    assert "黑色" in bundle.system_text
+    assert "【偏好上下文】" not in bundle.system_text
+    assert "【偏好上下文】" in bundle.model_user_message
+    assert "【长期偏好】" in bundle.model_user_message
+    assert "黑色" in bundle.model_user_message

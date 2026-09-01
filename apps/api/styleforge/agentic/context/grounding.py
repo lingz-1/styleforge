@@ -56,6 +56,8 @@ _EVENT_WORDS = (
     "音乐剧", "歌剧", "演唱会", "演出", "展览", "展会", "会议", "婚礼",
     "晚宴", "聚会", "演唱会", "音乐节", "live", "Live", "show",
 )
+_GENERIC_OCCASION_WORDS = ("婚礼", "晚宴", "聚会", "会议")
+_EVENT_ACTION_WORDS = ("去", "赴", "参加", "出席")
 _ACTIVITY_NOISE = set("去看听逛参加出席欣赏到和")
 
 # relative time expressions → coarse labels (date_expression keeps the raw text)
@@ -160,6 +162,13 @@ def _extract_activity(request: str) -> str | None:
         idx = text.find(word)
         if idx < 0:
             continue
+        if word in _GENERIC_OCCASION_WORDS:
+            prefix = text[max(0, idx - 8):idx]
+            if any(action in prefix for action in _EVENT_ACTION_WORDS):
+                return f"参加{word}"
+            # "夏季婚礼宾客穿搭" is an occasion/style constraint, not a
+            # specific live event whose venue/date should be researched.
+            return None
         prefix = text[max(0, idx - 4):idx]
         cleaned = "".join(char for char in prefix if char not in _ACTIVITY_NOISE).strip()
         if cleaned:
@@ -281,11 +290,8 @@ _RESOLVABLE_BY: dict[str, frozenset[str]] = {
 _SENSITIVE_EVENT_WORDS = (
     "演出", "音乐剧", "歌剧", "话剧", "舞剧", "演唱会", "音乐节", "展览",
     "展会", "会议", "婚礼", "晚宴", "聚会", "出差", "旅游", "旅行",
-    "海边", "度假", "露营", "通勤", "面试",
+    "海边", "度假", "露营",
 )
-_SEASON_WORDS = ("春天", "夏天", "秋天", "冬天", "春季", "夏季", "秋季", "冬季", "换季")
-
-
 def _decision_sensitive(
     request: str,
     thread_grounding: dict[str, Any] | None,
@@ -297,9 +303,14 @@ def _decision_sensitive(
     keeps driving SEARCH_FIRST / NEED_USER instead of silently going READY.
     """
     text = (request or "").strip()
-    if any(word in text for word in _SENSITIVE_EVENT_WORDS):
+    specific_events = tuple(
+        word for word in _SENSITIVE_EVENT_WORDS if word not in _GENERIC_OCCASION_WORDS
+    )
+    if any(word in text for word in specific_events):
         return True
-    if any(word in text for word in _SEASON_WORDS):
+    if any(word in text for word in _GENERIC_OCCASION_WORDS) and any(
+        action in text for action in _EVENT_ACTION_WORDS
+    ):
         return True
     if thread_grounding and thread_grounding.get("activity"):
         return True

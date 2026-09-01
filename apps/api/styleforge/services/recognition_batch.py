@@ -1,27 +1,22 @@
-"""In-process background batches for multi-modal wardrobe photo recognition.
-
-The batch endpoints submit each image to a fixed-size thread pool
-(``CONCURRENCY`` = 3) so several uploads are recognized in parallel instead of
-serializing one request at a time. Recognized-and-reliable photos are written
-straight into the user's wardrobe; failures are recorded per-image with a
-``reason`` the front end renders as a "manual add" affordance.
-
-Batches live only in this process: a backend restart drops in-flight tasks.
-This is an accepted trade-off for a local-first tool (see README).
-"""
+"""Persistent, resumable background batches for wardrobe photo recognition."""
 
 from __future__ import annotations
 
-import copy
+import hashlib
+import logging
+import os
+import shutil
+import tempfile
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from styleforge.repositories import recognition_batch_repository as batches
+from styleforge.repositories.database import database_session, initialize_database
+from styleforge.services.personal_embeddings import embed_personal_items
 from styleforge.services.wardrobe_item_service import create_photo_item
 from styleforge.vision.clothing_analysis import (
     attributes_to_dict,
@@ -32,12 +27,12 @@ from styleforge.vision.clothing_analysis import (
 )
 from styleforge.vision.vision_client import VisionInvalidJson, VisionUnavailable
 
-CONCURRENCY = 3
-DEFAULT_PER_IMAGE_MS = 8000.0
-MAX_BATCHES_KEPT = 100
-PROVIDER_CIRCUIT_BREAK_LIMIT = 2
 
-# Per-image failure reasons the front end maps to Chinese copy and buttons.
+CONCURRENCY = 3
+PROVIDER_CIRCUIT_BREAK_LIMIT = 2
+ITEM_NAMESPACE = uuid.UUID("29d959d2-377c-4a45-a275-3fa29c556fd1")
+logger = logging.getLogger(__name__)
+
 REASON_LOW_CONFIDENCE = "low_confidence"
 REASON_VISION_UNAVAILABLE = "vision_unavailable"
 REASON_INVALID_JSON = "invalid_json"
@@ -48,207 +43,289 @@ REASON_INTERNAL_ERROR = "internal_error"
 
 
 class VisionClientLike(Protocol):
-    """The slice of the vision client the batch worker uses."""
-
     def analyze_image(self, image_bytes: bytes, prompt: str) -> dict[str, Any]: ...
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_recognition_executor = ThreadPoolExecutor(
+    max_workers=CONCURRENCY,
+    thread_name_prefix="vision-batch",
+)
+_embedding_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="embedding-batch")
+_runtime_lock = threading.Lock()
+_provider_failures: dict[str, int] = {}
 
 
-@dataclass
-class BatchImageResult:
-    """Outcome of recognizing one uploaded photo."""
-
-    index: int
-    filename: str
-    status: str = "pending"  # pending | succeeded | failed
-    reason: str = ""
-    item_id: str = ""
-    item_type: str = ""
-    subtype: str = ""
-    color: str = ""
-    name: str = ""
-    confidence: float = 0.0
-    attributes: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "index": self.index,
-            "filename": self.filename,
-            "status": self.status,
-            "reason": self.reason,
-            "item_id": self.item_id,
-            "item_type": self.item_type,
-            "subtype": self.subtype,
-            "color": self.color,
-            "name": self.name,
-            "confidence": self.confidence,
-            "attributes": self.attributes,
-        }
+def batch_storage_root(artifact_root: Path, batch_id: str) -> Path:
+    digest = hashlib.sha256(batch_id.encode("utf-8")).hexdigest()[:32]
+    return (artifact_root.resolve() / "recognition_batches" / digest).resolve()
 
 
-@dataclass
-class RecognitionBatch:
-    """Snapshot of one batch recognition task (guarded by ``_store_lock``)."""
-
-    batch_id: str
-    user_id: str
-    total: int
-    started_at: str
-    gender: str = "women"
-    done: int = 0
-    succeeded: int = 0
-    failed: int = 0
-    status: str = "running"  # running | completed
-    finished_at: str | None = None
-    eta_seconds: int = 0
-    ema_ms: float = DEFAULT_PER_IMAGE_MS
-    consecutive_provider_failures: int = 0
-    results: list[BatchImageResult] = field(default_factory=list)
-
-    def snapshot(self) -> dict[str, Any]:
-        """Serialize a point-in-time view for the poll endpoint."""
-        self.eta_seconds = max(
-            0,
-            round(self.ema_ms * (self.total - self.done) / CONCURRENCY / 1000),
-        )
-        percent = round(self.done * 100 / self.total) if self.total else 100
-        return {
-            "batch_id": self.batch_id,
-            "user_id": self.user_id,
-            "total": self.total,
-            "gender": self.gender,
-            "done": self.done,
-            "percent": percent,
-            "succeeded": self.succeeded,
-            "failed": self.failed,
-            "status": self.status,
-            "eta_seconds": self.eta_seconds,
-            "started_at": self.started_at,
-            "finished_at": self.finished_at,
-            "results": [result.to_dict() for result in self.results],
-        }
+def _staged_image_path(artifact_root: Path, batch_id: str, relative_path: str) -> Path:
+    root = batch_storage_root(artifact_root, batch_id)
+    path = (root / relative_path).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError("Invalid recognition batch image path")
+    return path
 
 
-_executor = ThreadPoolExecutor(max_workers=CONCURRENCY, thread_name_prefix="vision-batch")
-_store: dict[str, RecognitionBatch] = {}
-_store_lock = threading.Lock()
+def _stage_images(
+    artifact_root: Path,
+    batch_id: str,
+    images: list[tuple[str, bytes]],
+) -> list[dict[str, Any]]:
+    root = batch_storage_root(artifact_root, batch_id)
+    input_root = root / "inputs"
+    input_root.mkdir(parents=True, exist_ok=False)
+    records: list[dict[str, Any]] = []
+    try:
+        for index, (filename, image_bytes) in enumerate(images):
+            relative_path = f"inputs/{index:04d}.upload"
+            destination = _staged_image_path(artifact_root, batch_id, relative_path)
+            handle = tempfile.NamedTemporaryFile(
+                dir=input_root,
+                prefix=f".{index:04d}-",
+                suffix=".tmp",
+                delete=False,
+            )
+            temporary = Path(handle.name)
+            try:
+                handle.write(image_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            finally:
+                handle.close()
+            os.replace(temporary, destination)
+            records.append(
+                {
+                    "index": index,
+                    "filename": filename,
+                    "input_relative_path": relative_path,
+                    "input_sha256": hashlib.sha256(image_bytes).hexdigest(),
+                }
+            )
+    except BaseException:
+        if root.is_relative_to(artifact_root.resolve()) and root.is_dir():
+            shutil.rmtree(root)
+        raise
+    return records
 
 
-def _record_result(
-    batch: RecognitionBatch,
-    index: int,
-    result: BatchImageResult,
+def _batch_item_id(batch_id: str, item_index: int) -> str:
+    return str(uuid.uuid5(ITEM_NAMESPACE, f"{batch_id}:{item_index}"))
+
+
+def _load_batch(database_path: str, batch_id: str) -> dict[str, Any] | None:
+    with database_session(database_path) as connection:
+        return batches.get_batch(connection, batch_id)
+
+
+def _record_provider_result(batch_id: str, reason: str) -> bool:
+    with _runtime_lock:
+        if reason == REASON_VISION_UNAVAILABLE:
+            count = _provider_failures.get(batch_id, 0) + 1
+            _provider_failures[batch_id] = count
+            return count >= PROVIDER_CIRCUIT_BREAK_LIMIT
+        _provider_failures[batch_id] = 0
+        return False
+
+
+def _clear_runtime(batch_id: str) -> None:
+    with _runtime_lock:
+        _provider_failures.pop(batch_id, None)
+
+
+def _finish_and_advance(
+    *,
+    database_path: str,
+    batch_id: str,
     wall_ms: float,
+    model_dir: Path,
 ) -> None:
-    """Update batch counters, EMA timing, and circuit-break state under lock."""
-    with _store_lock:
-        # Once the batch is completed (e.g. by the circuit breaker), a worker
-        # finishing late must not recount its failure or overwrite the
-        # breaker-marked result.
-        if batch.status != "running":
-            return
-        if result.status == "succeeded":
-            batch.succeeded += 1
-            batch.consecutive_provider_failures = 0
-        else:
-            batch.failed += 1
-            if result.reason == REASON_VISION_UNAVAILABLE:
-                batch.consecutive_provider_failures += 1
-            else:
-                batch.consecutive_provider_failures = 0
-        batch.results[index] = result
-        batch.done += 1
-        if batch.done == 1 or batch.ema_ms == DEFAULT_PER_IMAGE_MS:
-            batch.ema_ms = wall_ms
-        else:
-            batch.ema_ms = batch.ema_ms * 0.7 + wall_ms * 0.3
-
-        if batch.done >= batch.total:
-            batch.status = "completed"
-            batch.finished_at = _now()
-            return
-        if batch.consecutive_provider_failures >= PROVIDER_CIRCUIT_BREAK_LIMIT:
-            # Stop wasting time when the provider is down: mark everything the
-            # workers have not touched yet as provider_unavailable.
-            for pending in batch.results:
-                if pending.status == "pending":
-                    pending.status = "failed"
-                    pending.reason = REASON_PROVIDER_UNAVAILABLE
-                    batch.failed += 1
-                    batch.done += 1
-            batch.status = "completed"
-            batch.finished_at = _now()
+    with database_session(database_path) as connection:
+        snapshot, should_embed = batches.refresh_progress(
+            connection,
+            batch_id=batch_id,
+            wall_ms=wall_ms,
+        )
+    if should_embed:
+        _embedding_executor.submit(
+            _embed_batch_items,
+            database_path=database_path,
+            batch_id=batch_id,
+            model_dir=model_dir,
+        )
+    elif snapshot and snapshot["status"] in batches.TERMINAL_BATCH_STATUSES:
+        _clear_runtime(batch_id)
 
 
 def _process_image(
     *,
-    batch: RecognitionBatch,
-    index: int,
-    filename: str,
-    image_bytes: bytes,
-    default_gender: str,
+    batch_id: str,
+    item_index: int,
     vision_client: VisionClientLike,
     database_path: str,
     artifact_root: Path,
     model_dir: Path,
 ) -> None:
-    """Recognize one photo and auto-add it to the wardrobe when reliable."""
     started = time.perf_counter()
-    result = BatchImageResult(index=index, filename=filename)
+    with database_session(database_path) as connection:
+        item = batches.claim_item(connection, batch_id, item_index)
+        batch = batches.get_batch(connection, batch_id)
+    if item is None or batch is None:
+        return
+
+    result: dict[str, Any] = {
+        "status": "failed",
+        "reason": REASON_INTERNAL_ERROR,
+        "wardrobe_item_id": "",
+        "item_type": "",
+        "subtype": "",
+        "color": "",
+        "name": "",
+        "confidence": 0.0,
+        "attributes": None,
+    }
     try:
+        image_path = _staged_image_path(
+            artifact_root,
+            batch_id,
+            item["input_relative_path"],
+        )
+        image_bytes = image_path.read_bytes()
         raw = vision_client.analyze_image(image_bytes, build_analysis_prompt())
         attributes = parse_attributes(raw)
-        item_type, subtype = map_ai_type_to_item_fields(
-            attributes.type, attributes.subtype
+        item_type, subtype = map_ai_type_to_item_fields(attributes.type, attributes.subtype)
+        result.update(
+            {
+                "item_type": item_type,
+                "subtype": subtype,
+                "color": attributes.primary_color,
+                "name": attributes.description[:32] if attributes.description else "",
+                "confidence": attributes.confidence,
+                "attributes": attributes_to_dict(attributes),
+            }
         )
-        result.confidence = attributes.confidence
-        result.item_type = item_type
-        result.subtype = subtype
-        result.color = attributes.primary_color
-        result.name = attributes.description[:32] if attributes.description else ""
-        result.attributes = attributes_to_dict(attributes)
         if not is_reliable_analysis(attributes):
-            result.status = "failed"
-            result.reason = REASON_LOW_CONFIDENCE
-            return
-        created = create_photo_item(
+            result["reason"] = REASON_LOW_CONFIDENCE
+        else:
+            created = create_photo_item(
+                database_path=database_path,
+                artifact_root=artifact_root,
+                user_id=batch["user_id"],
+                image_bytes=image_bytes,
+                model_dir=model_dir,
+                device="cuda",
+                name=result["name"],
+                item_type=item_type,
+                subtype=subtype,
+                color=result["color"],
+                gender=batch["gender"],
+                attributes=result["attributes"],
+                item_id=_batch_item_id(batch_id, item_index),
+                skip_embedding=True,
+                skip_initialize=True,
+            )
+            result.update(
+                {
+                    "status": "succeeded",
+                    "reason": "",
+                    "wardrobe_item_id": created["item_id"],
+                }
+            )
+    except VisionUnavailable:
+        result["reason"] = REASON_VISION_UNAVAILABLE
+    except VisionInvalidJson:
+        result["reason"] = REASON_INVALID_JSON
+    except OSError:
+        result["reason"] = REASON_INVALID_IMAGE
+    except (ValueError, RuntimeError):
+        result["reason"] = REASON_CREATE_FAILED
+    except Exception:  # noqa: BLE001 - every persisted item must reach a safe state
+        logger.exception(
+            "recognition_item_failed batch_id=%s item_index=%s",
+            batch_id,
+            item_index,
+        )
+        result["reason"] = REASON_INTERNAL_ERROR
+
+    with database_session(database_path) as connection:
+        batches.finish_item(
+            connection,
+            batch_id=batch_id,
+            item_index=item_index,
+            **result,
+        )
+        if _record_provider_result(batch_id, result["reason"]):
+            batches.fail_pending_items(connection, batch_id, REASON_PROVIDER_UNAVAILABLE)
+    _finish_and_advance(
+        database_path=database_path,
+        batch_id=batch_id,
+        wall_ms=(time.perf_counter() - started) * 1000.0,
+        model_dir=model_dir,
+    )
+
+
+def _embed_batch_items(
+    *,
+    database_path: str,
+    batch_id: str,
+    model_dir: Path,
+) -> None:
+    batch = _load_batch(database_path, batch_id)
+    if batch is None:
+        return
+    item_ids = [result["item_id"] for result in batch["results"] if result["item_id"]]
+    try:
+        embedding = embed_personal_items(
             database_path=database_path,
-            artifact_root=artifact_root,
-            user_id=batch.user_id,
-            image_bytes=image_bytes,
+            item_ids=item_ids,
             model_dir=model_dir,
             device="cuda",
-            name=result.name,
-            item_type=item_type,
-            subtype=subtype,
-            color=result.color,
-            gender=default_gender,
-            attributes=result.attributes,
-            skip_embedding=True,
-            skip_initialize=True,
         )
-        result.status = "succeeded"
-        result.item_id = created["item_id"]
-    except VisionUnavailable:
-        result.status = "failed"
-        result.reason = REASON_VISION_UNAVAILABLE
-    except VisionInvalidJson:
-        result.status = "failed"
-        result.reason = REASON_INVALID_JSON
-    except OSError:
-        result.status = "failed"
-        result.reason = REASON_INVALID_IMAGE
-    except (ValueError, RuntimeError):
-        result.status = "failed"
-        result.reason = REASON_CREATE_FAILED
-    except Exception:  # noqa: BLE001 - the batch must always reach completed
-        result.status = "failed"
-        result.reason = REASON_INTERNAL_ERROR
-    finally:
-        _record_result(batch, index, result, (time.perf_counter() - started) * 1000.0)
+        embedding["retryable"] = False
+    except Exception as error:  # noqa: BLE001 - wardrobe commits stay durable
+        logger.exception(
+            "recognition_batch_embedding_failed batch_id=%s item_count=%s error_type=%s",
+            batch_id,
+            len(item_ids),
+            type(error).__name__,
+        )
+        embedding = {
+            "status": "failed",
+            "error_code": "PERSONAL_EMBEDDING_FAILED",
+            "error": "衣物已保存，但向量生成失败，可稍后重试",
+            "retryable": True,
+            "wardrobe_commit_preserved": True,
+            "requested_items": len(item_ids),
+        }
+    with database_session(database_path) as connection:
+        batches.finish_embedding(connection, batch_id=batch_id, embedding=embedding)
+    _clear_runtime(batch_id)
+
+
+def _submit_pending(
+    *,
+    database_path: str,
+    batch_id: str,
+    artifact_root: Path,
+    model_dir: Path,
+    vision_client: VisionClientLike,
+) -> int:
+    batch = _load_batch(database_path, batch_id)
+    if batch is None:
+        return 0
+    pending = [result for result in batch["results"] if result["status"] == "pending"]
+    for result in pending:
+        _recognition_executor.submit(
+            _process_image,
+            batch_id=batch_id,
+            item_index=result["index"],
+            vision_client=vision_client,
+            database_path=database_path,
+            artifact_root=artifact_root,
+            model_dir=model_dir,
+        )
+    return len(pending)
 
 
 def start_batch(
@@ -260,73 +337,178 @@ def start_batch(
     database_path: str,
     artifact_root: Path,
     model_dir: Path,
-) -> RecognitionBatch:
-    """Register a batch and kick off recognition for every image in the pool."""
-    batch = RecognitionBatch(
-        batch_id=f"recognition:{uuid.uuid4()}",
-        user_id=user_id,
-        total=len(images),
-        started_at=_now(),
-        gender=default_gender,
-        results=[
-            BatchImageResult(index=index, filename=filename)
-            for index, (filename, _) in enumerate(images)
-        ],
+    auto_embed: bool = True,
+) -> dict[str, Any]:
+    initialize_database(database_path)
+    batch_id = f"recognition:{uuid.uuid4()}"
+    records = _stage_images(artifact_root, batch_id, images)
+    try:
+        with database_session(database_path) as connection:
+            batches.create_batch(
+                connection,
+                batch_id=batch_id,
+                user_id=user_id,
+                gender=default_gender,
+                auto_embed=auto_embed,
+                items=records,
+            )
+            snapshot = batches.get_batch(connection, batch_id)
+    except BaseException:
+        root = batch_storage_root(artifact_root, batch_id)
+        if root.is_relative_to(artifact_root.resolve()) and root.is_dir():
+            shutil.rmtree(root)
+        raise
+    _submit_pending(
+        database_path=database_path,
+        batch_id=batch_id,
+        artifact_root=artifact_root,
+        model_dir=model_dir,
+        vision_client=vision_client,
     )
-    with _store_lock:
-        _store[batch.batch_id] = batch
-        if len(_store) > MAX_BATCHES_KEPT:
-            completed_ids = [
-                batch_id
-                for batch_id, item in _store.items()
-                if item.status == "completed"
-            ]
-            for batch_id in completed_ids[: len(_store) - MAX_BATCHES_KEPT]:
-                del _store[batch_id]
+    if snapshot is None:
+        raise RuntimeError("Recognition batch was not persisted")
+    return snapshot
 
-    for index, (filename, image_bytes) in enumerate(images):
-        _executor.submit(
-            _process_image,
-            batch=batch,
-            index=index,
-            filename=filename,
-            image_bytes=image_bytes,
-            default_gender=default_gender,
-            vision_client=vision_client,
-            database_path=database_path,
-            artifact_root=artifact_root,
-            model_dir=model_dir,
+
+def get_batch(database_path: str, batch_id: str) -> dict[str, Any] | None:
+    return _load_batch(database_path, batch_id)
+
+
+def list_batches(database_path: str, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    with database_session(database_path) as connection:
+        return batches.list_batches(connection, user_id, limit)
+
+
+def retry_batch_embedding(
+    *,
+    user_id: str,
+    batch_id: str,
+    database_path: str,
+    model_dir: Path,
+) -> dict[str, Any] | None:
+    with database_session(database_path) as connection:
+        batch = batches.get_batch(connection, batch_id)
+        if batch is None or batch["user_id"] != user_id:
+            return None
+        if not batches.start_embedding_retry(connection, batch_id):
+            return None
+        snapshot = batches.get_batch(connection, batch_id)
+    _embedding_executor.submit(
+        _embed_batch_items,
+        database_path=database_path,
+        batch_id=batch_id,
+        model_dir=model_dir,
+    )
+    return snapshot
+
+
+def retry_batch(
+    *,
+    user_id: str,
+    batch_id: str,
+    vision_client: VisionClientLike,
+    database_path: str,
+    artifact_root: Path,
+    model_dir: Path,
+) -> dict[str, Any] | None:
+    with database_session(database_path) as connection:
+        batch = batches.get_batch(connection, batch_id)
+        if batch is None or batch["user_id"] != user_id:
+            return None
+        retryable = any(
+            result["status"] in {"failed", "pending"} for result in batch["results"]
+        ) and batch["status"] in {"partial_failed", "interrupted"}
+        if not retryable:
+            return None
+        batches.reset_failed_items(connection, batch_id)
+        batches.mark_batch_recovering(connection, batch_id)
+        snapshot = batches.get_batch(connection, batch_id)
+    _clear_runtime(batch_id)
+    _submit_pending(
+        database_path=database_path,
+        batch_id=batch_id,
+        artifact_root=artifact_root,
+        model_dir=model_dir,
+        vision_client=vision_client,
+    )
+    return snapshot
+
+
+def resume_incomplete_batches(
+    *,
+    vision_client: VisionClientLike | None,
+    database_path: str,
+    artifact_root: Path,
+    model_dir: Path,
+) -> dict[str, int]:
+    with database_session(database_path) as connection:
+        batch_ids = batches.list_recoverable_batch_ids(connection)
+    resumed = 0
+    interrupted = 0
+    for batch_id in batch_ids:
+        batch = _load_batch(database_path, batch_id)
+        if batch is None:
+            continue
+        if batch["status"] == "embedding":
+            _embedding_executor.submit(
+                _embed_batch_items,
+                database_path=database_path,
+                batch_id=batch_id,
+                model_dir=model_dir,
+            )
+            resumed += 1
+            continue
+        if vision_client is None:
+            with database_session(database_path) as connection:
+                batches.mark_interrupted(connection, batch_id, "VISION_UNAVAILABLE")
+            interrupted += 1
+            continue
+        with database_session(database_path) as connection:
+            batches.mark_batch_recovering(connection, batch_id)
+        resumed += int(
+            _submit_pending(
+                database_path=database_path,
+                batch_id=batch_id,
+                artifact_root=artifact_root,
+                model_dir=model_dir,
+                vision_client=vision_client,
+            )
+            > 0
         )
-    return batch
+    return {"recoverable": len(batch_ids), "resumed": resumed, "interrupted": interrupted}
 
 
-def get_batch(batch_id: str) -> RecognitionBatch | None:
-    """Return a deep copy of a batch so readers never race the workers."""
-    with _store_lock:
-        batch = _store.get(batch_id)
-        return copy.deepcopy(batch) if batch is not None else None
+def delete_batch(
+    *,
+    user_id: str,
+    batch_id: str,
+    database_path: str,
+    artifact_root: Path,
+) -> bool:
+    with database_session(database_path) as connection:
+        deleted = batches.delete_batch(connection, user_id, batch_id)
+    if not deleted:
+        return False
+    root = batch_storage_root(artifact_root, batch_id)
+    if root.is_relative_to(artifact_root.resolve()) and root.is_dir():
+        shutil.rmtree(root)
+    _clear_runtime(batch_id)
+    return True
 
 
-def list_batches(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
-    """Summaries of a user's batches, newest first (deep copies, no race)."""
-    with _store_lock:
-        owned = [
-            copy.deepcopy(batch)
-            for batch in _store.values()
-            if batch.user_id == user_id
-        ]
-    owned.sort(key=lambda batch: batch.started_at, reverse=True)
-    return [batch.snapshot() for batch in owned[:limit]]
-
-
-def delete_batch(user_id: str, batch_id: str) -> bool:
-    """Remove a user's batch (e.g. after its results were handled).
-
-    Returns True when the batch existed and belonged to ``user_id``.
-    """
-    with _store_lock:
-        batch = _store.get(batch_id)
-        if batch is None or batch.user_id != user_id:
-            return False
-        del _store[batch_id]
-        return True
+def batch_input_path(
+    *,
+    user_id: str,
+    batch_id: str,
+    item_index: int,
+    database_path: str,
+    artifact_root: Path,
+) -> Path | None:
+    batch = _load_batch(database_path, batch_id)
+    if batch is None or batch["user_id"] != user_id:
+        return None
+    item = next((item for item in batch["results"] if item["index"] == item_index), None)
+    if item is None:
+        return None
+    path = _staged_image_path(artifact_root, batch_id, item["input_relative_path"])
+    return path if path.is_file() else None

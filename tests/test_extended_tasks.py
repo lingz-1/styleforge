@@ -51,6 +51,30 @@ def _seed_database(db_dsn: str, user_id: str = "u") -> str:
     return database_path
 
 
+def test_commute_gap_adds_missing_separates_to_fact_layer(db_dsn: str) -> None:
+    database_path = _seed_database(db_dsn)
+    with database_session(database_path) as connection:
+        dress = make_item("dress", "dress", "Navy work dress", "navy")
+        shoes = make_item("heels", "shoes", "Black low heels", "black")
+        upsert_items(connection, [dress, shoes], "test")
+        add_items(connection, "dress-user", [dress.item_id, shoes.item_id])
+
+    request = "分析衣橱结构缺口，如果还要覆盖日常通勤，最缺哪些核心单品"
+    route = TaskRouter().route(request, requested_task_type=TaskType.WARDROBE_GAP)
+    output = analyze_extension_task(
+        database_path=database_path,
+        knowledge_root=KNOWLEDGE_ROOT,
+        task_input=TaskExecutionInput(user_id="dress-user", request=request),
+        route=route,
+        context_pack=None,
+    )
+
+    missing = {element["id"] for element in output.facts["missing_elements"]}
+    assert {"slot:top", "slot:bottom"} <= missing
+    assert "slot:footwear" not in missing
+    assert output.resolved_target["analysis_mode"] == "targeted"
+
+
 def test_modify_missing_target_reports_unsatisfiable_instead_of_clarifying(
     db_dsn: str,
 ) -> None:
@@ -361,6 +385,95 @@ def test_sanitize_keeps_stackable_layering_and_accessories() -> None:
     assert cleaned.result["alternatives"][0]["item_ids"] == [
         "shirt", "cardigan", "ear1", "ring1", "pant1", "shoe1",
     ]
+
+
+def test_one_piece_explicit_support_slots_are_retrieved_and_enforced(
+    db_dsn: str,
+) -> None:
+    """EXT-002: a dress request naming shoes, outerwear and accessories must
+    expose all three candidate groups and reject any completed outfit that
+    silently omits one of them."""
+    import pytest
+
+    from styleforge.models.agent_tasks import Agent2TaskOutput
+    from styleforge.tools.extension_validation import validate_extension_draft
+
+    database_path = _seed_database(db_dsn)
+    items = [
+        make_item("dress", "dress", "Navy lace dress", "navy"),
+        make_item("pumps", "shoes", "Nude low heel pumps", "beige"),
+        make_item("cardigan", "outwear", "Beige soft cardigan", "beige"),
+        make_item("earrings", "earrings", "Pearl earrings", "white"),
+    ]
+    with database_session(database_path) as connection:
+        upsert_items(connection, items, "test")
+        add_items(connection, "u", [item.item_id for item in items])
+
+    request = "这条连衣裙怎么搭？帮我把鞋、外搭和配饰都配完整"
+    route = TaskRouter().route(request)
+    assert route.task_type is TaskType.ITEM_ADVICE
+    agent1 = analyze_extension_task(
+        database_path=database_path,
+        knowledge_root=KNOWLEDGE_ROOT,
+        task_input=TaskExecutionInput(user_id="u", request=request, item_id="dress"),
+        route=route,
+        context_pack=None,
+    )
+    assert agent1.facts["requested_support_slots"] == [
+        "footwear",
+        "outerwear",
+        "accessory",
+    ]
+    compatible = agent1.facts["compatible_items_by_slot"]
+    assert "pumps" in {item["item_id"] for item in compatible["footwear"]}
+    assert "cardigan" in {item["item_id"] for item in compatible["outerwear"]}
+    assert "earrings" in {item["item_id"] for item in compatible["accessory"]}
+
+    def draft(item_ids: list[str]) -> Agent2TaskOutput:
+        return Agent2TaskOutput(
+            task_type=TaskType.ITEM_ADVICE,
+            status="completed",
+            summary="完整搭配",
+            result={
+                "status": "completed",
+                "anchor_item": agent1.facts["anchor_item"],
+                "anchor_source": "wardrobe",
+                "compatible_items_by_slot": compatible,
+                "sample_outfits": [
+                    {"outfit_id": "look-1", "item_ids": item_ids, "reasoning": "婚礼搭配"}
+                ],
+            },
+            used_item_ids=item_ids,
+        )
+
+    wardrobe_ids = {item.item_id for item in items}
+    with pytest.raises(ValueError, match="outerwear.*accessory"):
+        validate_extension_draft(
+            agent1=agent1,
+            agent2=draft(["dress", "pumps"]),
+            wardrobe_ids=wardrobe_ids,
+        )
+    false_infeasible = Agent2TaskOutput(
+        task_type=TaskType.ITEM_ADVICE,
+        status="infeasible",
+        summary="无法搭配",
+        result={
+            "status": "infeasible",
+            "title": "单品搭配",
+            "summary": "无法搭配",
+        },
+    )
+    with pytest.raises(ValueError, match="应为 completed"):
+        validate_extension_draft(
+            agent1=agent1,
+            agent2=false_infeasible,
+            wardrobe_ids=wardrobe_ids,
+        )
+    validate_extension_draft(
+        agent1=agent1,
+        agent2=draft(["dress", "pumps", "cardigan", "earrings"]),
+        wardrobe_ids=wardrobe_ids,
+    )
 
 
 def test_flexible_candidate_pool_is_bounded_and_slot_balanced() -> None:

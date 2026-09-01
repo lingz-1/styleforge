@@ -13,6 +13,10 @@ from styleforge.core.schemas import CatalogItem, EmbeddingStatus, ImageStatus
 from styleforge.repositories.catalog_repository import upsert_items
 from styleforge.repositories.database import database_session, initialize_database
 from styleforge.repositories.dataset_source_repository import register_dataset_source
+from styleforge.repositories.personal_embedding_repository import (
+    invalidate_personal_embeddings,
+    mark_personal_embedding_failed,
+)
 from styleforge.repositories.wardrobe_import_repository import (
     personal_image_root,
     personal_source_for_user,
@@ -62,6 +66,7 @@ def create_photo_item(
     gender: str = "women",
     size: str = "",
     attributes: dict | None = None,
+    item_id: str | None = None,
     skip_embedding: bool = False,
     skip_initialize: bool = False,
 ) -> dict[str, Any]:
@@ -80,7 +85,7 @@ def create_photo_item(
 
     if not skip_initialize:
         initialize_database(database_path)
-    item_id = str(uuid.uuid4())
+    item_id = item_id or str(uuid.uuid4())
     source = personal_source_for_user(user_id)
     root = personal_image_root(artifact_root, user_id)
     filename = save_personal_image(root, item_id, image_bytes)
@@ -148,6 +153,12 @@ def create_photo_item(
                 item_id, position, image_role, image_filename,
                 relative_image_path, image_status, is_primary
             ) VALUES (%s, 0, 'primary', %s, %s, 'available', 1)
+            ON CONFLICT(item_id, position) DO UPDATE SET
+                image_role = excluded.image_role,
+                image_filename = excluded.image_filename,
+                relative_image_path = excluded.relative_image_path,
+                image_status = excluded.image_status,
+                is_primary = excluded.is_primary
             """,
             (item_id, filename, filename),
         )
@@ -163,11 +174,15 @@ def create_photo_item(
                 device=device,
                 batch_size=1,
             )
-        except BaseException as error:
+        except Exception as error:  # noqa: BLE001 - item remains available for retry
+            with database_session(database_path) as connection:
+                mark_personal_embedding_failed(connection, [item_id])
             embedding = {
                 "status": "failed",
                 "error_type": type(error).__name__,
-                "error": str(error),
+                "error_code": "PERSONAL_EMBEDDING_FAILED",
+                "error": "衣物已保存，但向量生成失败，可稍后重试",
+                "retryable": True,
             }
 
     with database_session(database_path) as connection:
@@ -248,6 +263,7 @@ def update_personal_item(
             f"WHERE item_id = %s",
             (*updates.values(), item_id),
         )
+        invalidate_personal_embeddings(connection, [item_id])
 
     try:
         embedding = embed_personal_items(
@@ -257,11 +273,15 @@ def update_personal_item(
             device=device,
             batch_size=1,
         )
-    except BaseException as error:
+    except Exception as error:  # noqa: BLE001 - metadata is durable; expose safe retry
+        with database_session(database_path) as connection:
+            mark_personal_embedding_failed(connection, [item_id])
         embedding = {
             "status": "failed",
             "error_type": type(error).__name__,
-            "error": str(error),
+            "error_code": "PERSONAL_EMBEDDING_FAILED",
+            "error": "衣物已更新，但向量生成失败，可稍后重试",
+            "retryable": True,
         }
 
     with database_session(database_path) as connection:

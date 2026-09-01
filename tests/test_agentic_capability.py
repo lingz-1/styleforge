@@ -9,6 +9,8 @@ OnToolError → normalized ToolCallResult) with stateful write-backs.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from pydantic import BaseModel
 
 from styleforge.agentic.environment import Draft, Environment
@@ -39,6 +41,7 @@ from styleforge.agentic.tools.local_tools import (
     register_local_tools,
 )
 from styleforge.models.agentic_contract import EnvironmentFacts, OutfitSnapshot
+from styleforge.workflow.task_workflow import MultiTaskWorkflow
 
 from tests.helpers import make_item
 
@@ -124,6 +127,26 @@ def test_runtime_available_research_never_gets_wardrobe_tools() -> None:
     names = {t.name for t in registry.runtime_available(AGENT_RESEARCH, _ALL_CAPS)}
 
     assert names == {"search_web", "get_weather", "search_knowledge", "load_skill"}
+
+
+def test_workflow_does_not_advertise_unavailable_web_search_provider() -> None:
+    workflow = object.__new__(MultiTaskWorkflow)
+    workflow.web_search_provider = SimpleNamespace(available=False)
+    workflow.weather_provider = None
+    workflow.knowledge_retriever = None
+    workflow.skills_root = None
+
+    assert CAP_WEB_SEARCH not in workflow._runtime_capabilities()
+
+
+def test_workflow_advertises_available_web_search_provider() -> None:
+    workflow = object.__new__(MultiTaskWorkflow)
+    workflow.web_search_provider = SimpleNamespace(available=True)
+    workflow.weather_provider = None
+    workflow.knowledge_retriever = None
+    workflow.skills_root = None
+
+    assert CAP_WEB_SEARCH in workflow._runtime_capabilities()
 
 
 # ── Layer 3: check_precondition ────────────────────────────────────────────

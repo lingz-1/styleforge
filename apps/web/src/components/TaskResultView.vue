@@ -9,6 +9,18 @@
       <div class="metric"><strong>{{ payload.llm_call_count || 0 }}</strong><span>次模型调用</span></div>
     </section>
 
+    <section v-if="wardrobeRetrieval.calls" class="retrieval-status block">
+      <div>
+        <strong>衣橱检索</strong>
+        <span>{{ wardrobeRetrieval.calls }} 次 · {{ retrievalModeLabel }} · {{ wardrobeRetrieval.total_duration_ms || 0 }} ms</span>
+      </div>
+      <span v-if="wardrobeRetrieval.degraded_calls" class="retrieval-degraded">
+        {{ wardrobeRetrieval.degraded_calls }} 次检索发生降级
+      </span>
+      <span v-else-if="wardrobeRetrieval.semantic_used" class="retrieval-ready">语义检索正常</span>
+      <span v-else class="retrieval-keyword">本次使用关键词检索</span>
+    </section>
+
     <el-alert
       v-if="needsClarification"
       :title="result.clarification_question || '需要补充信息后才能继续。'"
@@ -74,6 +86,12 @@
       <div class="outfit-grid">
         <article v-for="(outfit, index) in recommendOutfits" :key="outfit.outfit_id" class="outfit-card">
           <header><span>LOOK {{ String(index + 1).padStart(2, '0') }}</span><strong>{{ fmtScore(outfit.score) }}</strong></header>
+          <p v-if="outfit.acceptance_status === 'DEGRADED_ACCEPTED'" class="degraded-note">
+            审校重试后保留：{{ outfit.degraded_reason || '当前衣橱暂时没有更合适的差异化方案' }}
+          </p>
+          <p v-else-if="outfit.score_source === 'neutral_fallback'" class="score-note">
+            本次评审未返回五维分，暂按中性分展示
+          </p>
           <div class="image-grid">
             <div
               v-for="itemId in outfit.item_ids"
@@ -125,6 +143,12 @@
       <div class="outfit-grid">
         <article v-for="(outfit, index) in result.alternatives || []" :key="outfit.outfit_id || index" class="outfit-card">
           <header><span>替换方案 {{ index + 1 }}</span><strong>{{ fmtScore(outfit.score) }}</strong></header>
+          <p v-if="outfit.acceptance_status === 'DEGRADED_ACCEPTED'" class="degraded-note">
+            审校重试后保留：{{ outfit.degraded_reason || '当前衣橱暂时没有更合适的方案' }}
+          </p>
+          <p v-else-if="outfit.score_source === 'neutral_fallback'" class="score-note">
+            本次评审未返回五维分，暂按中性分展示
+          </p>
           <div class="image-grid">
             <div
               v-for="itemId in outfitIds(outfit)"
@@ -326,9 +350,22 @@ const TASK_LABELS = { outfit_recommend: '穿搭推荐', outfit_modify: '局部�
 const SLOT_LABELS = { top: '上衣', bottom: '下装', footwear: '鞋履', outerwear: '外套', one_piece: '连衣裙', bag: '包袋', accessory: '配饰' }
 
 const result = computed(() => props.payload?.result || {})
+const wardrobeRetrieval = computed(() => (
+  props.payload?.diagnostics?.wardrobe_retrieval || {}
+))
+const retrievalModeLabel = computed(() => {
+  const labels = { hybrid: '语义+关键词', semantic: '语义', keyword: '关键词' }
+  return (wardrobeRetrieval.value.modes || []).map((mode) => labels[mode] || mode).join('、') || '未记录'
+})
 const isRecommend = computed(() => props.payload?.task_type === 'outfit_recommend')
 const recommendation = computed(() => (isRecommend.value ? result.value : {}))
-const recommendOutfits = computed(() => recommendation.value.structured_result?.recommendations || [])
+// New responses use the versioned structured contract. The flat fallback keeps
+// previously persisted deterministic sessions renderable during migration.
+const recommendOutfits = computed(() => (
+  recommendation.value.structured_result?.recommendations
+  || recommendation.value.recommendations
+  || []
+))
 const weatherFacts = computed(() => recommendation.value.environment_context?.weather || null)
 const weatherLocation = computed(() => weatherFacts.value?.resolved_location?.display_name
   || [weatherFacts.value?.resolved_location?.name, weatherFacts.value?.resolved_location?.admin1, weatherFacts.value?.resolved_location?.country].filter(Boolean).join('，')
@@ -507,6 +544,7 @@ const recommendationLabel = (value) => ({ recommended: '建议', consider: '可�
 .result-head p { margin: 0; color: #7c8580; font-size: 12px; }
 .task-chip { color: var(--copper); font-size: 12px; font-weight: 700; letter-spacing: .12em; }
 .metric { text-align: right; }.metric strong { display: block; font-size: 32px; }.metric span { color: #7c8580; font-size: 12px; }
+.retrieval-status { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 13px; border: 1px solid #d5dbd6; background: #faf9f4; font-size: 12px; }.retrieval-status div { display: flex; gap: 9px; align-items: baseline; }.retrieval-status strong { color: var(--moss); }.retrieval-status div span, .retrieval-keyword { color: #717b76; }.retrieval-ready { color: #53705f; }.retrieval-degraded { color: #9a552d; }
 .section-heading { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid #d7ddd8; margin-bottom: 14px; }
 .section-heading h3 { margin: 0 0 8px; font-family: Georgia, 'Noto Serif SC', serif; font-size: 23px; font-weight: 500; }.section-heading span { color: #78827c; font-size: 12px; }
 .weather-facts { display: flex; justify-content: space-between; gap: 24px; padding: 16px 18px; border-left: 3px solid var(--copper); background: #f3f1ea; }
@@ -526,6 +564,7 @@ const recommendationLabel = (value) => ({ recommended: '建议', consider: '可�
 .carry-recommendations { margin-top: 8px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }.carry-recommendations strong { color: var(--moss); font-size: 12px; }.carry-chip { padding: 3px 8px; border: 1px solid #cbd2cc; border-radius: 999px; font-size: 12px; color: #4b5751; }
 .outfit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }.outfit-card { padding: 14px; border: 1px solid #d5dbd6; background: #fff; }
 .outfit-card header { display: flex; justify-content: space-between; margin-bottom: 10px; color: #69736e; font-size: 12px; letter-spacing: .08em; }.outfit-card header strong { color: var(--copper); font-size: 16px; }
+.outfit-card .degraded-note { padding: 7px 9px; border-left: 2px solid #b66a31; background: #fff5e8; color: #8a4b20; font-size: 12px; }.outfit-card .score-note { color: #7c8580; font-size: 11px; }
 .image-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }.image-cell { min-width: 0; }.image-grid :deep(.el-image) { width: 100%; height: 150px; background: #ecefea; }.image-empty { height: 150px; display: grid; place-items: center; color: #9ba39f; }.image-cell.clickable { cursor: pointer; }.image-cell.clickable:hover :deep(.el-image) { outline: 2px solid var(--copper); outline-offset: -2px; }.outfit-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e3e7e2; }
 .outfit-card p { color: #5e6863; font-size: 13px; line-height: 1.6; }.knowledge-layout { display: grid; grid-template-columns: .9fr 1.1fr; gap: 28px; }.summary { font-size: 16px; line-height: 1.8; color: #4f5a54; }
 .principle { padding: 13px 0; border-top: 1px solid #e0e4e0; }.principle p { margin-bottom: 0; color: #68726d; }.item-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }.item-tile { min-width: 0; }.item-tile :deep(.el-image) { width: 100%; height: 130px; background: #edf0ec; }.item-tile strong, .item-tile span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.item-tile strong { margin-top: 7px; font-size: 13px; }.item-tile span { color: #818984; font-size: 11px; }

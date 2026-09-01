@@ -36,6 +36,7 @@ from styleforge.agentic.context.prompt_assembler import (
     ContextStats,
     PromptAssembler,
     PromptBundle,
+    _format_extension_facts,
 )
 from styleforge.agentic.context.visibility import ContextVisibilityPolicy
 from styleforge.agentic.environment import Draft
@@ -76,7 +77,41 @@ def _view(agent: str):
     return ContextVisibilityPolicy().view_for(agent)
 
 
+def test_extension_prompt_renders_nested_deterministic_facts() -> None:
+    text = _format_extension_facts(
+        {
+            "task_type": "wardrobe_compatibility",
+            "intent_summary": "评估真实候选鞋",
+            "resolved_target": {"candidate_slot": "footwear"},
+            "facts": {
+                "candidate_item": {
+                    "item_id": "107132140",
+                    "name": "Bourne Sabrina Shoe in Grey",
+                    "item_type": "shoes",
+                    "color": "gray",
+                },
+                "candidate_slot": "footwear",
+                "compatible_items_by_slot": {
+                    "one_piece": [
+                        {
+                            "item_id": "151616863",
+                            "name": "Equipment Racquel Silk Slip Dress",
+                            "item_type": "dress",
+                            "color": "green",
+                        }
+                    ]
+                },
+            },
+        }
+    )
+
+    assert "Bourne Sabrina Shoe in Grey" in text
+    assert "Equipment Racquel Silk Slip Dress" in text
+    assert "footwear" in text
+
+
 # ── H1a-7: PromptBundle / profile key / fingerprint ─────────────────────────
+
 
 def test_profile_key_is_agent_plus_versions_not_dynamic() -> None:
     assembler = _assembler()
@@ -188,7 +223,9 @@ def test_dynamic_facts_only_in_runtime_and_user_segments() -> None:
             outfit=OutfitSnapshot(
                 outfit_id="d",
                 item_ids=["top-1"],
-                items=[ItemSnapshot(item_id="top-1", name="白衬衫", item_type="top", color="white")],
+                items=[
+                    ItemSnapshot(item_id="top-1", name="白衬衫", item_type="top", color="white")
+                ],
             ),
             layers={},
         ),
@@ -209,7 +246,7 @@ def test_dynamic_facts_only_in_runtime_and_user_segments() -> None:
         assert marker not in bundle.capability_context
 
 
-def test_system_text_joins_stable_and_runtime_layers() -> None:
+def test_system_text_excludes_dynamic_runtime_layer() -> None:
     # Give the state a plan so the C layer is non-empty — all three segments
     # must render, joined by "\n\n" and nothing trailing.
     state = {"request": "x", "plan": PlanState(objective="看剧")}
@@ -217,9 +254,9 @@ def test_system_text_joins_stable_and_runtime_layers() -> None:
         AGENT_STYLIST, ContextAssembler().assemble(AGENT_STYLIST, state), _stylist_tools()
     )
     assert bundle.runtime_context != ""
-    assert bundle.system_text == (
-        bundle.stable_system + "\n\n" + bundle.capability_context + "\n\n" + bundle.runtime_context
-    )
+    assert bundle.system_text == bundle.stable_system + "\n\n" + bundle.capability_context
+    assert bundle.runtime_context not in bundle.system_text
+    assert bundle.runtime_context in bundle.model_user_message
 
 
 def test_fingerprint_deterministic_and_ignores_dynamic_parts() -> None:
@@ -272,6 +309,7 @@ def test_deterministic_tool_ordering_across_calls() -> None:
 
 
 # ── H1a-5/6: visibility + re-assembly before every model call ───────────────
+
 
 def test_visibility_gates_sources_per_agent() -> None:
     state = {
@@ -341,7 +379,9 @@ def test_assembler_reassembles_fresh_state_before_each_call() -> None:
     assert first.candidates == []
 
     # Research completes between the two calls → next call must see it.
-    state["research_evidence"] = ResearchEvidence(theme_elements=["硬汉舞剧"], uncertainties=["未找到官方着装要求"])
+    state["research_evidence"] = ResearchEvidence(
+        theme_elements=["硬汉舞剧"], uncertainties=["未找到官方着装要求"]
+    )
     state["candidates"] = [{"item_ids": ["top-1"]}]
     second = assembler.assemble(AGENT_STYLIST, state)
 
@@ -361,10 +401,13 @@ def test_assembler_reassembles_fresh_state_before_each_call() -> None:
 
 # ── H1a-7: dual protocol (one bundle feeds chat_tools AND chat_json) ────────
 
+
 def test_same_bundle_feeds_chat_tools_and_chat_json() -> None:
     prompt = _assembler()
     stylist_bundle = prompt.build(
-        AGENT_STYLIST, ContextAssembler().assemble(AGENT_STYLIST, {"request": "看剧"}), _stylist_tools()
+        AGENT_STYLIST,
+        ContextAssembler().assemble(AGENT_STYLIST, {"request": "看剧"}),
+        _stylist_tools(),
     )
     critic_bundle = prompt.build(
         AGENT_CRITIC, ContextAssembler().assemble(AGENT_CRITIC, {"request": "看剧"}), []
@@ -373,11 +416,11 @@ def test_same_bundle_feeds_chat_tools_and_chat_json() -> None:
     llm = FakeLlm([{"decision_summary": "ok", "control": "CANDIDATE_READY"}])
     decision_text, blocks, _ = llm.chat_tools(
         system=stylist_bundle.system_text,
-        user=stylist_bundle.user_message,
+        user=stylist_bundle.model_user_message,
         tools=stylist_bundle.tools,
     )
     assert llm.calls[0]["system"] == stylist_bundle.system_text
-    assert llm.calls[0]["user"] == stylist_bundle.user_message
+    assert llm.calls[0]["user"] == stylist_bundle.model_user_message
     assert llm.calls[0]["tools"] == stylist_bundle.tools
     assert "CANDIDATE_READY" in decision_text
     assert blocks == []
@@ -385,7 +428,7 @@ def test_same_bundle_feeds_chat_tools_and_chat_json() -> None:
     json_llm = FakeLlm([{"approved": True, "issues": [], "feedback": ""}])
     payload, _ = json_llm.chat_json(
         system=critic_bundle.system_text,
-        user=critic_bundle.user_message,
+        user=critic_bundle.model_user_message,
         json_schema={"type": "object", "properties": {"approved": {"type": "boolean"}}},
     )
     assert json_llm.calls[0]["system"] == critic_bundle.system_text
@@ -394,6 +437,7 @@ def test_same_bundle_feeds_chat_tools_and_chat_json() -> None:
 
 # ── H1a-16: decision state machines + handoff envelope ──────────────────────
 
+
 def test_clarification_request_requires_question() -> None:
     with pytest.raises(ValidationError):
         ClarificationRequest()  # question is required
@@ -401,66 +445,93 @@ def test_clarification_request_requires_question() -> None:
 
 
 def test_coordinator_need_user_requires_clarification() -> None:
-    assert check_decision_contract(
-        CoordinatorDecision(decision_summary="s", goal="g", need_user=True)
-    ) != []
-    assert check_decision_contract(
-        CoordinatorDecision(
-            decision_summary="s",
-            goal="g",
-            need_user=True,
-            clarification=ClarificationRequest(question="哪里不满意？"),
+    assert (
+        check_decision_contract(CoordinatorDecision(decision_summary="s", goal="g", need_user=True))
+        != []
+    )
+    assert (
+        check_decision_contract(
+            CoordinatorDecision(
+                decision_summary="s",
+                goal="g",
+                need_user=True,
+                clarification=ClarificationRequest(question="哪里不满意？"),
+            )
         )
-    ) == []
+        == []
+    )
 
 
 def test_coordinator_three_state_mutual_exclusion() -> None:
     # need_user + need_plan_update are mutually exclusive.
-    assert check_decision_contract(
-        CoordinatorDecision(
-            decision_summary="s",
-            goal="g",
-            need_user=True,
-            need_plan_update=True,
-            clarification=ClarificationRequest(question="?"),
+    assert (
+        check_decision_contract(
+            CoordinatorDecision(
+                decision_summary="s",
+                goal="g",
+                need_user=True,
+                need_plan_update=True,
+                clarification=ClarificationRequest(question="?"),
+            )
         )
-    ) != []
+        != []
+    )
     # need_user with next_agent set is a violation.
-    assert check_decision_contract(
-        CoordinatorDecision(
-            decision_summary="s",
-            goal="g",
-            need_user=True,
-            clarification=ClarificationRequest(question="?"),
-            next_agent="STYLIST",
+    assert (
+        check_decision_contract(
+            CoordinatorDecision(
+                decision_summary="s",
+                goal="g",
+                need_user=True,
+                clarification=ClarificationRequest(question="?"),
+                next_agent="STYLIST",
+            )
         )
-    ) != []
+        != []
+    )
     # handoff mode requires next_agent.
     assert check_decision_contract(CoordinatorDecision(decision_summary="s", goal="g")) != []
-    assert check_decision_contract(
-        CoordinatorDecision(decision_summary="s", goal="g", next_agent="STYLIST")
-    ) == []
+    assert (
+        check_decision_contract(
+            CoordinatorDecision(decision_summary="s", goal="g", next_agent="STYLIST")
+        )
+        == []
+    )
 
 
 def test_research_and_stylist_need_user_contract() -> None:
-    assert check_decision_contract(ResearchDecision(decision_summary="s", control="NEED_USER")) != []
-    assert check_decision_contract(
-        ResearchDecision(
-            decision_summary="s",
-            control="NEED_USER",
-            clarification=ClarificationRequest(question="需要哪一天？"),
+    assert (
+        check_decision_contract(ResearchDecision(decision_summary="s", control="NEED_USER")) != []
+    )
+    assert (
+        check_decision_contract(
+            ResearchDecision(
+                decision_summary="s",
+                control="NEED_USER",
+                clarification=ClarificationRequest(question="需要哪一天？"),
+            )
         )
-    ) == []
-    assert check_decision_contract(ResearchDecision(decision_summary="s", control="RESEARCH_COMPLETE")) == []
+        == []
+    )
+    assert (
+        check_decision_contract(ResearchDecision(decision_summary="s", control="RESEARCH_COMPLETE"))
+        == []
+    )
     # clarification without NEED_USER is a protocol mismatch.
-    assert check_decision_contract(
-        ResearchDecision(
-            decision_summary="s",
-            control="RESEARCH_COMPLETE",
-            clarification=ClarificationRequest(question="?"),
+    assert (
+        check_decision_contract(
+            ResearchDecision(
+                decision_summary="s",
+                control="RESEARCH_COMPLETE",
+                clarification=ClarificationRequest(question="?"),
+            )
         )
-    ) != []
-    assert check_decision_contract(StylistDecision(decision_summary="s", control="CANDIDATE_READY")) == []
+        != []
+    )
+    assert (
+        check_decision_contract(StylistDecision(decision_summary="s", control="CANDIDATE_READY"))
+        == []
+    )
     assert check_decision_contract(StylistDecision(decision_summary="s", control="NEED_USER")) != []
 
 
@@ -482,6 +553,7 @@ def test_handoff_result_envelope_and_closed_statuses() -> None:
 
 
 # ── H1a-8: ContextGuard ─────────────────────────────────────────────────────
+
 
 def _small_bundle() -> PromptBundle:
     stable = "S" * 50
@@ -531,11 +603,9 @@ def test_guard_over_budget_truncates_runtime_keeps_stable_and_user() -> None:
     assert "目标：看剧" in truncated.runtime_context
     # Stats were recomputed to match the truncated bundle.
     assert truncated.context_stats.total_chars == (
-        len(truncated.stable_system)
-        + len(truncated.capability_context)
-        + len(truncated.runtime_context)
-        + len(truncated.user_message)
+        len(truncated.system_text) + len(truncated.model_user_message)
     )
+    assert truncated.context_stats.dynamic_chars == len(truncated.model_user_message)
 
 
 def test_guard_hard_limit_is_explicit_failure_not_faked_completion() -> None:

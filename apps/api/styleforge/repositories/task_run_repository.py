@@ -40,17 +40,20 @@ def finish_task_run(
     status: str,
     context_pack: dict[str, Any],
     result: dict[str, Any],
+    diagnostics: dict[str, Any] | None = None,
 ) -> None:
     connection.execute(
         """
         UPDATE task_runs
-        SET status = %s, context_pack_json = %s, result_json = %s, finished_at = %s
+        SET status = %s, context_pack_json = %s, result_json = %s,
+            diagnostics_json = %s, finished_at = %s
         WHERE run_id = %s
         """,
         (
             status,
             json.dumps(context_pack, ensure_ascii=False, sort_keys=True),
             json.dumps(result, ensure_ascii=False, sort_keys=True),
+            json.dumps(diagnostics or {}, ensure_ascii=False, sort_keys=True),
             _now(),
             run_id,
         ),
@@ -99,6 +102,7 @@ def get_task_run(
         "status": row["status"],
         "context_pack": json.loads(row["context_pack_json"]),
         "result": json.loads(row["result_json"]) if row["result_json"] else None,
+        "diagnostics": json.loads(row["diagnostics_json"] or "{}"),
         "error_message": row["error_message"],
         "created_at": row["created_at"],
         "finished_at": row["finished_at"],

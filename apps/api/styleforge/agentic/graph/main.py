@@ -27,12 +27,18 @@ from styleforge.agentic.agentic_contract import StyleForgeState
 from styleforge.agentic.agents.coordinator.graph import build_coordinator_subgraph
 from styleforge.agentic.agents.critic.graph import make_critic_node
 from styleforge.agentic.context.grounding import pending_field_for_question
-from styleforge.agentic.agents.extension.graph import build_extension_subgraph
+from styleforge.agentic.agents.extension.graph import (
+    build_extension_subgraph,
+    can_direct_close_extension,
+)
 from styleforge.agentic.agents.research.graph import build_research_subgraph
 from styleforge.agentic.agents.stylist.graph import build_stylist_subgraph
 from styleforge.agentic.gates.environment import make_environment_gate
+from styleforge.agentic.intent_constraints import desired_features_for_request
 from styleforge.agentic.gates.goal import make_goal_gate
 from styleforge.agentic.runtime.agent_runtime import AgentRuntime
+from styleforge.core.categories import infer_slot
+from styleforge.models.agentic_contract import ModifyOp, ModifyPlan
 
 # Staged candidate entries (frozen #19: STAGED + run_id, never persisted here).
 # DEGRADED_ACCEPTED: the bounded-replan budget force-accepted a physically-valid
@@ -46,7 +52,19 @@ _CANDIDATE_STATUS_DEGRADED = "DEGRADED_ACCEPTED"
 # candidate can drift into an unbounded "similar → rejected → retry" loop.
 # After this many consecutive rejections the gate accepts the physically-valid
 # candidate (flagged in gate_feedback) instead of looping forever.
-MAX_CRITIC_RETRIES = 3
+MAX_CRITIC_RETRIES = 2
+
+
+def _desired_features_for_request(request: str) -> set[str]:
+    """Translate explicit user intent into deterministic recovery features."""
+    return desired_features_for_request(request)
+
+
+def _request_needs_outerwear(request: str, desired_features: set[str]) -> bool:
+    text = (request or "").lower()
+    explicit = ("外套", "大衣", "风衣", "雨衣", "coat", "jacket", "outerwear")
+    weather_protection = bool({"waterproof", "warm", "windproof"}.intersection(desired_features))
+    return any(marker in text for marker in explicit) or weather_protection
 
 
 def build_h1b_main_graph(
@@ -120,10 +138,7 @@ def _build_main_graph(
         # stays inside (frozen #18). The harness-side EvidenceStore journals the
         # product for tracing/audit — a Runtime Dependency, never in the state.
         result = research_subgraph.invoke(state)
-        if (
-            evidence_store is not None
-            and result.get("research_evidence") is not None
-        ):
+        if evidence_store is not None and result.get("research_evidence") is not None:
             evidence_store.save(result["research_evidence"], state.get("run_id", ""))
         return result
 
@@ -162,7 +177,7 @@ def _build_main_graph(
         draft = state["working_draft"]
         status = (
             _CANDIDATE_STATUS_DEGRADED
-            if state.get("degraded_accept", False)
+            if state.get("degraded_accept", False) or state.get("candidate_recovered", False)
             else _CANDIDATE_STATUS_STAGED
         )
         entry = {
@@ -170,6 +185,8 @@ def _build_main_graph(
             "run_id": state.get("run_id", ""),
             "outfit": draft.outfit,
             "item_ids": list(draft.outfit.item_ids),
+            "environment_valid": bool(state.get("environment_valid", False)),
+            "review": state["critic_result"].model_dump(mode="json"),
         }
         return {"candidates": list(state.get("candidates") or []) + [entry]}
 
@@ -182,6 +199,96 @@ def _build_main_graph(
             "gate_feedback": None,
             "candidate_retries": 0,
             "degraded_accept": False,
+            "candidate_recovered": False,
+            "candidate_recovery_attempted": False,
+            "candidate_recovery_issues": [],
+            "intent_constraint_failed": False,
+            "intent_constraint_issues": [],
+        }
+
+    def recover_grounded_candidate(state: StyleForgeState) -> dict[str, Any]:
+        """Build one wardrobe-grounded candidate after an empty protocol failure."""
+        wardrobe_items = list(getattr(environment, "wardrobe_items", None) or [])
+        base_draft = state.get("base_draft")
+        if not wardrobe_items or base_draft is None:
+            return {
+                "candidate_recovered": False,
+                "candidate_recovery_attempted": True,
+                "candidate_recovery_issues": ["wardrobe_or_base_draft_missing"],
+            }
+
+        request = str(state.get("request") or "").lower()
+        desired_features = _desired_features_for_request(request)
+
+        by_slot: dict[str, list[Any]] = {}
+        for item in wardrobe_items:
+            by_slot.setdefault(infer_slot(item.item_type), []).append(item)
+
+        def best(slot: str) -> Any | None:
+            candidates = by_slot.get(slot) or []
+            if not candidates:
+                return None
+            return max(
+                candidates,
+                key=lambda item: (
+                    len(
+                        desired_features.intersection(
+                            str(feature).lower() for feature in item.features
+                        )
+                    ),
+                    sum(
+                        token in f"{item.name} {item.description}".lower()
+                        for token in desired_features
+                    ),
+                    item.item_id,
+                ),
+            )
+
+        one_piece = best("one_piece")
+        footwear = best("footwear")
+        if one_piece is not None and footwear is not None:
+            selected = [one_piece, footwear]
+        else:
+            selected = [best("top"), best("bottom"), footwear]
+            if any(item is None for item in selected):
+                return {
+                    "candidate_recovered": False,
+                    "candidate_recovery_attempted": True,
+                    "candidate_recovery_issues": ["complete_core_slots_unavailable"],
+                }
+
+        if any(marker in request for marker in ("配饰", "首饰", "accessory", "jewelry")):
+            accessory = best("accessory")
+            if accessory is not None:
+                selected.append(accessory)
+        if any(marker in request for marker in ("包", "bag")):
+            bag = best("bag")
+            if bag is not None:
+                selected.append(bag)
+        if _request_needs_outerwear(request, desired_features):
+            outerwear = best("outerwear")
+            if outerwear is not None:
+                selected.append(outerwear)
+
+        plan = ModifyPlan(
+            ops=[ModifyOp(action="add", item_id=item.item_id) for item in selected],
+            reasoning=f"基于当前衣橱按用户请求“{state.get('request', '')}”组合完整搭配",
+        )
+        recovered, issues = environment.modify_outfit(base_draft, plan)
+        if recovered is None:
+            return {
+                "candidate_recovered": False,
+                "candidate_recovery_attempted": True,
+                "candidate_recovery_issues": list(issues),
+                "gate_feedback": "确定性候选恢复失败：" + "；".join(issues),
+            }
+        return {
+            "working_draft": recovered,
+            "handoff_result": None,
+            "gate_feedback": "Stylist 协议预算耗尽；已从当前衣橱恢复可验证候选",
+            "candidate_recovered": True,
+            "candidate_recovery_attempted": True,
+            "candidate_recovery_issues": [],
         }
 
     def clarification_node(state: StyleForgeState) -> dict[str, Any]:
@@ -220,11 +327,20 @@ def _build_main_graph(
         handoff = state.get("handoff_result")
         if handoff is None:
             return "end_node"
+        if (
+            handoff.status == "PROTOCOL_ERROR"
+            and state.get("task_type") == "outfit_recommend"
+            and not state.get("candidates")
+        ):
+            return "recover_candidate"
         return {
             "COMPLETED": "environment_gate",
             "NEEDS_CLARIFICATION": "clarification",
             "PROTOCOL_ERROR": "end_node",
         }[handoff.status]
+
+    def route_after_recovery(state: StyleForgeState) -> str:
+        return "environment_gate" if state.get("candidate_recovered") else "end_node"
 
     def route_after_coordinator(state: StyleForgeState) -> str:
         handoff = state.get("handoff_result")
@@ -237,6 +353,18 @@ def _build_main_graph(
         # COMPLETED — the Coordinator's product is the TaskState (frozen #5).
         task_state = state.get("task_state")
         next_agent = task_state.next_agent if task_state is not None else None
+        authoritative_type = str(state.get("task_type") or "")
+        if authoritative_type == "outfit_recommend" and next_agent == "EXTENSION":
+            next_agent = "STYLIST"
+        elif authoritative_type == "outfit_modify":
+            next_agent = "STYLIST"
+        elif authoritative_type in {
+            "style_advice",
+            "item_advice",
+            "wardrobe_compatibility",
+            "wardrobe_gap",
+        }:
+            next_agent = "EXTENSION"
         return {"STYLIST": "stylist", "RESEARCH": "research", "EXTENSION": "extension"}.get(
             next_agent, "end_node"
         )
@@ -262,11 +390,27 @@ def _build_main_graph(
         }[handoff.status]
 
     def route_after_environment(state: StyleForgeState) -> str:
-        return "critic" if state.get("environment_valid") else "stylist"
+        if state.get("environment_valid"):
+            return "critic"
+        if state.get("task_type") == "outfit_recommend" and state.get("intent_constraint_failed"):
+            if not state.get("candidate_recovery_attempted"):
+                return "recover_candidate"
+            return "end_node"
+        return "stylist"
 
     def route_after_critic(state: StyleForgeState) -> str:
         if state["critic_result"].approved:
             return "stage_candidate"
+        scores = state["critic_result"].dimension_scores
+        severe_intent_mismatch = scores is not None and (
+            scores.request_relevance <= 3 or scores.request_specificity <= 3
+        )
+        if (
+            state.get("task_type") == "outfit_recommend"
+            and not state.get("candidate_recovered")
+            and severe_intent_mismatch
+        ):
+            return "recover_candidate"
         if state.get("candidate_retries", 0) >= MAX_CRITIC_RETRIES:
             # Replan budget exhausted (frozen #7 bounded diversity): accept the
             # physically-valid candidate so a finite wardrobe can still fill the
@@ -276,6 +420,26 @@ def _build_main_graph(
 
     def route_after_goal(state: StyleForgeState) -> str:
         return "end_node" if state.get("enough_candidates") else "reset_candidate_draft"
+
+    def route_after_bootstrap(state: StyleForgeState) -> str:
+        # Complete, deterministically verified extension facts need no manager
+        # planning. Routing them straight to Extension prevents a model
+        # coordinator from re-requesting details already resolved from the
+        # wardrobe and knowledge base.
+        if can_direct_close_extension(dict(state)):
+            return "extension"
+        task_type = str(state.get("task_type") or "")
+        if task_type == "outfit_modify":
+            return "stylist"
+        if task_type == "outfit_recommend":
+            grounding = state.get("grounding_context")
+            grounding = grounding if isinstance(grounding, dict) else {}
+            needs_research = grounding.get("decision") == "search_first" or (
+                bool(grounding.get("destination_city")) and bool(grounding.get("activity"))
+            )
+            if not needs_research:
+                return "stylist"
+        return "coordinator"
 
     # wiring --------------------------------------------------------------
 
@@ -287,6 +451,7 @@ def _build_main_graph(
     builder.add_node("stage_candidate", stage_candidate)
     builder.add_node("goal_gate", goal_gate)
     builder.add_node("reset_candidate_draft", reset_candidate_draft)
+    builder.add_node("recover_candidate", recover_grounded_candidate)
     builder.add_node("clarification", clarification_node)
     builder.add_node("end_node", end_node)
 
@@ -298,7 +463,15 @@ def _build_main_graph(
     builder.add_edge(START, "bootstrap")
 
     if with_coordinator:
-        builder.add_edge("bootstrap", "coordinator")
+        builder.add_conditional_edges(
+            "bootstrap",
+            route_after_bootstrap,
+            {
+                "coordinator": "coordinator",
+                "extension": "extension",
+                "stylist": "stylist",
+            },
+        )
         builder.add_conditional_edges(
             "coordinator",
             route_after_coordinator,
@@ -335,19 +508,34 @@ def _build_main_graph(
         route_after_stylist,
         {
             "environment_gate": "environment_gate",
+            "recover_candidate": "recover_candidate",
             "clarification": "clarification",
             "end_node": "end_node",
         },
     )
     builder.add_conditional_edges(
+        "recover_candidate",
+        route_after_recovery,
+        {"environment_gate": "environment_gate", "end_node": "end_node"},
+    )
+    builder.add_conditional_edges(
         "environment_gate",
         route_after_environment,
-        {"critic": "critic", "stylist": "stylist"},
+        {
+            "critic": "critic",
+            "stylist": "stylist",
+            "recover_candidate": "recover_candidate",
+            "end_node": "end_node",
+        },
     )
     builder.add_conditional_edges(
         "critic",
         route_after_critic,
-        {"stage_candidate": "stage_candidate", "stylist": "stylist"},
+        {
+            "stage_candidate": "stage_candidate",
+            "stylist": "stylist",
+            "recover_candidate": "recover_candidate",
+        },
     )
     builder.add_edge("stage_candidate", "goal_gate")
     builder.add_conditional_edges(

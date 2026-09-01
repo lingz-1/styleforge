@@ -38,6 +38,10 @@ from pathlib import Path
 from typing import Any
 
 from styleforge.agentic.context.grounding import thread_grounding_to_prompt
+from styleforge.agentic.context.prompt_security import (
+    PromptSecurityReport,
+    secure_prompt_payload,
+)
 from styleforge.agentic.context.thread_preferences import thread_preferences_to_prompt
 from styleforge.agentic.context.wardrobe_index import format_wardrobe_index
 
@@ -67,6 +71,8 @@ class PromptBundle(BaseModel):
     capability_context: str = ""
     runtime_context: str = ""
     user_message: str = ""
+    secured_user_message: str = ""
+    security_report: PromptSecurityReport = Field(default_factory=PromptSecurityReport)
     tools: list[ToolDefinition] = Field(default_factory=list)
     prompt_profile_key: str | None = None
     stable_prefix_fingerprint: str | None = None
@@ -74,10 +80,16 @@ class PromptBundle(BaseModel):
 
     @property
     def system_text(self) -> str:
-        """The full system prompt: stable prefix + capability + runtime."""
-        return "\n\n".join(
-            part for part in (self.stable_system, self.capability_context, self.runtime_context) if part
-        )
+        """Only stable trusted instructions; dynamic data never enters system."""
+        return "\n\n".join(part for part in (self.stable_system, self.capability_context) if part)
+
+    @property
+    def model_user_message(self) -> str:
+        """Dynamic context and current turn wrapped as explicitly scoped data."""
+        if self.secured_user_message:
+            return self.secured_user_message
+        secured, _ = secure_prompt_payload(self.runtime_context, self.user_message)
+        return secured
 
 
 class PromptAssembler:
@@ -111,18 +123,25 @@ class PromptAssembler:
         # B layer = tool capability manifest + skill manifest (metadata only).
         if skill_manifest:
             capability_context = (
-                f"{capability_context}\n\n{skill_manifest}" if capability_context else skill_manifest
+                f"{capability_context}\n\n{skill_manifest}"
+                if capability_context
+                else skill_manifest
             )
         runtime_context = self._runtime_context(context)
         user_message = self._user_message(context)
+        secured_user_message, security_report = secure_prompt_payload(runtime_context, user_message)
 
         stable_chars = len(stable_system) + len(capability_context)
-        dynamic_chars = len(runtime_context) + len(user_message)
+        # Budget the actual provider payload, including security boundaries and
+        # notices, rather than the pre-wrapped source strings.
+        dynamic_chars = len(secured_user_message)
         return PromptBundle(
             stable_system=stable_system,
             capability_context=capability_context,
             runtime_context=runtime_context,
             user_message=user_message,
+            secured_user_message=secured_user_message,
+            security_report=security_report,
             tools=list(tools),
             prompt_profile_key=self._profile_key(agent),
             stable_prefix_fingerprint=self._fingerprint(
@@ -144,6 +163,7 @@ class PromptAssembler:
             return cached
         parts = [
             self._read("shared/harness_core.md"),
+            self._read("shared/prompt_security.md"),
             self._read("shared/tool_protocol.md"),
             self._read(f"{agent}.md"),
         ]
@@ -185,6 +205,12 @@ class PromptAssembler:
         sections: list[str] = []
         if view is None:
             return ""
+        if view.enabled("task_type") and context.task_type:
+            sections.append(
+                "【权威任务路由】\n"
+                f"任务类型：{context.task_type}\n"
+                "该类型已由工作流确定，不得改派到其他任务类型。"
+            )
         if view.enabled("plan") and context.plan is not None:
             sections.append(_format_plan(context.plan))
         if view.enabled("task_state") and context.task_state is not None:
@@ -250,9 +276,7 @@ class PromptAssembler:
         tools: list[ToolDefinition],
     ) -> str:
         canonical_tools = _canonical_tools(tools)
-        payload = "\x1f".join(
-            [stable_system, capability_context, skill_manifest, canonical_tools]
-        )
+        payload = "\x1f".join([stable_system, capability_context, skill_manifest, canonical_tools])
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -278,6 +302,7 @@ def _canonical_tools(tools: list[ToolDefinition]) -> str:
 
 
 # ── C-layer section formatters ──────────────────────────────────────────────
+
 
 def _format_plan(plan: Any) -> str:
     lines = ["【任务计划】"]
@@ -367,7 +392,8 @@ def _format_drafts(working_draft: Any, base_draft: Any, candidate_count: int = 0
         if candidate_count:
             return (
                 f"当前搭配：（空）——上一套已保存为候选{candidate_count}，这是全新的一套。"
-                "必须**从零组合**：一次性 add 全部所需单品（上装/下装/鞋履，按需外套/配饰），"
+                "必须**从零组合**：一次性 add 全部所需单品（连衣裙/连体装+鞋履，"
+                "或上装+下装+鞋履；按需外套/配饰），"
                 "不要对空搭配做 replace 或 remove。"
             )
         return "当前搭配：（空）——从零组合一套完整搭配。"
@@ -402,7 +428,8 @@ def _format_extension_facts(facts: dict[str, Any]) -> str:
             lines.append(f"解析目标：{json.dumps(resolved_target, ensure_ascii=False)}")
     if facts.get("needs_clarification"):
         lines.append(f"⚠ 需要向用户澄清：{facts.get('clarification_question') or '信息不足'}")
-    body = _format_extension_fact_body(facts)
+    nested_facts = facts.get("facts")
+    body = _format_extension_fact_body(nested_facts if isinstance(nested_facts, dict) else facts)
     if body:
         lines.append(body)
     return "\n".join(lines)
@@ -420,7 +447,8 @@ def _format_extension_fact_body(facts: dict[str, Any]) -> str:
         body.append(f"锚点单品：{_item_short(anchor)}（来源：{source}）")
     elif facts.get("anchor_candidates"):
         body.append(
-            "候选锚点（请向用户确认）：" + "；".join(_item_short(item) for item in facts["anchor_candidates"])
+            "候选锚点（请向用户确认）："
+            + "；".join(_item_short(item) for item in facts["anchor_candidates"])
         )
     candidate_item = facts.get("candidate_item")
     if candidate_item:
@@ -441,19 +469,29 @@ def _format_extension_fact_body(facts: dict[str, Any]) -> str:
         body.append(f"衣橱单品数：{facts['wardrobe_item_count']}")
         slot_counts = facts.get("slot_counts")
         if isinstance(slot_counts, dict) and slot_counts:
-            body.append("槽位分布：" + "、".join(f"{slot}×{count}" for slot, count in slot_counts.items()))
+            body.append(
+                "槽位分布：" + "、".join(f"{slot}×{count}" for slot, count in slot_counts.items())
+            )
         type_counts = facts.get("item_type_counts")
         if isinstance(type_counts, dict) and type_counts:
-            body.append("品类分布：" + "、".join(f"{kind}×{count}" for kind, count in type_counts.items()))
+            body.append(
+                "品类分布：" + "、".join(f"{kind}×{count}" for kind, count in type_counts.items())
+            )
         top_colors = facts.get("top_colors")
         if top_colors:
             body.append("主色：" + "、".join(f"{color}×{count}" for color, count in top_colors))
     missing = facts.get("missing_elements")
     if missing:
-        body.append("缺失元素：" + "；".join(str(element.get("label") or element.get("id")) for element in missing))
+        body.append(
+            "缺失元素："
+            + "；".join(str(element.get("label") or element.get("id")) for element in missing)
+        )
     covered = facts.get("covered_elements")
     if covered:
-        body.append("已覆盖元素：" + "；".join(str(element.get("label") or element.get("id")) for element in covered))
+        body.append(
+            "已覆盖元素："
+            + "；".join(str(element.get("label") or element.get("id")) for element in covered)
+        )
     entries = facts.get("knowledge_entries")
     if entries:
         body.append("相关知识条目：" + "；".join(_entry_short(entry) for entry in entries[:6]))
@@ -523,9 +561,7 @@ def _format_memories(memories: list[Any]) -> str:
     避免), keeping the layer boundaries visible. Untagged legacy entries keep the
     flat 【相关记忆】 shape.
     """
-    if memories and all(
-        isinstance(item, dict) and item.get("layer") for item in memories
-    ):
+    if memories and all(isinstance(item, dict) and item.get("layer") for item in memories):
         sections: list[str] = []
         current_label: str | None = None
         for item in memories:

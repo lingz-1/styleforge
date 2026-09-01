@@ -59,31 +59,49 @@ CAP_SKILLS = "skills"
 
 # ── input models ──────────────────────────────────────────────────────────
 
+
 class InspectOutfitInput(BaseModel):
-    outfit_id: str = Field(default="active", description="搭配 id；active 表示当前正在编辑的搭配")
+    outfit_id: str = Field(
+        default="active",
+        max_length=128,
+        description="搭配 id；active 表示当前正在编辑的搭配",
+    )
 
 
 class SearchWardrobeInput(BaseModel):
-    query: str = Field(description="关键词，中英文均可尝试")
+    query: str = Field(min_length=1, max_length=200, description="关键词，中英文均可尝试")
     limit: int | None = Field(default=None, description="返回数量上限")
 
 
 class SearchWebInput(BaseModel):
-    query: str = Field(description="外部事实查询（活动/演出/展会/天气等）")
+    query: str = Field(
+        min_length=1,
+        max_length=200,
+        description="外部事实查询（活动/演出/展会/天气等）",
+    )
 
 
 class GetWeatherInput(BaseModel):
-    location: str = Field(description="地点名称")
-    date_expression: str = Field(default="", description="ISO 日期；空则默认近 3 天")
+    location: str = Field(min_length=1, max_length=120, description="地点名称")
+    date_expression: str = Field(
+        default="",
+        max_length=32,
+        description="ISO 日期；空则默认近 3 天",
+    )
 
 
 class SearchKnowledgeInput(BaseModel):
-    query: str = Field(description="知识库检索词")
+    query: str = Field(min_length=1, max_length=200, description="知识库检索词")
     kind: Literal["style", "item"] = Field(default="style", description="知识类别")
 
 
 class LoadSkillInput(BaseModel):
-    skill_name: str = Field(description="任务类型技能名，如 event_outfit_planning")
+    skill_name: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-zA-Z0-9_./-]+$",
+        description="任务类型技能名，如 event_outfit_planning",
+    )
 
 
 class ModifyOutfitInput(BaseModel):
@@ -96,6 +114,7 @@ class UpdatePlanInput(BaseModel):
 
 # ── precondition (Layer 3) ────────────────────────────────────────────────
 
+
 def _working_draft_present(state: dict[str, Any]) -> str | None:
     if state.get("working_draft") is None:
         return "当前没有正在编辑的搭配（working_draft 为空），无法执行 modify_outfit"
@@ -103,6 +122,7 @@ def _working_draft_present(state: dict[str, Any]) -> str | None:
 
 
 # ── handlers ──────────────────────────────────────────────────────────────
+
 
 @dataclass(frozen=True, slots=True)
 class _Wrappers:
@@ -134,14 +154,27 @@ def _make_handlers(env: Any, knowledge_retriever: Any | None) -> _Wrappers:
     def search_wardrobe(inp: SearchWardrobeInput, ctx: ToolContext) -> ToolCallResult:
         result = env.search_wardrobe(inp.query or "", inp.limit)
         items = [f"{item.item_id}({item.item_type}/{item.color})" for item in result.results]
+        mode_label = {
+            "hybrid": "语义+关键词",
+            "semantic": "语义",
+            "keyword": "关键词",
+        }.get(result.retrieval_mode, "关键词")
         if items:
             return ToolCallResult(
-                observation=f"找到 {result.matched} 件（展示前 {len(items)} 件）：" + "、".join(items)
+                observation=(
+                    f"通过{mode_label}检索找到 {result.matched} 件"
+                    f"（展示前 {len(items)} 件）：" + "、".join(items)
+                )
             )
+        if result.diagnostics.get("pool_count") == 0:
+            retry_hint = "当前衣橱没有该品类的可检索单品。"
+        elif result.semantic_available:
+            retry_hint = "建议换更具体的品类、颜色或风格描述重试。"
+        else:
+            retry_hint = "语义索引当前不可用，建议换具体关键词或英文同义词重试。"
         return ToolCallResult(
             observation=(
-                f"未找到匹配单品（共检索 {result.matched} 件）。"
-                "衣橱单品名称/描述为英文，建议改英文关键词再试（如 sneakers、jeans）。"
+                f"通过{mode_label}检索未找到匹配单品（共检索 {result.matched} 件）。{retry_hint}"
             )
         )
 
@@ -150,7 +183,9 @@ def _make_handlers(env: Any, knowledge_retriever: Any | None) -> _Wrappers:
 
     def get_weather(inp: GetWeatherInput, ctx: ToolContext) -> ToolCallResult:
         return ToolCallResult(
-            observation=weather_observation(env.get_weather(inp.location or "", inp.date_expression or ""))
+            observation=weather_observation(
+                env.get_weather(inp.location or "", inp.date_expression or "")
+            )
         )
 
     def search_knowledge(inp: SearchKnowledgeInput, ctx: ToolContext) -> ToolCallResult:
@@ -158,7 +193,9 @@ def _make_handlers(env: Any, knowledge_retriever: Any | None) -> _Wrappers:
             return ToolCallResult(observation="知识库未配置。可改用 search_web 或自行判断。")
         evidence, _ = knowledge_retriever.search(inp.query or "", kind=inp.kind, limit=4)
         if not evidence:
-            return ToolCallResult(observation="知识库未找到相关条目。可改用 search_web 或自行判断。")
+            return ToolCallResult(
+                observation="知识库未找到相关条目。可改用 search_web 或自行判断。"
+            )
         lines = [f"{e.section}：{e.content}" for e in evidence]
         text = "知识库检索结果（仅供知识参考）：\n" + "\n".join(lines)
         return ToolCallResult(observation=text[: MAX_OBSERVATION_CHARS * 2])
@@ -213,6 +250,7 @@ def _make_handlers(env: Any, knowledge_retriever: Any | None) -> _Wrappers:
 
 
 # ── registration ──────────────────────────────────────────────────────────
+
 
 def register_local_tools(
     registry: CapabilityRegistry,

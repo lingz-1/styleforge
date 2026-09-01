@@ -325,7 +325,7 @@ D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app --app-dir apps\a
 - 真实端到端（key 就位后，用数据集配饰图而非内存图）：3 张真实饰品全部识别成功自动入库（confidence 1.0），ETA 从 8s 动态下降；`POST → 后台识别 → DELETE` 链路验证他人删除 404 / 本人删除 200 / 列表清除 / 单查 404；PUT 编辑 attributes 后 GET 确认完整存储。
 - 识别结果宽容化校验（commit `48f6350`）：避免模型脏数据触发"other / 0%"降级。
 
-> 说明：批次存进程内存，后端重启丢失去运行中任务（README 已注明，本地优先工具的接受取舍）。批量 worker 的 `skip_embedding=True` 意味着新入库单品 `embedding_status=pending`，后续统一补嵌入（可复用订单导入的增量嵌入入口）。
+> 说明：批次存进程内存，后端重启会失去运行中任务（README 已注明，本地优先工具的接受取舍）。批量 worker 仍以 `skip_embedding=True` 快速入库，但第 23 节已接通批次结束后的统一增量嵌入和失败重试。
 
 ## 11. 会话持久化多轮对话 + 用户长期记忆系统（2026-08-12，已实现）
 
@@ -744,7 +744,7 @@ LLM 证据（`llm/memory_schema.py` / `memory_prompts.py` / `services/memory_ext
 1. **stylist 无强制提交** → 步数耗尽 PROTOCOL_ERROR、0 候选。修复：步数上限时 draft 有单品 → 强制 CANDIDATE_READY；空 draft → PROTOCOL_ERROR；fresh-research nudge（免费注入，不耗模型预算）。
 2. **research_synthesizer 拼凑事实** → 早期版本伪造「2026 音乐节 @ 国家大剧院」。修复：`research_synthesizer.md` 强化「活动身份不确定时绝不拼凑」（event/venue/timing 必须留 null，写 uncertainties）。
 3. **research「散文 + 工具调用」整轮丢弃（本场景 0 候选的直接根因）**：真实 DeepSeek 在长上下文后习惯「散文前缀 + 工具调用」一起输出，而 `AgentRuntime._request` 只对「空文本 + 工具」放行，散文非空 → 整轮判协议错误——**工具白调、步数不递增**，research 永远到不了 6 步强制 synthesize 上限，卡死在「搜索 → 散文被拒 → 重入」直到协议错误计数耗尽。修复：有工具调用本身就是「继续干活」的强意图信号 → 散文+工具 infer CONTINUE 执行；散文无工具仍协议错误（绝不从叙述编造终态）。
-4. **research 反复搜索不收敛**：搜到「上海文化广场 2026-07-08」具体信息后仍继续搜德国/奥地利（模型把「德奥音乐剧」误读为德国/奥地利）。MAX_RESEARCH_STEPS=6 强制 synthesize 兜底，未确认事实由 synthesizer 写 uncertainties。
+4. **research 反复搜索不收敛**：搜到「上海文化广场 2026-07-08」具体信息后仍继续搜德国/奥地利（模型把「德奥音乐剧」误读为德国/奥地利）。当时以 MAX_RESEARCH_STEPS=6 强制 synthesize 兜底；第 25 节引入并行工具调用后进一步收紧为 4，未确认事实仍由 synthesizer 写 uncertainties。
 
 ### 19.4 验证证据
 
@@ -777,3 +777,103 @@ LLM 证据（`llm/memory_schema.py` / `memory_prompts.py` / `services/memory_ext
 - 全量回归 **766 passed**（删 4 个测试文件，恢复并跑通 legacy 扩展链测试组）。
 - 本次改动文件 `ruff check` 干净；`compileall` 通过。
 - 变更集：删 9 文件 + 改 2 文件（`task_workflow.py` 删 shadow、`test_agentic_modify_primary.py` shadow 断言回落 agentic）。
+
+---
+
+## 21. Prometheus 指标与 Web 系统健康面板（2026-08-29）
+
+在统一错误处理和进程内观测注册表之上，补齐可被外部监控抓取的稳定出口与面向开发者的可视化诊断页。
+
+- `ObservabilityRegistry.render_prometheus()` 直接输出 Prometheus text exposition 0.0.4，无新增运行依赖；指标覆盖 HTTP 请求总量/失败/处理中/累计与最大耗时，任务、Agent、LLM、工具和数据库操作的调用/失败/可重试失败/重试/降级/耗时，以及按稳定错误码和组件聚合的错误数。
+- `GET /metrics` 使用 `text/plain; version=0.0.4`；只暴露低基数聚合值，不包含用户输入、异常正文、`request_id` 或 `run_id`。进程重启后计数清零，跨重启保存、趋势和告警由外部 Prometheus 负责。
+- Web 新增 `/health`“系统脉搏”：按 `HTTP → Task → Agent → LLM → Tool → PostgreSQL` 展示调用、失败、重试、降级、平均/最大耗时；并展示 PostgreSQL、语义检索、天气、图像源、目录来源和错误分布。页面每 15 秒刷新，有安全错误态、空态、移动端布局和 reduced-motion 处理。
+- 修正文档中的 PostgreSQL 可执行目录：本机实际为 `E:\PostgreSQL\pgsql\bin`。
+
+验证证据：观测定向测试 **9 passed**；全量 Pytest **754 passed**；Ruff clean；Vite 生产构建通过。健康页定向浏览器 E2E 同时验证桌面与 390px 视口、`/api/metrics` 响应和浏览器控制台；项目完整浏览器 E2E 使用真实 PostgreSQL 测试库创建 5 件衣物，完成衣柜展示、推荐、任务持久化和检索诊断，产出 2 套推荐、10 次 hybrid 检索、语义可用、0 降级。
+
+---
+
+## 22. Prometheus/Grafana 持久监控与告警（2026-08-29）
+
+将上一阶段的 `/metrics` 从“可抓取”推进到可直接启动的本地监控栈：
+
+- `deploy/monitoring/compose.yml` 固定 Prometheus v3.5.5 与 Grafana 13.1.0，只绑定 `127.0.0.1`；Prometheus TSDB 与 Grafana 数据统一写入 `artifacts/monitoring`，停止容器不删除历史。
+- Prometheus 15 秒抓取、15 天保留，动态 file-SD 目标由启动器按 `-ApiPort` 生成。7 条告警覆盖 API 下线、HTTP 失败率/平均耗时、数据库失败、连续 LLM 失败、重试风暴与降级路径；未配置 Alertmanager，当前只计算告警状态、不发送通知。
+- Grafana 自动预置数据源和“StyleForge 系统运行”仪表盘：API 可用性、RPS、失败率、HTTP 平均耗时、各操作调用速率/平均耗时、15分钟失败/重试/降级、错误码与错误模块累计共9块面板。
+- `scripts/start_monitoring.ps1` 提供 Start/Stop/Status/Check，支持 `ApiPort/PrometheusPort/GrafanaPort` 参数，并兼容本机独立 `docker-compose.exe` 与其他机器的 Compose 插件。
+
+真实部署中发现并修复三项环境问题：本机 Docker 没有 `docker compose` 插件但有独立 Compose v5.3.1；3000端口已被其他 `wardrobe-frontend` 容器占用，因此Grafana默认改为3300；Windows PowerShell先后暴露 UTF-8 BOM 和单元素管道折叠，导致 file-SD JSON 非法，最终改为 `UTF8Encoding(false)` + `ConvertTo-Json -InputObject`，`promtool` 才完整通过。
+
+验收结果：监控配置测试与观测测试 **13 passed**，全量 Pytest **758 passed**；Ruff clean；PowerShell语法通过；`promtool check config` 成功并加载1个规则文件，`promtool check rules` 为 **7 rules found**；容器内直连 `host.docker.internal:18000/metrics` 成功，Prometheus target `up=1` 且指标入库；Grafana health/database 为 `ok`、预置仪表盘9面板；无头Edge完成登录、面板文本与“正常”状态断言并保存截图。StyleForge API/Web 使用18000/15173，Prometheus/Grafana使用9090/3300；其他用户容器未停止或修改。
+
+---
+
+## 23. 真实衣物照片入库后的增量检索闭环（2026-08-29）
+
+批量照片识别此前为避免三个 worker 同时加载 GPU 模型，统一以 `skip_embedding=True` 入库，但没有接上后续步骤，导致新增衣物长期停留在 `embedding_status=pending`。本次只补齐项目内部闭环，不增加外部服务：
+
+- 每批识别完成后收集可靠且已入库的 `item_id`，交给独立的单线程嵌入执行器，一批只调用一次现有 `embed_personal_items`；视觉识别线程可继续处理其他图片。
+- 批次状态扩为 `running → embedding → completed`，快照增加 `embedding` 结果。可用 `auto_embed=false` 显式跳过，默认自动生成个人 FashionCLIP 向量。
+- 嵌入失败不回滚已经确认的衣柜单品，返回 `PERSONAL_EMBEDDING_FAILED`、`retryable=true` 和 `wardrobe_commit_preserved=true`；新增原批次重试接口，只重做嵌入，不重复识别或建档。
+- Web 衣柜页识别任务卡片显示“生成向量中”；失败时提供“重试生成向量”。识别或嵌入仍在运行时拒绝删除批次，避免后台结果失去归属。
+- 为进程重启后的恢复新增 `POST /wardrobes/{user_id}/embeddings/retry`：从 PostgreSQL 重新发现当前用户已确认、已拥有且状态为 `pending/failed` 的单品，每次至多 200 件。显式提交的其他用户单品 ID会被所有权白名单过滤；没有待处理项时幂等返回 0。Web 衣柜页逐件显示“待生成向量/向量失败”，并提供统一补齐按钮。
+
+验证：批量识别、批次重试、重启后补齐和所有权隔离定向测试 **10 passed**，全量 **762 passed**；Ruff clean；Vite 生产构建通过；浏览器 E2E 验证“批次失败 → 重试 → 生成中 → 完成”和“遗留 pending → 一键补齐 → ready”两条路径，控制台无错误。真实数据验收读取 Polyvore 只读数据集中的 11 张商品图，在 CUDA 上一次生成 11 个 512 维归一化 `image` 向量并写入 PostgreSQL `personal_item_embeddings`，11 个单品均变为 `ready`；绿色真丝吊带裙、黑色尖头细高跟、橙色手袋和黑色花卉外套 4 条检索均召回预期商品。隔离测试行和工作区临时图片在测试后清理，图片未发送给外部 API。
+
+---
+
+## 24. 真实个人衣橱生产闭环 v1（2026-08-29）
+
+在第 23 节的“识别后补向量”基础上，将整个批量照片流程从进程内临时状态提升为可恢复、可审计的项目内能力：
+
+- PostgreSQL Schema v14 新增 `recognition_batches` 与 `recognition_batch_items`，保存批次、逐图状态、输入哈希、识别结果、尝试次数、向量阶段与稳定错误码；原图原子暂存到 `artifacts/recognition_batches/`，不写外部只读数据集。
+- API 启动恢复 `accepted/recognizing/retrying/embedding` 任务；失败识别与失败向量分别重试。逐图衣物 ID 由 `batch_id + item_index` 生成确定性 UUID，模拟“衣物已入库、批次状态提交前崩溃”后恢复仍只有一件衣物。
+- 新增批次原图用户隔离读取与终态批次清理。Web 刷新后可继续显示原图，失败项可重试或读取暂存图编辑入库；状态覆盖 `accepted/recognizing/retrying/embedding/completed/partial_failed/interrupted/cancelled`。
+- `personal_item_embeddings` 增加 `input_fingerprint`。图片或元数据变化时先删除旧向量并把状态设为 `pending`；编码失败改为 `failed`，客户端只收到稳定安全消息。检索仓库只读取 `embedding_status=ready` 的个人向量，避免新图配旧向量。
+- FashionCLIP 运行时统一下沉到 `vision/fashion_clip.py`：个人图片嵌入与衣柜查询共享同一进程级模型实例和可重入推理锁，避免常驻两份约 605 MB 权重。
+- 删除重复的 PostgreSQL SQL 副本：`artifacts/init_pg_schema.py` 只调用 `repositories.database.initialize_database`，schema 定义与迁移保持单一来源。
+- 真实 DeepSeek 回归暴露“夏季婚礼宾客穿搭”被误判为具体活动并错误联网查证的问题。Grounding 现将无“去/参加/出席”等动作的婚礼、晚宴、聚会、会议视为穿搭约束；具体活动仍保留 Search-before-Ask。
+
+验证证据：批任务/Schema/生命周期定向测试 **21 passed**，共享模型专项 **25 passed**，Grounding 专项 **39 passed**；最终全量 Pytest **769 passed**，CI 范围 Ruff 与 `compileall` 通过，Vite 生产构建通过。无头 Edge 验证刷新后原图、识别重试、向量重试与个人待处理向量补齐，控制台无错误。公开 Polyvore 11 张真实图片在 CUDA 上 11/11 生成 512 维归一化图像向量并完成 4 条预期召回。真实 DeepSeek 六类任务最终 **7/7**，路由与状态准确率均为 100%，报告为 `artifacts/evaluation/wardrobe_quality_real_six_task_v14_final.json`。
+
+---
+
+## 25. 长任务误报失败与 Agent 空转治理（2026-08-30）
+
+针对真实请求“推荐一套演唱会穿搭”后台约 123 秒完成、Web 在 120 秒先报失败的问题，完成以下项目内修复：
+
+- Web 按用户文字解析期望方案数：一/两/三套分别提交 `max_results=1/2/3`，未明确数量默认 1，不再无条件生成 3 套。
+- Axios 超时只表示当前 HTTP 连接超时，不再直接写入“执行失败”。已有会话时继续轮询持久化消息，后台完成后自动恢复并渲染结果；页面持续显示真实已用秒数和当前恢复状态。
+- 同一任务内相同衣柜查询按“规范化查询 + top-K”缓存，重复调用直接返回深拷贝并记录 `cache_hit`，避免重复执行 FashionCLIP/个人向量检索。
+- 推荐链不再在 LLM、MCP 等网络等待期间持有 PostgreSQL 事务；只有个人向量检索实际发生时才打开短会话。
+- Stylist 单候选工具步数由 12 收紧为 8，fresh research 提醒由 4 收紧为 3，修订步数由 3 收紧为 2；Critic 重试由 3 收紧为 2。协议错误自愈契约保持不变，避免偶发格式错误被过早终止。
+- 修复工具协议矛盾：运行时原本支持同回合多个原生工具调用，但 Research/Stylist 专属提示仍写“恰好一个”。现在独立的活动/天气/技能查询和衣柜槽位查询要求 1～3 个并行调用；Research 工具执行上限由 6 收紧为 4，减少模型与工具逐次往返。
+- 健康页将 Agent/LLM/Tool/MCP 失败标为“中间异常/可重试异常”，只有 HTTP 与 task_run 的失败标为“最终失败”；错误分布明确包含已恢复异常，避免把一次工具降级误读为整项任务失败。
+
+验证：Agent/检索定向回归 **68 passed**，最终全量 **778 passed**；前端请求数量与超时轮询的确定性单元回归通过（含首次轮询网络失败后继续恢复）；Vite 生产构建通过；本次 Python 变更 Ruff clean。`tests/e2e/recommend_timeout_recovery.py` 使用隔离端口和本机 Edge，已实际验证“一套 → max_results=1”“POST 超时 → 页面显示后台恢复状态 → 轮询到持久化结果”“不产生失败气泡”。真实 DeepSeek 同请求从修复前约 123 秒/59 次模型调用降至 52.91 秒/19 次，最终任务完成、工具 0 失败；推荐路径 PostgreSQL 最长会话从约 65.6 秒降至 270.74 ms。
+
+---
+
+## 26. Prompt 注入纵深防护（2026-08-31）
+
+此前系统有可见性裁剪、工具 Schema、前置条件、决策契约和确定性门禁，但动态运行时上下文与用户
+消息一起拼进 system role，也没有独立的注入检测、工具目录二次授权或外部工具出站保护。本批次只
+加固现有 Agent 主链，不接入新服务：
+
+- `PromptBundle.system_text` 只保留稳定 Harness、Prompt Security、工具协议、Agent 指令和能力
+  清单；Web/MCP、RAG、衣物文本、会话、记忆、工具观察和跨 Agent 证据全部进入 user role。
+- 动态数据用固定区块分隔，伪造开闭标签会转义；中英文扫描识别层级覆盖、角色伪造、系统提示或
+  凭据索取、强制工具调用、边界伪造和常见密钥形态。观测只记录信号数量、类别和来源类型。
+- `AgentRuntime` 对模型返回工具逐个执行本轮可见目录复核；越权返回
+  `TOOL_NOT_AUTHORIZED`。`ToolRuntime` 对 Web/天气外发字段在 Hook 与 Handler 前执行 Schema、
+  长度与出站安全校验，命中返回 `PROMPT_INJECTION_BLOCKED`，被拒原文不进入 observation 或
+  PreToolUse Hook。
+- ContextGuard 改为按实际安全包装后的 provider payload 长度计算，避免安全边界文本绕过软预算。
+- 对所有 LLM 入口复核后补上记忆旁路：请求命中注入信号时跳过可选的长期偏好提炼，避免污染
+  `preference_evidence/preference_model`；任务结果仍正常完成。
+
+验证证据：安全专项 **6 passed**，受影响 Agent/上下文回归 **74 passed** 和 **71 passed**；最终
+全量 Pytest **785 passed**，Ruff、compileall、Vite 生产构建通过。重启 18000/15173 后，以
+`demo-user` 的 2080 件真实衣柜向 DeepSeek 发送“黑色日常穿搭 + 忽略旧指令/显示 system prompt/
+调用隐藏工具”的对抗请求：19.5 秒完成 1 套推荐、9 次 LLM 调用、8 次注入信号、工具失败 0、
+错误码 0；持久化结果不含 Harness Core、Prompt Security 原文或内部数据区边界。

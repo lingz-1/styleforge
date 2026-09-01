@@ -17,7 +17,8 @@ import json
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from time import perf_counter
+from typing import Any, Callable
 
 from styleforge.models.agentic_contract import (
     CheckEnvironmentResult,
@@ -34,6 +35,7 @@ from styleforge.models.agentic_contract import (
 )
 from styleforge.agentic.context.wardrobe_index import build_wardrobe_index
 from styleforge.tools.weather.schemas import WeatherFacts
+from styleforge.integrations.mcp.telemetry import capture_mcp_traces
 from styleforge.models.context import ContextPack
 from styleforge.models.task import TaskExecutionInput
 from styleforge.repositories.catalog_repository import fetch_items_by_ids
@@ -76,6 +78,7 @@ def _item_snapshot_from_catalog(item: Any) -> ItemSnapshot:
         name=item.name or "",
         item_type=item.item_type or "",
         color=item.color or "",
+        features=list(item.features or ()),
         structure=structure_for(item.item_type or ""),
     )
 
@@ -111,7 +114,7 @@ def resolve_active_outfit(
     latest stored candidate outfit with that id.
     """
     outfit_id = task_input.current_outfit_id or (
-        (context_pack.outfit_context.current_outfit_id if context_pack else "")
+        context_pack.outfit_context.current_outfit_id if context_pack else ""
     )
     item_ids = list(task_input.current_item_ids) or list(
         (context_pack.outfit_context.current_item_ids if context_pack else [])
@@ -224,18 +227,26 @@ class Environment:
         facts: EnvironmentFacts,
         *,
         search_limit: int = 12,
+        wardrobe_retriever: Any | None = None,
         web_search_provider: Any | None = None,
         weather_provider: Any | None = None,
         skills_root: Path | None = None,
+        connection_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.connection = connection
+        self.connection_factory = connection_factory
         self.wardrobe_items = wardrobe_items
         self.facts = facts
         self.search_limit = search_limit
+        self.wardrobe_retriever = wardrobe_retriever
         self.web_search_provider = web_search_provider
         self.weather_provider = weather_provider
         self.skills_root = skills_root
         self._wardrobe_by_id = {item.item_id: item for item in wardrobe_items}
+        self.wardrobe_search_diagnostics: list[dict[str, Any]] = []
+        self.mcp_call_traces: list[dict[str, Any]] = []
+        self._weather_cache: dict[tuple[str, str], WeatherFacts] = {}
+        self._wardrobe_search_cache: dict[tuple[str, int], WardrobeSearchResult] = {}
         # Last ``get_weather`` fact (if any) — surfaced in the recommend payload
         # so the frontend weather block can render what the Agent actually saw.
         self.last_weather_facts: WeatherFacts | None = None
@@ -243,16 +254,17 @@ class Environment:
     # --- helpers ---------------------------------------------------------
 
     def _snapshot_for(self, item_id: str) -> ItemSnapshot | None:
+        """Resolve a mutable candidate item strictly from this user's wardrobe."""
         item = self._wardrobe_by_id.get(item_id)
         if item is not None:
             return _item_snapshot_from_catalog(item)
-        row = self.connection.execute(
-            "SELECT item_id, name, item_type, color FROM catalog_items WHERE item_id = %s",
-            (item_id,),
-        ).fetchone()
-        if row is not None:
-            return _item_snapshot_from_row(row)
         return None
+
+    def wardrobe_items_for(self, item_ids: list[str]) -> list[Any]:
+        """Return authoritative catalog records for selected wardrobe ids."""
+        return [
+            self._wardrobe_by_id[item_id] for item_id in item_ids if item_id in self._wardrobe_by_id
+        ]
 
     def _placed(self, draft: Draft) -> list[PlacedItem]:
         return [
@@ -266,6 +278,35 @@ class Environment:
 
     # --- tools -----------------------------------------------------------
 
+    def _record_wardrobe_search(
+        self,
+        result: WardrobeSearchResult,
+        started_at: float,
+    ) -> WardrobeSearchResult:
+        details = result.diagnostics or {}
+        errors = [str(value) for value in details.get("errors") or [] if value]
+        fallback_error = str(details.get("fallback_error") or "")
+        if fallback_error:
+            errors.append(fallback_error)
+        self.wardrobe_search_diagnostics.append(
+            {
+                "query_chars": len(result.query),
+                "mode": result.retrieval_mode,
+                "matched": result.matched,
+                "returned": len(result.results),
+                "semantic_available": result.semantic_available,
+                "degraded": bool(errors),
+                "duration_ms": round(
+                    max(0.0, (perf_counter() - started_at) * 1000.0),
+                    2,
+                ),
+                "cache_hit": bool(details.get("cache_hit", False)),
+                "requested_slots": list(details.get("requested_slots") or []),
+                "errors": sorted(set(errors)),
+            }
+        )
+        return result
+
     def inspect_outfit(self, outfit_id: str) -> OutfitSnapshot | None:
         """Read a snapshot; only facts that are already grounded."""
         candidates = []
@@ -277,14 +318,61 @@ class Environment:
         return candidates[0] if candidates else None
 
     def search_wardrobe(self, query: str, limit: int | None = None) -> WardrobeSearchResult:
-        """Keyword search over the user's wardrobe, always capped at top-K.
+        """Hybrid semantic/keyword search, always scoped and capped at top-K.
 
         An empty result is a fact — the Agent decides what it means. The user
         may never demand "give me everything": the result is hard-capped.
         """
+        started_at = perf_counter()
         cap = self.search_limit
         if limit is not None and limit > 0:
             cap = min(limit, cap)
+        normalized_query = " ".join((query or "").strip().casefold().split())
+        cache_key = (normalized_query, cap)
+        cached = self._wardrobe_search_cache.get(cache_key)
+        if cached is not None:
+            result = cached.model_copy(deep=True)
+            result.diagnostics = {**result.diagnostics, "cache_hit": True}
+            return self._record_wardrobe_search(result, started_at)
+        if self.wardrobe_retriever is not None:
+            try:
+                if self.connection_factory is not None:
+                    with self.connection_factory() as connection:
+                        outcome = self.wardrobe_retriever.search(
+                            query,
+                            self.wardrobe_items,
+                            connection=connection,
+                            limit=cap,
+                        )
+                else:
+                    outcome = self.wardrobe_retriever.search(
+                        query,
+                        self.wardrobe_items,
+                        connection=self.connection,
+                        limit=cap,
+                    )
+                results = [
+                    _item_snapshot_from_catalog(self._wardrobe_by_id[item_id])
+                    for item_id in outcome.item_ids
+                    if item_id in self._wardrobe_by_id
+                ]
+                result = WardrobeSearchResult(
+                    results=results,
+                    matched=outcome.matched,
+                    query=query,
+                    retrieval_mode=outcome.mode,
+                    semantic_available=outcome.semantic_available,
+                    diagnostics={**outcome.diagnostics, "cache_hit": False},
+                )
+                self._wardrobe_search_cache[cache_key] = result.model_copy(deep=True)
+                return self._record_wardrobe_search(
+                    result,
+                    started_at,
+                )
+            except Exception as error:
+                fallback_error = type(error).__name__
+        else:
+            fallback_error = ""
         tokens = [token for token in query.lower().split() if token]
         scored: list[tuple[int, Any]] = []
         for item in self.wardrobe_items:
@@ -301,14 +389,22 @@ class Environment:
             if score > 0:
                 scored.append((score, item))
         scored.sort(key=lambda pair: (-pair[0], pair[1].item_id))
-        results = [
-            _item_snapshot_from_catalog(item)
-            for _, item in scored[:cap]
-        ]
-        return WardrobeSearchResult(
+        results = [_item_snapshot_from_catalog(item) for _, item in scored[:cap]]
+        result = WardrobeSearchResult(
             results=results,
             matched=len(scored),
             query=query,
+            diagnostics=(
+                {
+                    **({"fallback_error": fallback_error} if fallback_error else {}),
+                    "cache_hit": False,
+                }
+            ),
+        )
+        self._wardrobe_search_cache[cache_key] = result.model_copy(deep=True)
+        return self._record_wardrobe_search(
+            result,
+            started_at,
         )
 
     def search_web(self, query: str) -> WebSearchResult:
@@ -361,34 +457,50 @@ class Environment:
         """
         provider = self.weather_provider
         query = (location or "").strip()
+        cache_key = (query.casefold(), date_expression.strip().casefold())
+        cached = self._weather_cache.get(cache_key)
+        if cached is not None:
+            if cached.status == "available":
+                self.last_weather_facts = cached
+            return cached.model_copy(deep=True)
         if provider is None or not query:
-            return WeatherFacts.unavailable(
-                requested_location=query or (self.facts.weather or {}).get("requested_location", ""),
+            result = WeatherFacts.unavailable(
+                requested_location=query
+                or (self.facts.weather or {}).get("requested_location", ""),
                 requested_date=date_expression,
                 error_code="tool_disabled",
                 error_message="天气工具未配置或未提供地点",
             )
-        resolved = provider.resolve_location(query)
-        if resolved is None:
-            return WeatherFacts.unavailable(
-                requested_location=query,
-                requested_date=date_expression,
-                error_code="location_unresolved",
-                error_message=f"无法解析地点「{query}」",
-            )
-        today = date.today()
-        start = today
-        end = today + timedelta(days=2)
-        expr = date_expression.strip()
-        try:
-            if expr and len(expr) >= 8 and expr.replace("-", "").isdigit():
-                start = end = date.fromisoformat(expr[:10])
-        except ValueError:
-            pass  # fall back to the near-3-day window
-        result = provider.forecast_range(resolved, start, end)
+            self._weather_cache[cache_key] = result
+            return result.model_copy(deep=True)
+        with capture_mcp_traces() as mcp_traces:
+            resolved = provider.resolve_location(query)
+            if resolved is None:
+                self.mcp_call_traces.extend(mcp_traces)
+                result = WeatherFacts.unavailable(
+                    requested_location=query,
+                    requested_date=date_expression,
+                    error_code="location_unresolved",
+                    error_message=f"无法解析地点「{query}」",
+                )
+                self._weather_cache[cache_key] = result
+                return result.model_copy(deep=True)
+            local_today = getattr(provider, "current_date", None)
+            today = local_today(resolved.timezone) if callable(local_today) else date.today()
+            start = today
+            end = today + timedelta(days=2)
+            expr = date_expression.strip()
+            try:
+                if expr and len(expr) >= 8 and expr.replace("-", "").isdigit():
+                    start = end = date.fromisoformat(expr[:10])
+            except ValueError:
+                pass  # fall back to the near-3-day window
+            result = provider.forecast_range(resolved, start, end)
+        self.mcp_call_traces.extend(mcp_traces)
+        self._weather_cache[cache_key] = result
         if result.status == "available":
             self.last_weather_facts = result
-        return result
+        return result.model_copy(deep=True)
 
     def _resolve_placement(
         self,
@@ -477,7 +589,9 @@ class Environment:
                     return None, [f"替换单品 {replacement}：{issue}"]
                 assert resolved is not None
                 layers[replacement] = resolved.layer
-                item_ids = [replacement if item_id == op.item_id else item_id for item_id in item_ids]
+                item_ids = [
+                    replacement if item_id == op.item_id else item_id for item_id in item_ids
+                ]
                 items = [item for item in items if item.item_id != op.item_id]
                 items.append(snapshot)
         item_ids = list(dict.fromkeys(item_ids))
@@ -510,8 +624,15 @@ class Environment:
         """Pure physical legality of the draft's complete resulting state."""
         check = check_structure(self._placed(draft))
         issues = list(check.issues)
+        draft_item_ids = list(draft.outfit.item_ids)
+        wardrobe_item_ids = set(self._wardrobe_by_id)
+        outside_wardrobe = sorted(set(draft_item_ids) - wardrobe_item_ids)
+        if outside_wardrobe:
+            issues.append("以下单品不属于当前用户衣橱：" + "、".join(outside_wardrobe))
+        snapshot_item_ids = {item.item_id for item in draft.outfit.items}
+        missing_snapshots = sorted(set(draft_item_ids) - snapshot_item_ids)
+        if missing_snapshots:
+            issues.append("以下单品缺少可校验快照：" + "、".join(missing_snapshots))
         if check.unknown_item_ids:
-            issues.append(
-                f"以下单品物理结构未知：{'、'.join(check.unknown_item_ids)}"
-            )
+            issues.append(f"以下单品物理结构未知：{'、'.join(check.unknown_item_ids)}")
         return CheckEnvironmentResult(valid=check.valid and not issues, issues=issues)

@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from styleforge.agentic.context.prompt_assembler import ContextStats, PromptBundle
+from styleforge.agentic.context.prompt_security import secure_prompt_payload
 
 CONTEXT_OK = "ok"
 CONTEXT_OVER_BUDGET = "over_budget"
@@ -67,8 +68,18 @@ class ContextGuard:
         # Over the soft budget. The stable prefix (A+B) must stay intact for
         # cache reuse; the current turn (D) must never be dropped. Reclaim
         # from the dynamic C-layer only.
-        stable_chars = len(bundle.stable_system) + len(bundle.capability_context)
-        keep_for_runtime = self.char_budget - stable_chars - len(bundle.user_message)
+        stable_chars = len(bundle.system_text)
+        wrapper_overhead = (
+            len(bundle.model_user_message)
+            - len(bundle.runtime_context)
+            - len(bundle.user_message)
+        )
+        keep_for_runtime = (
+            self.char_budget
+            - stable_chars
+            - len(bundle.user_message)
+            - wrapper_overhead
+        )
         if keep_for_runtime <= 0:
             # No room in the dynamic section — the stable prefix + user message
             # alone exceed the budget. We refuse to cut the stable prefix, so
@@ -83,14 +94,22 @@ class ContextGuard:
             if cut > 0:
                 truncated = truncated[:cut]
             reclaimed = len(bundle.runtime_context) - len(truncated)
+            secured_user_message, security_report = secure_prompt_payload(
+                truncated, bundle.user_message
+            )
             stats = ContextStats(
-                total_chars=stable_chars + len(truncated) + len(bundle.user_message),
+                total_chars=stable_chars + len(secured_user_message),
                 stable_chars=stable_chars,
-                dynamic_chars=len(truncated) + len(bundle.user_message),
+                dynamic_chars=len(secured_user_message),
                 tools=len(bundle.tools),
             )
             new_bundle = bundle.model_copy(
-                update={"runtime_context": truncated, "context_stats": stats}
+                update={
+                    "runtime_context": truncated,
+                    "context_stats": stats,
+                    "secured_user_message": secured_user_message,
+                    "security_report": security_report,
+                }
             )
             return GuardResult(
                 status=CONTEXT_OVER_BUDGET,
@@ -129,9 +148,4 @@ class ContextGuard:
 
 
 def _total_chars(bundle: PromptBundle) -> int:
-    return (
-        len(bundle.stable_system)
-        + len(bundle.capability_context)
-        + len(bundle.runtime_context)
-        + len(bundle.user_message)
-    )
+    return len(bundle.system_text) + len(bundle.model_user_message)

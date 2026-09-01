@@ -77,7 +77,16 @@ def completion_rule_for(agent1_output: Agent1TaskOutput) -> str:
         "adjustment_mode"
     ) == "flexible":
         return _FLEXIBLE_ADJUST_RULE
-    return TASK_COMPLETION_RULES[agent1_output.task_type]
+    base_rule = TASK_COMPLETION_RULES[agent1_output.task_type]
+    if agent1_output.task_type is TaskType.ITEM_ADVICE:
+        requested_slots = agent1_output.facts.get("requested_support_slots") or []
+        if requested_slots:
+            return (
+                f"{base_rule} 用户明确点名的支撑槽位为 {requested_slots}；"
+                "每套 sample_outfits 都必须从 facts.compatible_items_by_slot 对应分组中"
+                "各选择至少一件，不得省略或用其他槽位替代。"
+            )
+    return base_rule
 
 
 def _json(value: Any) -> str:

@@ -5,16 +5,32 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
+from time import perf_counter
+import re
+import uuid
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+import psycopg
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from styleforge.core.config import Settings
+from styleforge.common.errors import (
+    ErrorCode,
+    StyleForgeError,
+    error_code_for_status,
+    error_payload,
+    is_retryable_status,
+)
+from styleforge.common.observability import observability, observability_context
 from styleforge.core.taxonomy import build_taxonomy
 from styleforge.llm.client import (
     LlmInvalidJson,
@@ -25,6 +41,9 @@ from styleforge.llm.client import (
 from styleforge.llm.extension_prompts import EXTENSION_PROMPT_VERSION
 from styleforge.integrations.embeddings.text_embedder import TextEmbedder
 from styleforge.integrations.vectorstores.chroma_store import ChromaStore
+from styleforge.integrations.mcp.telemetry import mcp_runtime
+from styleforge.integrations.mcp.weather import build_mcp_weather_provider
+from styleforge.mcp_server import build_styleforge_mcp, server_status as mcp_server_status
 from styleforge.models.task import TaskExecutionInput
 from styleforge.orchestration.graph import MultiTaskGraph
 from styleforge.orchestration.task_router import TaskType
@@ -73,6 +92,9 @@ from styleforge.repositories.preference_model_repository import (
     soft_forget,
     upsert_preference,
 )
+from styleforge.repositories.personal_embedding_repository import (
+    list_retryable_personal_item_ids,
+)
 from styleforge.services.memory_aggregator import apply_evidence
 from styleforge.services.memory_consolidation import consolidate_session
 from styleforge.services.memory_evidence import behavior_evidence_from_event
@@ -94,10 +116,18 @@ from styleforge.services.chat_service import (
 )
 from styleforge.services.order_import import parse_order_workbook
 from styleforge.services.personal_embeddings import embed_personal_items
+from styleforge.services.recommend_result_contract import (
+    OUTFIT_RECOMMEND_RESULT_SCHEMA,
+)
+from styleforge.services.wardrobe_retrieval import WardrobeHybridRetriever
 from styleforge.services.recognition_batch import (
+    batch_input_path,
     delete_batch,
     get_batch,
     list_batches,
+    resume_incomplete_batches,
+    retry_batch,
+    retry_batch_embedding,
     start_batch,
 )
 from styleforge.services.personal_images import bind_personal_image
@@ -118,6 +148,10 @@ from styleforge.vision.vision_client import (
     vision_client_from_settings,
 )
 from styleforge.workflow.task_workflow import MultiTaskWorkflow
+
+
+logger = logging.getLogger(__name__)
+_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 class TaskRoutingRequest(BaseModel):
@@ -183,6 +217,11 @@ class PhotoItemRequest(BaseModel):
 class BatchRecognitionRequest(BaseModel):
     images: list[PersonalImageUpload] = Field(min_length=1, max_length=30)
     default_gender: str = Field(default="women", max_length=16)
+    auto_embed: bool = True
+
+
+class RetryPersonalEmbeddingsRequest(BaseModel):
+    item_ids: list[str] = Field(default_factory=list, max_length=200)
 
 
 class UpdateItemRequest(BaseModel):
@@ -242,13 +281,295 @@ class BehaviorEventCreate(BaseModel):
 settings = Settings.from_env()
 API_STARTED_AT = datetime.now(timezone.utc).isoformat()
 initialize_database(settings.database_dsn)
+_wardrobe_retriever = WardrobeHybridRetriever(
+    embedding_dir=settings.embedding_dir,
+    model_dir=settings.artifact_root / "models",
+)
 # Optional Redis session-outfit cache (disabled/unreachable -> None, degraded).
 _redis_client = redis_client_from_settings(settings)
+_recovered_database_dsns: set[str] = set()
+_direct_weather_provider = (
+    OpenMeteoProvider(timeout=settings.weather_timeout)
+    if settings.weather_enabled and settings.weather_provider == "open-meteo"
+    else None
+)
+_weather_provider = (
+    build_mcp_weather_provider(settings)
+    if _direct_weather_provider is not None
+    and settings.mcp_enabled
+    and settings.mcp_weather_enabled
+    else _direct_weather_provider
+)
+_styleforge_mcp = build_styleforge_mcp()
+_styleforge_mcp.settings.streamable_http_path = "/"
+_styleforge_mcp_http_app = _styleforge_mcp.streamable_http_app()
+_mcp_lifespan_started = False
+
+
+def _renew_mcp_http_runtime(_app: FastAPI) -> None:
+    """Replace a consumed MCP session manager before an app restart.
+
+    MCP session managers intentionally run only once. Production normally has
+    one lifespan, while tests, embedded ASGI hosts, and local reloaders may
+    start the same FastAPI object more than once. A fresh FastMCP instance
+    preserves that supported lifecycle without weakening the SDK guard.
+    """
+    global _styleforge_mcp, _styleforge_mcp_http_app
+
+    _styleforge_mcp = build_styleforge_mcp()
+    _styleforge_mcp.settings.streamable_http_path = "/"
+    _styleforge_mcp_http_app = _styleforge_mcp.streamable_http_app()
+    for route in _app.routes:
+        if getattr(route, "path", "") == "/mcp":
+            route.app = _styleforge_mcp_http_app
+            return
+
+
+@asynccontextmanager
+async def _app_lifespan(_app: FastAPI):
+    global _mcp_lifespan_started
+
+    if _mcp_lifespan_started:
+        _renew_mcp_http_runtime(_app)
+    _mcp_lifespan_started = True
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(_styleforge_mcp.session_manager.run())
+        if settings.database_dsn not in _recovered_database_dsns:
+            resume_incomplete_batches(
+                vision_client=vision_client_from_settings(settings),
+                database_path=settings.database_dsn,
+                artifact_root=settings.artifact_root,
+                model_dir=settings.artifact_root / "models",
+            )
+            _recovered_database_dsns.add(settings.database_dsn)
+        yield
+
+
 app = FastAPI(
     title="StyleForge API",
     version="0.3.0",
     description="Local-first multi-agent personal wardrobe styling API.",
+    lifespan=_app_lifespan,
 )
+
+
+def _request_id(request: Request) -> str:
+    value = getattr(request.state, "request_id", "")
+    return value if value else uuid.uuid4().hex
+
+
+def _error_response(
+    request: Request,
+    *,
+    status_code: int,
+    detail: Any,
+    code: ErrorCode | str,
+    message: str,
+    retryable: bool,
+    details: dict[str, Any] | None = None,
+) -> JSONResponse:
+    request_id = _request_id(request)
+    code_value = code.value if isinstance(code, ErrorCode) else str(code)
+    observability.record_error(
+        code=code_value,
+        component="api",
+        retryable=retryable,
+        request_id=request_id,
+        method=request.method,
+        path=request.url.path,
+        status_code=status_code,
+    )
+    return JSONResponse(
+        status_code=status_code,
+        content=error_payload(
+            detail=detail,
+            code=code,
+            message=message,
+            request_id=request_id,
+            retryable=retryable,
+            details=details,
+        ),
+        headers={"X-Request-ID": request_id},
+    )
+
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    """Attach one safe correlation id to every response and server log."""
+    incoming = request.headers.get("X-Request-ID", "").strip()
+    request.state.request_id = (
+        incoming if _REQUEST_ID_PATTERN.fullmatch(incoming) else uuid.uuid4().hex
+    )
+    started_at = perf_counter()
+    observability.request_started()
+    try:
+        with observability_context(request_id=request.state.request_id):
+            response = await call_next(request)
+    except Exception:
+        observability.request_finished(
+            status_code=500,
+            duration_ms=(perf_counter() - started_at) * 1000.0,
+        )
+        raise
+    observability.request_finished(
+        status_code=response.status_code,
+        duration_ms=(perf_counter() - started_at) * 1000.0,
+    )
+    response.headers["X-Request-ID"] = request.state.request_id
+    return response
+
+
+@app.exception_handler(StyleForgeError)
+async def styleforge_error_handler(request: Request, error: StyleForgeError) -> JSONResponse:
+    if error.status_code >= 500:
+        logger.warning(
+            "request_failed request_id=%s code=%s path=%s status=%s",
+            _request_id(request),
+            error.code.value,
+            request.url.path,
+            error.status_code,
+        )
+    return _error_response(
+        request,
+        status_code=error.status_code,
+        detail=error.message,
+        code=error.code,
+        message=error.message,
+        retryable=error.retryable,
+        details=error.details,
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error_handler(
+    request: Request,
+    error: StarletteHTTPException,
+) -> JSONResponse:
+    code = error_code_for_status(error.status_code)
+    message = error.detail if isinstance(error.detail, str) else "请求处理失败"
+    return _error_response(
+        request,
+        status_code=error.status_code,
+        detail=error.detail,
+        code=code,
+        message=message,
+        retryable=is_retryable_status(error.status_code),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(
+    request: Request,
+    error: RequestValidationError,
+) -> JSONResponse:
+    return _error_response(
+        request,
+        status_code=422,
+        detail=error.errors(),
+        code=ErrorCode.VALIDATION_ERROR,
+        message="请求参数不合法",
+        retryable=False,
+    )
+
+
+@app.exception_handler(psycopg.IntegrityError)
+async def database_integrity_error_handler(
+    request: Request,
+    error: psycopg.IntegrityError,
+) -> JSONResponse:
+    logger.warning(
+        "database_integrity_error request_id=%s path=%s error_type=%s",
+        _request_id(request),
+        request.url.path,
+        type(error).__name__,
+    )
+    return _error_response(
+        request,
+        status_code=409,
+        detail="数据状态冲突",
+        code=ErrorCode.CONFLICT,
+        message="数据状态冲突",
+        retryable=False,
+    )
+
+
+@app.exception_handler(psycopg.OperationalError)
+async def database_operational_error_handler(
+    request: Request,
+    error: psycopg.OperationalError,
+) -> JSONResponse:
+    logger.error(
+        "database_unavailable request_id=%s path=%s error_type=%s",
+        _request_id(request),
+        request.url.path,
+        type(error).__name__,
+        exc_info=(type(error), error, error.__traceback__),
+    )
+    return _error_response(
+        request,
+        status_code=503,
+        detail="数据库暂时不可用，请稍后重试",
+        code=ErrorCode.DATABASE_ERROR,
+        message="数据库暂时不可用，请稍后重试",
+        retryable=True,
+    )
+
+
+@app.exception_handler(psycopg.DatabaseError)
+async def database_error_handler(
+    request: Request,
+    error: psycopg.DatabaseError,
+) -> JSONResponse:
+    logger.error(
+        "database_request_failed request_id=%s path=%s error_type=%s",
+        _request_id(request),
+        request.url.path,
+        type(error).__name__,
+        exc_info=(type(error), error, error.__traceback__),
+    )
+    return _error_response(
+        request,
+        status_code=500,
+        detail="数据库操作失败，请使用请求编号排查",
+        code=ErrorCode.DATABASE_ERROR,
+        message="数据库操作失败，请使用请求编号排查",
+        retryable=False,
+    )
+
+
+@app.exception_handler(Exception)
+async def unexpected_error_handler(request: Request, error: Exception) -> JSONResponse:
+    request_id = _request_id(request)
+    if isinstance(error, TimeoutError):
+        status_code = 504
+        code = ErrorCode.UPSTREAM_TIMEOUT
+        message = "依赖服务响应超时，请稍后重试"
+        retryable = True
+    elif isinstance(error, ConnectionError):
+        status_code = 503
+        code = ErrorCode.DEPENDENCY_UNAVAILABLE
+        message = "依赖服务暂时不可用，请稍后重试"
+        retryable = True
+    else:
+        status_code = 500
+        code = ErrorCode.INTERNAL_ERROR
+        message = "系统内部错误，请使用请求编号排查"
+        retryable = False
+    logger.error(
+        "unhandled_request_error request_id=%s code=%s path=%s",
+        request_id,
+        code.value,
+        request.url.path,
+        exc_info=(type(error), error, error.__traceback__),
+    )
+    return _error_response(
+        request,
+        status_code=status_code,
+        detail=message,
+        code=code,
+        message=message,
+        retryable=retryable,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -275,12 +596,14 @@ def _ensure_knowledge_chroma() -> tuple[Any, Any] | None:
             embedder = TextEmbedder(
                 settings.artifact_root / "models", device="cuda", precision="float16"
             )
-        except BaseException:
+        except Exception as error:
+            logger.warning("knowledge_embedder_cuda_fallback error_type=%s", type(error).__name__)
             embedder = TextEmbedder(
                 settings.artifact_root / "models", device="cpu", precision="float32"
             )
         value: tuple[Any, Any] | None = (store, embedder)
-    except BaseException:
+    except Exception as error:
+        logger.warning("knowledge_vector_retrieval_disabled error_type=%s", type(error).__name__)
         value = None
     _knowledge_chroma["value"] = value
     return value
@@ -289,26 +612,27 @@ def _ensure_knowledge_chroma() -> tuple[Any, Any] | None:
 @lru_cache(maxsize=1)
 def get_multi_task_workflow() -> MultiTaskWorkflow:
     chroma = _ensure_knowledge_chroma()
+    if chroma is not None:
+        _wardrobe_retriever.attach_text_embedder(chroma[1])
     return MultiTaskWorkflow(
         database_path=settings.database_dsn,
         knowledge_root=settings.knowledge_root,
         llm_client=llm_client_from_settings(settings),
         chroma_store=chroma[0] if chroma else None,
         text_embedder=chroma[1] if chroma else None,
-        # Always construct the provider (even without a key); degradation is
-        # concentrated in ``TavilySearchProvider.available``.
-        web_search_provider=TavilySearchProvider(
-            api_key=settings.tavily_api_key,
-            timeout=settings.web_search_timeout,
-            max_results=settings.web_search_max_results,
+        wardrobe_retriever=_wardrobe_retriever,
+        web_search_provider=(
+            TavilySearchProvider(
+                api_key=settings.tavily_api_key,
+                timeout=settings.web_search_timeout,
+                max_results=settings.web_search_max_results,
+            )
+            if settings.web_search_enabled
+            else None
         ),
         # Agentic recommend ``get_weather`` tool + Task Skill root (mirrors the
         # legacy graph's weather gating; ``WeatherTool`` is not needed here).
-        weather_provider=(
-            OpenMeteoProvider(timeout=settings.weather_timeout)
-            if settings.weather_enabled and settings.weather_provider == "open-meteo"
-            else None
-        ),
+        weather_provider=_weather_provider,
         skills_root=settings.knowledge_root / "skills",
         # H3a-3 grounding: the global default city (used when neither device nor
         # profile pins the user's location) mirrors the legacy weather gate.
@@ -348,6 +672,7 @@ def _decode_base64(content: str, *, maximum_bytes: int) -> bytes:
 def health() -> dict[str, Any]:
     embedding_manifest = settings.embedding_dir / "manifest.json"
     index_manifest = settings.index_dir / "manifest.json"
+    model_root = settings.artifact_root / "models"
     with database_session(settings.database_dsn) as connection:
         catalog_count = connection.execute("SELECT COUNT(*) FROM catalog_items").fetchone()[0]
         ready_count = connection.execute(
@@ -375,13 +700,36 @@ def health() -> dict[str, Any]:
                 "available": settings.image_root.is_dir(),
                 "configuration": "environment_fallback",
             }
+    wardrobe_retrieval = {
+        **_wardrobe_retriever.runtime_status(),
+        "model_artifacts_available": (
+            (model_root / "config.json").is_file()
+            and (model_root / "model.safetensors").is_file()
+        ),
+        "catalog_embeddings_available": embedding_manifest.is_file(),
+        "catalog_embedding_items": ready_count,
+        "personal_embedding_items": personal_embedding_count,
+    }
+    wardrobe_retrieval["semantic_artifacts_available"] = bool(
+        wardrobe_retrieval["model_artifacts_available"]
+        and (
+            wardrobe_retrieval["catalog_embeddings_available"]
+            or personal_embedding_count > 0
+        )
+    )
     return {
         "status": "ok",
         "api_started_at": API_STARTED_AT,
         "extension_prompt_version": EXTENSION_PROMPT_VERSION,
+        "outfit_recommend_result_schema": OUTFIT_RECOMMEND_RESULT_SCHEMA,
         "weather": {
             "enabled": settings.weather_enabled,
-            "provider": settings.weather_provider,
+            "provider": getattr(_weather_provider, "name", settings.weather_provider),
+            "mcp_primary": bool(
+                settings.mcp_enabled
+                and settings.mcp_weather_enabled
+                and _weather_provider is not None
+            ),
             "default_location_configured": bool(
                 settings.weather_default_location
             ),
@@ -391,7 +739,13 @@ def health() -> dict[str, Any]:
                 settings.reverse_geocode_endpoint
             ),
         },
-        "database": str(settings.database_dsn),
+        "mcp": {
+            "client": mcp_runtime.snapshot(),
+            "server": mcp_server_status(),
+        },
+        "database": {"backend": "postgresql", "status": "connected"},
+        "observability": observability.snapshot(),
+        "wardrobe_retrieval": wardrobe_retrieval,
         "catalog_items": catalog_count,
         "embedding_ready_items": ready_count,
         "personal_embedding_items": personal_embedding_count,
@@ -400,6 +754,24 @@ def health() -> dict[str, Any]:
         "embedding_manifest_available": embedding_manifest.is_file(),
         "index_manifest_available": index_manifest.is_file(),
         "image_root_configured": bool(image_sources),
+    }
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def prometheus_metrics() -> PlainTextResponse:
+    """Expose process-local, low-cardinality metrics for Prometheus scraping."""
+    return PlainTextResponse(
+        observability.render_prometheus(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
+@app.get("/mcp/status")
+def mcp_status() -> dict[str, Any]:
+    """Safe MCP client/server topology and bounded call telemetry."""
+    return {
+        "client": mcp_runtime.snapshot(),
+        "server": mcp_server_status(),
     }
 
 
@@ -535,8 +907,13 @@ def _try_behavior_event(
                 context=context,
                 features=features,
             )
-    except BaseException:
-        pass
+    except Exception as error:
+        logger.warning(
+            "behavior_event_dropped user_id=%s event_type=%s error_type=%s",
+            user_id,
+            event_type,
+            type(error).__name__,
+        )
 
 
 @app.get("/preferences/{user_id}/memories")
@@ -716,8 +1093,12 @@ def delete_user_chat_session(
     try:
         with database_session(settings.database_dsn) as connection:
             consolidate_session(connection, user_id, session_id)
-    except BaseException:
-        pass
+    except Exception as error:
+        logger.warning(
+            "session_consolidation_failed session_id=%s error_type=%s",
+            session_id,
+            type(error).__name__,
+        )
     delete_session_outfit_cache(_redis_client, session_id)
     return {"session_id": session_id, "deleted": True}
 
@@ -867,23 +1248,31 @@ def _append_chat_failure(request: TaskExecutionInput, detail: str) -> None:
     """Record the failure as an assistant message so the chain stays complete."""
     if not request.session_id:
         return
-    with database_session(settings.database_dsn) as connection:
-        append_message(
-            connection,
-            session_id=request.session_id,
-            user_id=request.user_id,
-            role="assistant",
-            content=detail,
-            result_json={
-                "request": request.request,
-                "task_type": (
-                    request.requested_task_type.value
-                    if request.requested_task_type is not None
-                    else ""
-                ),
-                "status": "failed",
-                "error": detail,
-            },
+    try:
+        with database_session(settings.database_dsn) as connection:
+            append_message(
+                connection,
+                session_id=request.session_id,
+                user_id=request.user_id,
+                role="assistant",
+                content=detail,
+                result_json={
+                    "request": request.request,
+                    "task_type": (
+                        request.requested_task_type.value
+                        if request.requested_task_type is not None
+                        else ""
+                    ),
+                    "status": "failed",
+                    "error": detail,
+                },
+            )
+    except Exception as error:
+        # Failure journaling is secondary and must not mask the root failure.
+        logger.exception(
+            "chat_failure_journal_failed session_id=%s error_type=%s",
+            request.session_id,
+            type(error).__name__,
         )
 
 
@@ -925,25 +1314,43 @@ def execute_task(request: TaskExecutionInput) -> dict[str, Any]:
             request, session_context=session_context
         )
     except LlmUnavailable as error:
-        _append_chat_failure(request, str(error))
-        raise HTTPException(
+        message = f"Three-agent task execution unavailable: {error}"
+        _append_chat_failure(request, message)
+        raise StyleForgeError(
+            code=ErrorCode.LLM_UNAVAILABLE,
             status_code=503,
-            detail=f"Three-agent task execution unavailable: {error}",
+            message=message,
+            retryable=True,
         ) from error
     except (LlmInvalidJson, LlmSchemaViolation) as error:
-        _append_chat_failure(request, str(error))
-        raise HTTPException(
+        message = "Three-agent task execution returned invalid output"
+        _append_chat_failure(request, message)
+        raise StyleForgeError(
+            code=ErrorCode.UPSTREAM_INVALID_RESPONSE,
             status_code=502,
-            detail=f"Three-agent task execution returned invalid output: {error}",
+            message=message,
+            retryable=True,
         ) from error
     except ValueError as error:
         _append_chat_failure(request, str(error))
-        raise HTTPException(status_code=422, detail=str(error)) from error
+        raise StyleForgeError(
+            code=ErrorCode.VALIDATION_ERROR,
+            status_code=422,
+            message=str(error),
+        ) from error
     except Exception as error:
-        _append_chat_failure(request, str(error))
-        raise HTTPException(
+        message = "任务执行失败，请使用请求编号排查"
+        _append_chat_failure(request, message)
+        logger.exception(
+            "task_execution_failed user_id=%s session_id=%s error_type=%s",
+            request.user_id,
+            request.session_id,
+            type(error).__name__,
+        )
+        raise StyleForgeError(
+            code=ErrorCode.AGENT_EXECUTION_FAILED,
             status_code=500,
-            detail=f"Task execution failed: {type(error).__name__}: {error}",
+            message=message,
         ) from error
     message_id = _append_chat_success(request, payload)
     # H3a-3: a NEED_USER turn must carry its pending_field into the session
@@ -1100,6 +1507,58 @@ def get_wardrobe_import(user_id: str, batch_id: str) -> dict[str, Any]:
     return {"batch": batch, "count": len(rows), "rows": rows}
 
 
+@app.post("/wardrobes/{user_id}/embeddings/retry")
+def retry_personal_wardrobe_embeddings(
+    user_id: str,
+    request: RetryPersonalEmbeddingsRequest,
+) -> dict[str, Any]:
+    """Regenerate this user's pending/failed vectors after any process restart."""
+    requested = list(dict.fromkeys(item_id.strip() for item_id in request.item_ids if item_id.strip()))
+    with database_session(settings.database_dsn) as connection:
+        item_ids = list_retryable_personal_item_ids(
+            connection,
+            user_id=user_id,
+            requested_item_ids=requested,
+            limit=200,
+        )
+    if not item_ids:
+        return {
+            "status": "completed",
+            "user_id": user_id,
+            "requested_items": len(requested),
+            "eligible_items": 0,
+            "embedded_items": 0,
+            "message": "没有需要补齐的检索向量",
+        }
+    try:
+        result = embed_personal_items(
+            database_path=settings.database_dsn,
+            item_ids=item_ids,
+            model_dir=settings.artifact_root / "models",
+            device="cuda",
+        )
+    except Exception as error:
+        logger.exception(
+            "personal_embedding_retry_failed user_id=%s item_count=%s error_type=%s",
+            user_id,
+            len(item_ids),
+            type(error).__name__,
+        )
+        raise StyleForgeError(
+            code=ErrorCode.DEPENDENCY_UNAVAILABLE,
+            message="检索向量生成失败，请稍后重试",
+            status_code=503,
+            retryable=True,
+            details={"eligible_items": len(item_ids)},
+        ) from error
+    return {
+        **result,
+        "user_id": user_id,
+        "eligible_items": len(item_ids),
+        "item_ids": item_ids,
+    }
+
+
 @app.post("/wardrobes/{user_id}/imports/{batch_id}/commit")
 def commit_wardrobe_import(
     user_id: str,
@@ -1132,11 +1591,18 @@ def commit_wardrobe_import(
                 model_dir=settings.artifact_root / "models",
                 device="cuda",
             )
-        except BaseException as error:
+        except Exception as error:
+            logger.exception(
+                "personal_embedding_failed batch_id=%s item_count=%s error_type=%s",
+                batch_id,
+                len(item_ids),
+                type(error).__name__,
+            )
             embedding = {
                 "status": "failed",
-                "error_type": type(error).__name__,
-                "error": str(error),
+                "error_code": "PERSONAL_EMBEDDING_FAILED",
+                "error": "衣物已保存，但向量生成失败，可稍后重试",
+                "retryable": True,
                 "wardrobe_commit_preserved": True,
             }
     return {
@@ -1273,8 +1739,9 @@ def start_wardrobe_photo_batch(
         database_path=settings.database_dsn,
         artifact_root=settings.artifact_root,
         model_dir=settings.artifact_root / "models",
+        auto_embed=request.auto_embed,
     )
-    return batch.snapshot()
+    return batch
 
 
 @app.get("/wardrobes/{user_id}/recognition-batches")
@@ -1283,25 +1750,104 @@ def list_wardrobe_photo_batches(
     limit: int = Query(default=20, ge=1, le=100),
 ) -> dict[str, Any]:
     """Recent recognition batches for a user, newest first (for the wardrobe page)."""
-    batches = list_batches(user_id, limit)
+    batches = list_batches(settings.database_dsn, user_id, limit)
     return {"user_id": user_id, "count": len(batches), "batches": batches}
 
 
 @app.get("/wardrobes/{user_id}/recognition-batches/{batch_id}")
 def get_wardrobe_photo_batch(user_id: str, batch_id: str) -> dict[str, Any]:
     """Poll progress for one batch recognition task."""
-    batch = get_batch(batch_id)
-    if batch is None or batch.user_id != user_id:
+    batch = get_batch(settings.database_dsn, batch_id)
+    if batch is None or batch["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="Recognition batch not found")
-    return batch.snapshot()
+    return batch
 
 
 @app.delete("/wardrobes/{user_id}/recognition-batches/{batch_id}")
 def delete_wardrobe_photo_batch(user_id: str, batch_id: str) -> dict[str, Any]:
     """Remove a finished batch record once the user handled its results."""
-    if not delete_batch(user_id, batch_id):
+    batch = get_batch(settings.database_dsn, batch_id)
+    terminal_statuses = {"completed", "partial_failed", "interrupted", "cancelled"}
+    if (
+        batch is not None
+        and batch["user_id"] == user_id
+        and batch["status"] not in terminal_statuses
+    ):
+        raise HTTPException(status_code=409, detail="Recognition batch is still running")
+    if not delete_batch(
+        user_id=user_id,
+        batch_id=batch_id,
+        database_path=settings.database_dsn,
+        artifact_root=settings.artifact_root,
+    ):
         raise HTTPException(status_code=404, detail="Recognition batch not found")
     return {"batch_id": batch_id, "deleted": True}
+
+
+@app.post("/wardrobes/{user_id}/recognition-batches/{batch_id}/retry-embedding", status_code=202)
+def retry_wardrobe_photo_batch_embedding(
+    user_id: str,
+    batch_id: str,
+) -> dict[str, Any]:
+    """Retry vector generation without repeating recognition or item creation."""
+    batch = retry_batch_embedding(
+        user_id=user_id,
+        batch_id=batch_id,
+        database_path=settings.database_dsn,
+        model_dir=settings.artifact_root / "models",
+    )
+    if batch is None:
+        existing = get_batch(settings.database_dsn, batch_id)
+        if existing is None or existing["user_id"] != user_id:
+            raise HTTPException(status_code=404, detail="Recognition batch not found")
+        raise HTTPException(status_code=409, detail="Embedding is not retryable")
+    return batch
+
+
+@app.post(
+    "/wardrobes/{user_id}/recognition-batches/{batch_id}/retry",
+    status_code=202,
+)
+def retry_wardrobe_photo_batch(user_id: str, batch_id: str) -> dict[str, Any]:
+    """Retry failed recognition items without duplicating saved clothes."""
+    client = vision_client_from_settings(settings)
+    if client is None:
+        raise HTTPException(status_code=503, detail="Vision recognition is disabled")
+    batch = retry_batch(
+        user_id=user_id,
+        batch_id=batch_id,
+        vision_client=client,
+        database_path=settings.database_dsn,
+        artifact_root=settings.artifact_root,
+        model_dir=settings.artifact_root / "models",
+    )
+    if batch is None:
+        existing = get_batch(settings.database_dsn, batch_id)
+        if existing is None or existing["user_id"] != user_id:
+            raise HTTPException(status_code=404, detail="Recognition batch not found")
+        raise HTTPException(status_code=409, detail="Recognition batch is not retryable")
+    return batch
+
+
+@app.get(
+    "/wardrobes/{user_id}/recognition-batches/{batch_id}/items/{item_index}/image"
+)
+def get_wardrobe_photo_batch_input(
+    user_id: str,
+    batch_id: str,
+    item_index: int,
+) -> FileResponse:
+    """Return one staged input preview owned by this user's durable batch."""
+    path = batch_input_path(
+        user_id=user_id,
+        batch_id=batch_id,
+        item_index=item_index,
+        database_path=settings.database_dsn,
+        artifact_root=settings.artifact_root,
+    )
+    if path is None:
+        raise HTTPException(status_code=404, detail="Recognition image not found")
+    return FileResponse(path)
 
 
 @app.put("/wardrobes/{user_id}/items/{item_id}")
@@ -1540,6 +2086,11 @@ def main() -> None:
     import uvicorn
 
     uvicorn.run("styleforge.api:app", host="127.0.0.1", port=8000, reload=False)
+
+
+# The MCP ASGI app is mounted last so ordinary API routes retain precedence.
+# Its internal path is '/', making the public endpoint /mcp/.
+app.mount("/mcp", _styleforge_mcp_http_app)
 
 
 if __name__ == "__main__":

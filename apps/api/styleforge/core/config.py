@@ -66,6 +66,18 @@ class Settings:
     weather_provider: str = "open-meteo"
     weather_default_location: str = ""
     weather_timeout: float = 10.0
+    # MCP integration. The official Time and Fetch servers run as local stdio
+    # subprocesses by default; setting a URL switches that server to
+    # Streamable HTTP without changing the application workflow.
+    mcp_enabled: bool = True
+    mcp_weather_enabled: bool = True
+    mcp_timeout: float = 20.0
+    mcp_time_url: str = ""
+    mcp_fetch_url: str = ""
+    mcp_fetch_allowed_hosts: tuple[str, ...] = (
+        "api.open-meteo.com",
+        "geocoding-api.open-meteo.com",
+    )
     location_max_age_seconds: int = 1800
     location_max_accuracy_m: float = 5000.0
     reverse_geocode_endpoint: str = ""
@@ -105,6 +117,18 @@ class Settings:
             weather_timeout = float(os.getenv("STYLEFORGE_WEATHER_TIMEOUT", "10"))
         except ValueError:
             weather_timeout = 10.0
+        try:
+            mcp_timeout = float(os.getenv("STYLEFORGE_MCP_TIMEOUT", "20"))
+        except ValueError:
+            mcp_timeout = 20.0
+        mcp_allowed_hosts = tuple(
+            host.strip().lower()
+            for host in os.getenv(
+                "STYLEFORGE_MCP_FETCH_ALLOWED_HOSTS",
+                "api.open-meteo.com,geocoding-api.open-meteo.com",
+            ).split(",")
+            if host.strip()
+        )
         try:
             location_max_age = int(
                 os.getenv("STYLEFORGE_LOCATION_MAX_AGE_SECONDS", "1800")
@@ -196,6 +220,16 @@ class Settings:
                 "STYLEFORGE_DEFAULT_LOCATION", ""
             ).strip(),
             weather_timeout=weather_timeout,
+            mcp_enabled=_optional_bool(
+                os.getenv("STYLEFORGE_MCP_ENABLED"), default=True
+            ),
+            mcp_weather_enabled=_optional_bool(
+                os.getenv("STYLEFORGE_MCP_WEATHER_ENABLED"), default=True
+            ),
+            mcp_timeout=mcp_timeout,
+            mcp_time_url=os.getenv("STYLEFORGE_MCP_TIME_URL", "").strip(),
+            mcp_fetch_url=os.getenv("STYLEFORGE_MCP_FETCH_URL", "").strip(),
+            mcp_fetch_allowed_hosts=mcp_allowed_hosts,
             location_max_age_seconds=location_max_age,
             location_max_accuracy_m=location_max_accuracy,
             reverse_geocode_endpoint=os.getenv(

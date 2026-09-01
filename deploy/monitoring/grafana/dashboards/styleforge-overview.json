@@ -1,0 +1,135 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "styleforge-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "color": "red", "text": "不可用" }, "1": { "color": "green", "text": "正常" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [{ "expr": "max(up{job=\"styleforge-api\"})", "legendFormat": "API", "refId": "A" }],
+      "title": "API 可用性",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "styleforge-prometheus" },
+      "fieldConfig": { "defaults": { "decimals": 2, "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [{ "expr": "sum(rate(styleforge_http_requests_total[5m]))", "legendFormat": "请求/秒", "refId": "A" }],
+      "title": "HTTP 请求速率",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "styleforge-prometheus" },
+      "fieldConfig": { "defaults": { "decimals": 1, "max": 100, "min": 0, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 5 }, { "color": "red", "value": 10 }] }, "unit": "percent" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [{ "expr": "100 * sum(rate(styleforge_http_request_failures_total[5m])) / clamp_min(sum(rate(styleforge_http_requests_total[5m])), 0.001)", "legendFormat": "失败率", "refId": "A" }],
+      "title": "HTTP 失败率",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "styleforge-prometheus" },
+      "fieldConfig": { "defaults": { "decimals": 1, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 2000 }, { "color": "red", "value": 5000 }] }, "unit": "ms" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [{ "expr": "sum(rate(styleforge_http_request_duration_milliseconds_sum[5m])) / clamp_min(sum(rate(styleforge_http_requests_total[5m])), 0.001)", "legendFormat": "平均耗时", "refId": "A" }],
+      "title": "HTTP 平均耗时",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "styleforge-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+      "id": 5,
+      "options": { "legend": { "calcs": ["lastNotNull", "sum"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum by (operation) (rate(styleforge_operation_calls_total[5m]))", "legendFormat": "{{operation}}", "refId": "A" }],
+      "title": "处理链路调用速率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "styleforge-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+      "id": 6,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [{ "expr": "sum by (operation) (rate(styleforge_operation_duration_milliseconds_sum[5m])) / clamp_min(sum by (operation) (rate(styleforge_operation_calls_total[5m])), 0.001)", "legendFormat": "{{operation}}", "refId": "A" }],
+      "title": "处理链路平均耗时",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "styleforge-prometheus" },
+      "fieldConfig": { "defaults": { "min": 0, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 14 },
+      "id": 7,
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "expr": "sum by (operation) (increase(styleforge_operation_failures_total[15m]))", "legendFormat": "失败 · {{operation}}", "refId": "A" },
+        { "expr": "sum by (operation) (increase(styleforge_operation_retries_total[15m]))", "legendFormat": "重试 · {{operation}}", "refId": "B" },
+        { "expr": "sum by (operation) (increase(styleforge_operation_degraded_total[15m]))", "legendFormat": "降级 · {{operation}}", "refId": "C" }
+      ],
+      "title": "失败、重试与降级（15 分钟）",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "styleforge-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "continuous-GrYlRd" }, "min": 0, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 6, "x": 12, "y": 14 },
+      "id": 8,
+      "options": { "displayMode": "gradient", "minVizHeight": 10, "minVizWidth": 0, "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true, "valueMode": "color" },
+      "targets": [{ "expr": "sum by (code) (styleforge_errors_by_code_total)", "instant": true, "legendFormat": "{{code}}", "refId": "A" }],
+      "title": "错误码累计",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "styleforge-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "continuous-GrYlRd" }, "min": 0, "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 14 },
+      "id": 9,
+      "options": { "displayMode": "gradient", "minVizHeight": 10, "minVizWidth": 0, "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true, "valueMode": "color" },
+      "targets": [{ "expr": "sum by (component) (styleforge_errors_by_component_total)", "instant": true, "legendFormat": "{{component}}", "refId": "A" }],
+      "title": "错误模块累计",
+      "type": "bargauge"
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 41,
+  "tags": ["styleforge", "agent", "local"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "StyleForge 系统运行",
+  "uid": "styleforge-system-overview",
+  "version": 1,
+  "weekStart": ""
+}

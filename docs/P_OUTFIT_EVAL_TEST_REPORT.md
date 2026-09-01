@@ -1,5 +1,10 @@
 # p-outfit 独立 LLM 评估 —— 测试用例覆盖完成情况报告
 
+> 历史状态（2026-09-01）：本文记录旧推荐链在 2026-08-14 的真实运行证据。当前仓库已退役
+> `evals/runners/evaluate_p_outfit.py`、`tests/test_p_outfit_eval.py` 和旧 Judge Agent，文中的旧命令
+> 不再可复现当前 Harness；不得据此宣称已完成官方 Compatibility/FITB。当前规范见
+> [评估计划 v2](EVALUATION_PLAN_V2.md)。
+
 > 撰写日期：2026-08-14
 > 对应设计稿：[P_OUTFIT_EVAL_TEST_COVERAGE.md](P_OUTFIT_EVAL_TEST_COVERAGE.md)
 > 被测代码：`apps/api/styleforge/data/p_outfit.py`、`llm/judge_prompts.py`、`agents/judge.py`、

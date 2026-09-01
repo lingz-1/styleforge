@@ -86,7 +86,9 @@
             </template>
           </div>
           <div v-if="loading" class="chat-turn assistant">
-            <div class="chat-bubble assistant typing">三位 Agent 正在处理…</div>
+            <div class="chat-bubble assistant typing">
+              {{ progressStage || '三位 Agent 正在处理' }} · 已用时 {{ elapsedSeconds }} 秒
+            </div>
           </div>
         </section>
 
@@ -163,6 +165,7 @@ import { storeToRefs } from 'pinia'
 import WeatherCard from '../components/WeatherCard.vue'
 import TaskResultView from '../components/TaskResultView.vue'
 import { createChatSession, listChatSessions, deleteChatSession, getWardrobe, imageUrl } from '../services/api'
+import { requestedResultCount } from '../services/recommendation-request'
 import { useRecommendationStore } from '../stores/recommendation'
 import { getUserId, setUserId } from '../services/user'
 
@@ -176,7 +179,7 @@ const AGENTS = [
 const userId = ref(getUserId())
 const request = ref('黑色马甲怎么搭？')
 const store = useRecommendationStore()
-const { loading, error } = storeToRefs(store)
+const { loading, error, elapsedSeconds, progressStage } = storeToRefs(store)
 const route = useRoute()
 const router = useRouter()
 
@@ -328,14 +331,21 @@ async function run({ itemId = '', label = '' } = {}) {
       sid = '' // 降级为无会话执行（不落库）
     }
   }
-  await store.run(userId.value, requestText, 3, deviceLocation.value, sid, {
-    itemId,
-    requestedTaskType: itemId ? 'item_advice' : undefined,
-    // Stage 1 请求通道：active_outfit_id 复用后端 current_outfit_id 字段，
-    // selected_item_id 为新增字段。两者都由 Agent 端消费，不影响旧路由。
-    activeOutfitId: activeOutfit.value?.outfit_id || '',
-    selectedItemId: selectedItemId.value,
-  })
+  await store.run(
+    userId.value,
+    requestText,
+    requestedResultCount(requestText),
+    deviceLocation.value,
+    sid,
+    {
+      itemId,
+      requestedTaskType: itemId ? 'item_advice' : undefined,
+      // Stage 1 请求通道：active_outfit_id 复用后端 current_outfit_id 字段，
+      // selected_item_id 为新增字段。两者都由 Agent 端消费，不影响旧路由。
+      activeOutfitId: activeOutfit.value?.outfit_id || '',
+      selectedItemId: selectedItemId.value,
+    },
+  )
   // Stage 4 多轮 grounding：修改成功后把最新候选设为 active outfit，下一轮
   // 的 current_outfit_id 指向新候选（修复多轮修改回退到最初套的问题）。
   const latest = store.payload?.result

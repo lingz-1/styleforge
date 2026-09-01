@@ -9,15 +9,37 @@ const request = (path, method = 'GET', data = {}) => {
       url: `${app.globalData.baseUrl}${path}`,
       method,
       data,
+      timeout: 120000,
       header: { 'Content-Type': 'application/json' },
       success: (res) => {
-        if (res.statusCode >= 200 && res.statusCode < 400) {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
           resolve(res.data)
         } else {
-          reject(res.data && res.data.detail ? res.data.detail : `请求失败 ${res.statusCode}`)
+          const payload = res.data || {}
+          const envelope = payload.error || {}
+          const detail = typeof payload.detail === 'string' ? payload.detail : ''
+          const error = new Error(envelope.message || detail || `请求失败 ${res.statusCode}`)
+          error.code = envelope.code || 'HTTP_ERROR'
+          error.status = res.statusCode
+          const headers = res.header || {}
+          error.requestId = envelope.request_id
+            || headers['X-Request-ID']
+            || headers['x-request-id']
+            || ''
+          error.retryable = typeof envelope.retryable === 'boolean'
+            ? envelope.retryable
+            : (res.statusCode === 429 || res.statusCode >= 500)
+          reject(error)
         }
       },
-      fail: (err) => reject(err.errMsg || '网络异常'),
+      fail: (err) => {
+        const error = new Error(err.errMsg || '网络异常')
+        error.code = 'NETWORK_ERROR'
+        error.status = 0
+        error.requestId = ''
+        error.retryable = true
+        reject(error)
+      },
     })
   })
 }

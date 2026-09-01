@@ -1,5 +1,9 @@
 # StyleForge 评估体系设计文档
 
+> 历史说明（2026-09-01）：本文保留为 v1 方法论参考。当前六任务 Multi-Agent Harness 的执行规范、
+> 数据集、基线、消融、公开 Compatibility/FITB 和验收阶段，以
+> `docs/EVALUATION_PLAN_V2.md` 为准；本文 T1-T4 与旧 runner 路径不再作为当前实现合同。
+
 **文档版本**: v1.0
 **基于框架**: Agent 系统通用评估框架 v1.0
 **状态**: 可冻结

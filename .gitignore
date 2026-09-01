@@ -19,7 +19,12 @@ polyvore_outfit_v1.0_2512.json
 .vscode/
 .tmp_order_analysis/
 .tmp/
+.tmp_pytest*/
+.codex-artifacts/
 node_modules/
+
+# 本地生成的交付物与检查报告
+outputs/
 
 # 前端构建产物
 apps/web/dist/

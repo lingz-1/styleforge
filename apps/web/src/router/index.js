@@ -5,6 +5,7 @@ const WardrobePage = () => import('../pages/WardrobePage.vue')
 const ImportPage = () => import('../pages/ImportPage.vue')
 const SettingsPage = () => import('../pages/SettingsPage.vue')
 const MemoriesPage = () => import('../pages/MemoriesPage.vue')
+const HealthPage = () => import('../pages/HealthPage.vue')
 
 export default createRouter({
   history: createWebHistory(),
@@ -16,5 +17,6 @@ export default createRouter({
     { path: '/import', component: ImportPage },
     { path: '/memories', component: MemoriesPage },
     { path: '/settings', component: SettingsPage },
+    { path: '/health', component: HealthPage },
   ],
 })

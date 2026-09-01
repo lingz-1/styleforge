@@ -1,0 +1,123 @@
+{
+  "schema_version": "styleforge.wardrobe-quality-benchmark.v1",
+  "description": "Configured six-task smoke benchmark built from official Polyvore Outfits merchandise and outfit relations.",
+  "source": {
+    "dataset": "Polyvore Outfits (p-outfit)",
+    "dataset_root": "E:/01-style-dataset/p-outfit",
+    "set_ids": ["223055822", "215963824", "123941575"],
+    "fixture_profile": "polyvore_one_piece"
+  },
+  "score_dimensions": [
+    "request_relevance",
+    "request_specificity",
+    "outfit_coordination",
+    "wearability",
+    "freshness"
+  ],
+  "cases": [
+    {
+      "id": "real-one-piece-wedding-001",
+      "fixture": "polyvore_one_piece",
+      "request": "这条蕾丝连衣裙怎么搭，想出席婚礼场合，帮我配齐鞋子和合适的配饰",
+      "expected_route": "item_advice",
+      "requested_task_type": "item_advice",
+      "expected_status": "completed",
+      "execution_modes": ["configured"],
+      "anchor_item_key": "polyvore_201181532",
+      "required_item_keys": ["polyvore_201181532"],
+      "required_slots": ["one_piece", "footwear", "accessory"],
+      "required_result_fields": ["anchor_item", "compatible_items_by_slot", "sample_outfits"],
+      "min_outfit_count": 1
+    },
+    {
+      "id": "real-one-piece-date-002",
+      "fixture": "polyvore_one_piece",
+      "request": "这条真丝吊带裙怎么搭，晚上约会想穿得优雅一点，配什么鞋和外套",
+      "expected_route": "item_advice",
+      "requested_task_type": "item_advice",
+      "expected_status": "completed",
+      "execution_modes": ["configured"],
+      "anchor_item_key": "polyvore_151616863",
+      "required_item_keys": ["polyvore_151616863"],
+      "required_slots": ["one_piece", "footwear", "outerwear"],
+      "required_result_fields": ["anchor_item", "compatible_items_by_slot", "sample_outfits"],
+      "min_outfit_count": 1
+    },
+    {
+      "id": "real-recommend-wedding-003",
+      "fixture": "polyvore_one_piece",
+      "request": "从我的真实衣柜里推荐一套夏季婚礼宾客穿搭，要有连衣裙、正式鞋履和配饰",
+      "expected_route": "outfit_recommend",
+      "requested_task_type": "outfit_recommend",
+      "expected_status": "completed",
+      "execution_modes": ["configured"],
+      "required_slots": ["one_piece", "footwear", "accessory"],
+      "required_features": ["wedding"],
+      "min_outfit_count": 1,
+      "max_results": 1,
+      "min_scores": {
+        "request_relevance": 6,
+        "request_specificity": 6,
+        "outfit_coordination": 6,
+        "wearability": 6,
+        "freshness": 4
+      }
+    },
+    {
+      "id": "real-style-evening-004",
+      "fixture": "polyvore_one_piece",
+      "request": "结合这批真实连衣裙、鞋和首饰，说明优雅晚间约会风格的搭配原则",
+      "expected_route": "style_advice",
+      "requested_task_type": "style_advice",
+      "expected_status": "completed",
+      "execution_modes": ["configured"],
+      "required_result_fields": ["title", "summary", "principles"]
+    },
+    {
+      "id": "real-gap-versatility-005",
+      "fixture": "polyvore_one_piece",
+      "request": "分析这批真实衣物的结构缺口：如果还要覆盖日常通勤，最缺哪些核心单品",
+      "expected_route": "wardrobe_gap",
+      "requested_task_type": "wardrobe_gap",
+      "expected_status": "completed",
+      "execution_modes": ["configured"],
+      "expected_zero_slots": ["top", "bottom"],
+      "min_gap_count": 1,
+      "required_result_fields": ["target", "slot_counts", "gaps", "gap_count", "summary"]
+    },
+    {
+      "id": "real-compatibility-grey-shoes-006",
+      "fixture": "polyvore_one_piece",
+      "request": "Polyvore 套装 123941575 里的灰色 Bourne Sabrina 鞋适合加入我现有的婚礼和约会衣柜吗",
+      "expected_route": "wardrobe_compatibility",
+      "requested_task_type": "wardrobe_compatibility",
+      "expected_status": "completed",
+      "execution_modes": ["configured"],
+      "candidate_item": {
+        "item_id": "107132140",
+        "name": "Bourne Sabrina Shoe in Grey",
+        "item_type": "shoes",
+        "subtype": "dress shoes",
+        "color": "gray",
+        "description": "Official Polyvore Outfits item from set 123941575 (Weekend Barbecue)."
+      },
+      "required_result_fields": ["candidate_item", "candidate_slot", "compatibility_score", "recommendation"]
+    },
+    {
+      "id": "real-modify-date-shoes-007",
+      "fixture": "polyvore_one_piece",
+      "request": "保留墨绿色真丝吊带裙和黑色 Marni 外套，只把黑色细高跟鞋换成衣柜里的另一双正式鞋",
+      "expected_route": "outfit_modify",
+      "requested_task_type": "outfit_modify",
+      "expected_status": "completed",
+      "execution_modes": ["configured"],
+      "current_outfit_id": "polyvore-date-look-215963824",
+      "current_item_keys": ["polyvore_151616863", "polyvore_196144884", "polyvore_95456824"],
+      "target_slot": "footwear",
+      "required_item_keys": ["polyvore_151616863", "polyvore_95456824"],
+      "required_slots": ["one_piece", "footwear", "outerwear"],
+      "required_result_fields": ["target_slot", "replaced_item_ids", "locked_item_ids", "alternatives"],
+      "min_outfit_count": 1
+    }
+  ]
+}

@@ -82,6 +82,7 @@ class _FakeEnvironment:
 
 # ── Coordinator subgraph ────────────────────────────────────────────────────
 
+
 def test_coordinator_handoff_writes_taskstate_and_completes() -> None:
     llm = FakeLlm([{"decision_summary": "直接交接", "goal": "换双皮鞋", "next_agent": "STYLIST"}])
     subgraph = build_coordinator_subgraph(_runtime(llm))
@@ -119,7 +120,10 @@ def test_coordinator_plan_update_loop_then_handoff() -> None:
     # the NEXT turn hands off (frozen #14: never update_plan + handoff together).
     llm = FakeLlm(
         [
-            ({"decision_summary": "先建计划", "goal": "看剧穿搭", "need_plan_update": True}, [_UPDATE_PLAN]),
+            (
+                {"decision_summary": "先建计划", "goal": "看剧穿搭", "need_plan_update": True},
+                [_UPDATE_PLAN],
+            ),
             {"decision_summary": "计划好了，交接", "goal": "看剧穿搭", "next_agent": "RESEARCH"},
         ]
     )
@@ -170,7 +174,8 @@ def test_coordinator_plan_update_with_wrong_tool_is_protocol_error() -> None:
     assert out["handoff_result"].status == "COMPLETED"  # recovered after re-entry
     protocol_obs = [o for o in out["tool_observations"] if o["tool"] == "__protocol__"]
     assert len(protocol_obs) == 1
-    assert "requires exactly the update_plan tool" in protocol_obs[0]["observation"]
+    assert "无权调用" in protocol_obs[0]["observation"]
+    assert protocol_obs[0]["error_code"] == "TOOL_NOT_AUTHORIZED"
 
 
 def test_coordinator_protocol_error_cap() -> None:
@@ -188,7 +193,10 @@ def test_coordinator_step_cap_returns_protocol_error() -> None:
     # MAX_COORDINATOR_STEPS plan-update turns then the cap closes the subgraph.
     llm = FakeLlm(
         [
-            ({"decision_summary": "继续改计划", "goal": "g", "need_plan_update": True}, [_UPDATE_PLAN])
+            (
+                {"decision_summary": "继续改计划", "goal": "g", "need_plan_update": True},
+                [_UPDATE_PLAN],
+            )
         ]
         * MAX_COORDINATOR_STEPS
     )
@@ -200,6 +208,7 @@ def test_coordinator_step_cap_returns_protocol_error() -> None:
 
 
 # ── Main Graph with Coordinator ─────────────────────────────────────────────
+
 
 def test_h2a_plain_modify_goes_straight_to_stylist() -> None:
     # Coordinator hands off to STYLIST with zero tools; the graph runs the
@@ -213,9 +222,7 @@ def test_h2a_plain_modify_goes_straight_to_stylist() -> None:
         ]
     )
     graph = build_h2a_main_graph(_runtime(llm), environment=_FakeEnvironment(), target_candidates=1)
-    out = graph.invoke(
-        {"run_id": "r", "request": "换双鞋", "base_draft": _base_draft()}
-    )
+    out = graph.invoke({"run_id": "r", "request": "换双鞋", "base_draft": _base_draft()})
 
     assert out["status"] == "done"
     assert len(out["candidates"]) == 1
@@ -235,9 +242,7 @@ def test_h2a_coordinator_clarification_reaches_main_node() -> None:
         ]
     )
     graph = build_h2a_main_graph(_runtime(llm), environment=_FakeEnvironment(), target_candidates=3)
-    out = graph.invoke(
-        {"run_id": "r", "request": "看剧穿什么", "base_draft": _base_draft()}
-    )
+    out = graph.invoke({"run_id": "r", "request": "看剧穿什么", "base_draft": _base_draft()})
 
     assert out["status"] == "needs_clarification"
     assert out["clarification_question"] == "哪里的演出？"
@@ -248,7 +253,10 @@ def test_h2a_plan_update_then_handoff_then_stylist() -> None:
     # the chain produces one candidate. The plan survives into the final state.
     llm = FakeLlm(
         [
-            ({"decision_summary": "先计划", "goal": "看剧穿搭", "need_plan_update": True}, [_UPDATE_PLAN]),
+            (
+                {"decision_summary": "先计划", "goal": "看剧穿搭", "need_plan_update": True},
+                [_UPDATE_PLAN],
+            ),
             {"decision_summary": "交接", "goal": "看剧穿搭", "next_agent": "STYLIST"},
             ({"decision_summary": "搭配", "control": "CONTINUE"}, [_MODIFY_TOP_1]),
             {"decision_summary": "完成", "control": "CANDIDATE_READY"},
@@ -256,16 +264,15 @@ def test_h2a_plan_update_then_handoff_then_stylist() -> None:
         ]
     )
     graph = build_h2a_main_graph(_runtime(llm), environment=_FakeEnvironment(), target_candidates=1)
-    out = graph.invoke(
-        {"run_id": "r", "request": "下周看剧穿什么", "base_draft": _base_draft()}
-    )
+    out = graph.invoke({"run_id": "r", "request": "下周看剧穿什么", "base_draft": _base_draft()})
 
     assert out["status"] == "done"
     assert out["plan"].objective == "下周看剧穿搭"
     assert len(out["candidates"]) == 1
     # The plan survives the subgraph boundary and is re-assembled into the
-    # Stylist's prompt — runtime_context lives in the system text (frozen #15).
-    assert "下周看剧穿搭" in llm.calls[2]["system"]
+    # Dynamic plan data is visible to the Stylist but never elevated to system.
+    assert "下周看剧穿搭" not in llm.calls[2]["system"]
+    assert "下周看剧穿搭" in llm.calls[2]["user"]
 
 
 def test_h2a_harness_invoke_assembles_and_runs() -> None:
@@ -283,9 +290,7 @@ def test_h2a_harness_invoke_assembles_and_runs() -> None:
         ]
     )
     harness = StyleForgeHarness(llm=llm, environment=environment, target_candidates=1)
-    out = harness.invoke(
-        {"run_id": "harness-1", "request": "换双鞋", "base_draft": _base_draft()}
-    )
+    out = harness.invoke({"run_id": "harness-1", "request": "换双鞋", "base_draft": _base_draft()})
 
     assert out["status"] == "done"
     assert len(out["candidates"]) == 1

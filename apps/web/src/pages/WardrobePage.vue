@@ -9,6 +9,15 @@
     <div class="toolbar">
       <el-input v-model="userId" placeholder="用户 ID" style="width: 200px" @change="onUserIdChange" />
       <el-button @click="load">刷新</el-button>
+      <el-button
+        v-if="embeddingIssueCount"
+        type="warning"
+        plain
+        :loading="embeddingRepairing"
+        @click="repairEmbeddings"
+      >
+        补齐检索向量（{{ embeddingIssueCount }}）
+      </el-button>
       <el-button v-if="Object.keys(grouped).length" @click="toggleAll">
         {{ allExpanded ? '全部收起' : '全部展开' }}
       </el-button>
@@ -25,18 +34,23 @@
         <template #header>
           <div class="batch-card-header">
             <span class="batch-title">批量识别任务</span>
-            <el-tag size="small" effect="plain" :type="task.status === 'running' ? 'primary' : 'success'">
-              {{ task.status === 'running' ? '识别中' : '已完成' }}
+            <el-tag size="small" effect="plain" :type="batchStatusTagType(task)">
+              {{ batchStatusText(task) }}
             </el-tag>
             <span class="batch-time">{{ fmtTime(task.started_at) }}</span>
           </div>
         </template>
-        <template v-if="task.status === 'running'">
+        <template v-if="isBatchActive(task)">
           <el-progress :percentage="task.percent || 0" :stroke-width="12" />
           <div class="batch-status">
-            已识别 {{ task.done }}/{{ task.total }}
-            · 成功 {{ task.succeeded }} · 失败 {{ task.failed }}
-            · 预计剩余 {{ fmtEta(task.eta_seconds) }}
+            <template v-if="task.status === 'embedding'">
+              识别完成，正在为 {{ task.embedding?.requested_items || task.succeeded }} 件衣物生成检索向量
+            </template>
+            <template v-else>
+              已识别 {{ task.done }}/{{ task.total }}
+              · 成功 {{ task.succeeded }} · 失败 {{ task.failed }}
+              · 预计剩余 {{ fmtEta(task.eta_seconds) }}
+            </template>
           </div>
           <div class="batch-picks">
             <template v-for="r in task.results" :key="r.index">
@@ -50,6 +64,34 @@
           </div>
         </template>
         <template v-else>
+          <el-alert
+            v-if="canRetryRecognition(task)"
+            class="mb"
+            type="warning"
+            :closable="false"
+            title="部分图片未完成识别"
+            description="可直接重试失败或中断的图片，已经入库的衣物不会重复创建。"
+          >
+            <template #default>
+              <el-button size="small" type="warning" plain @click="retryRecognition(task)">
+                重试未完成识别
+              </el-button>
+            </template>
+          </el-alert>
+          <el-alert
+            v-if="task.embedding?.status === 'failed'"
+            class="mb"
+            type="warning"
+            :closable="false"
+            title="衣物已入库，但检索向量生成失败"
+            :description="task.embedding.error || '可直接重试，无需重新识别图片。'"
+          >
+            <template #default>
+              <el-button size="small" type="warning" plain @click="retryEmbedding(task)">
+                重试生成向量
+              </el-button>
+            </template>
+          </el-alert>
           <el-table :data="task.results" size="small">
             <el-table-column label="图片" width="72">
               <template #default="{ row }">
@@ -74,12 +116,13 @@
                     <template v-if="row.confidence"> · {{ vnPct(row.confidence) }}</template>
                   </div>
                 </template>
-                <template v-else>
+                <template v-else-if="row.status === 'failed'">
                   <el-tag size="small" type="danger">{{ reasonText(row.reason) }}</el-tag>
                   <div v-if="row.attributes?.description" class="result-detail">
                     {{ row.attributes.description }}
                   </div>
                 </template>
+                <el-tag v-else size="small" type="warning">等待重试</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="处理" min-width="200">
@@ -137,6 +180,14 @@
               <div class="item-meta">
                 {{ typeLabel(item.item_type) }} · {{ item.color }} · {{ item.gender === 'men' ? '男' : '女' }}
               </div>
+              <el-tag
+                v-if="item.embedding_status !== 'ready'"
+                size="small"
+                :type="item.embedding_status === 'failed' ? 'danger' : 'warning'"
+                effect="plain"
+              >
+                {{ item.embedding_status === 'failed' ? '向量失败' : '待生成向量' }}
+              </el-tag>
               <div class="item-attrs">
                 <div v-for="line in itemAttrLines(item)" :key="line" class="item-attr-line">{{ line }}</div>
               </div>
@@ -443,6 +494,8 @@ import {
   getWardrobe, removeWardrobeItem, createPhotoItem, analyzeItem, getTaxonomy,
   updateItem, uploadItemImage, imageUrl,
   startBatchRecognition, listBatchRecognition, deleteBatchRecognition,
+  retryBatchEmbedding, retryBatchRecognition, batchRecognitionImageUrl,
+  retryPersonalEmbeddings,
 } from '../services/api'
 import { getUserId, setUserId } from '../services/user'
 
@@ -450,6 +503,7 @@ const router = useRouter()
 
 const userId = ref(getUserId())
 const items = ref([])
+const embeddingRepairing = ref(false)
 const loaded = ref(false)
 const error = ref('')
 const saving = ref(false)
@@ -580,6 +634,10 @@ const grouped = computed(() => {
   }
   return map
 })
+const embeddingIssueItems = computed(() =>
+  items.value.filter((item) => ['pending', 'failed'].includes(item.embedding_status)),
+)
+const embeddingIssueCount = computed(() => embeddingIssueItems.value.length)
 const typeLabel = (type) => {
   const cat = taxonomy.value.find((c) => c.key === type)
   if (cat) return cat.zh
@@ -608,6 +666,21 @@ async function load() {
     loaded.value = true
   } catch (e) {
     error.value = e.response?.data?.detail || e.message
+  }
+}
+
+async function repairEmbeddings() {
+  if (!embeddingIssueCount.value || embeddingRepairing.value) return
+  embeddingRepairing.value = true
+  try {
+    const itemIds = embeddingIssueItems.value.map((item) => item.item_id)
+    const res = await retryPersonalEmbeddings(userId.value, itemIds)
+    await load()
+    ElMessage.success(`已生成 ${res.data.embedded_items || 0} 件衣物的检索向量`)
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  } finally {
+    embeddingRepairing.value = false
   }
 }
 
@@ -762,9 +835,10 @@ const batchFileList = computed(() =>
     name: file.name, uid: index, raw: file, url: previewUrl(file),
   })),
 )
-// 任务结果表格的图片列：优先取任务保留的原始文件，无则显示占位
+// Prefer the current browser's local file; persisted batches fall back to the API preview.
 function taskFileUrl(task, row) {
   return previewUrl(task._files && task._files[row.index])
+    || batchRecognitionImageUrl(userId.value, task.batch_id, row.index)
 }
 
 const REASON_TEXT = {
@@ -774,6 +848,28 @@ const REASON_TEXT = {
   internal_error: '处理异常',
 }
 const reasonText = (reason) => REASON_TEXT[reason] || reason
+const isBatchActive = (task) => (
+  ['accepted', 'recognizing', 'retrying', 'embedding'].includes(task.status)
+)
+const canRetryRecognition = (task) => (
+  ['partial_failed', 'interrupted'].includes(task.status)
+  && (task.results || []).some((row) => ['failed', 'pending'].includes(row.status))
+)
+const batchStatusTagType = (task) => {
+  if (isBatchActive(task)) return 'primary'
+  if (task.status === 'completed') return 'success'
+  return 'warning'
+}
+const batchStatusText = (task) => {
+  if (task.status === 'accepted') return '等待识别'
+  if (task.status === 'recognizing') return '识别中'
+  if (task.status === 'retrying') return '正在重试'
+  if (task.status === 'embedding') return '生成向量中'
+  if (task.status === 'interrupted') return '服务中断'
+  if (task.status === 'partial_failed') return '部分完成'
+  if (task.status === 'cancelled') return '已取消'
+  return '已完成'
+}
 
 function fmtEta(eta) {
   if (eta <= 1) return '即将完成'
@@ -849,7 +945,7 @@ async function loadBatches() {
   try {
     const res = await listBatchRecognition(userId.value, 50)
     mergeBatchTasks(res.data.batches || [])
-    const hasRunning = batchTasks.value.some((t) => t.status === 'running')
+    const hasRunning = batchTasks.value.some(isBatchActive)
     if (hasRunning) startBatchPolling()
     else stopBatchPolling()
   } catch (e) {
@@ -873,7 +969,7 @@ async function pollBatches() {
   try {
     const res = await listBatchRecognition(userId.value, 50)
     mergeBatchTasks(res.data.batches || [])
-    const hasRunning = batchTasks.value.some((t) => t.status === 'running')
+    const hasRunning = batchTasks.value.some(isBatchActive)
     if (!hasRunning) stopBatchPolling()
   } catch (e) {
     // 网络抖动：跳过本次轮询，下次再试
@@ -889,7 +985,10 @@ function markRowDone(task, index) {
   if (row) row._done = true
 }
 function hasPending(task) {
-  return (task.results || []).some((r) => r.status === 'failed' && !r._done)
+  return (task.results || []).some(
+    (r) => ['pending', 'recognizing'].includes(r.status)
+      || (r.status === 'failed' && !r._done),
+  )
 }
 
 // 从"手动添加"打开的创建对话框来源；提交成功时消费它
@@ -917,9 +1016,44 @@ async function confirmTask(task) {
   }
 }
 
+async function retryEmbedding(task) {
+  try {
+    const res = await retryBatchEmbedding(userId.value, task.batch_id)
+    Object.assign(task, res.data)
+    ElMessage.success('已重新开始生成检索向量')
+    startBatchPolling()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  }
+}
+
+async function retryRecognition(task) {
+  try {
+    const res = await retryBatchRecognition(userId.value, task.batch_id)
+    Object.assign(task, res.data)
+    ElMessage.success('已重新提交未完成图片，已入库衣物不会重复创建')
+    startBatchPolling()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message)
+  }
+}
+
 // 失败项手动补录：回填原图与识别属性到单图创建对话框
-function manualAdd(row, task) {
-  const file = (task._files && task._files[row.index]) || null
+async function manualAdd(row, task) {
+  let file = (task._files && task._files[row.index]) || null
+  if (!file) {
+    try {
+      const response = await fetch(taskFileUrl(task, row))
+      if (!response.ok) throw new Error('原图读取失败')
+      const blob = await response.blob()
+      file = new File([blob], row.filename || `item-${row.index}.jpg`, {
+        type: blob.type || 'image/jpeg',
+      })
+    } catch (e) {
+      ElMessage.error(e.message || '原图读取失败')
+      return
+    }
+  }
   openCreate()
   createForm.file = file
   createForm.attributes = ensureAttrDefaults(row.attributes)

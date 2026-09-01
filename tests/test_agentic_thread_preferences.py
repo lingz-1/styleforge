@@ -256,5 +256,6 @@ def test_stylist_prompt_build_carries_thread_section() -> None:
     register_local_tools(registry, object())
     tools = registry.runtime_available(AGENT_STYLIST, frozenset({CAP_WEB_SEARCH}))
     bundle = PromptAssembler(instructions_root=_INSTRUCTIONS).build(AGENT_STYLIST, context, tools)
-    assert "【当前会话偏好】" in bundle.system_text
-    assert "color=black" in bundle.system_text
+    assert "【当前会话偏好】" not in bundle.system_text
+    assert "【当前会话偏好】" in bundle.model_user_message
+    assert "color=black" in bundle.model_user_message

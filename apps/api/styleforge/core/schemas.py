@@ -114,7 +114,7 @@ class OutfitCandidate:
     score: float
     llm_score: float | None = None
     rule_score: float | None = None
-    score_details: dict[str, float] = field(default_factory=dict)
+    score_details: dict[str, Any] = field(default_factory=dict)
     reasons: tuple[str, ...] = ()
 
 

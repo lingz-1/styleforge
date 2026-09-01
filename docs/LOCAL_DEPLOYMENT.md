@@ -76,24 +76,26 @@ $env:NO_PROXY="127.0.0.1,localhost,::1"
 - 启动：
 
 ```powershell
-E:\PostgreSQL\bin\pg_ctl.exe -D E:\PostgreSQL\data -l E:\PostgreSQL\pg.log start
+E:\PostgreSQL\pgsql\bin\pg_ctl.exe -D E:\PostgreSQL\data -l E:\PostgreSQL\pg.log start
 ```
 
 - 停止：
 
 ```powershell
-E:\PostgreSQL\bin\pg_ctl.exe -D E:\PostgreSQL\data stop
+E:\PostgreSQL\pgsql\bin\pg_ctl.exe -D E:\PostgreSQL\data stop
 ```
 
 - 建库（首次）：
 
 ```powershell
-E:\PostgreSQL\bin\psql.exe -U postgres -h 127.0.0.1 -c "CREATE ROLE styleforge LOGIN;"
-E:\PostgreSQL\bin\psql.exe -U postgres -h 127.0.0.1 -c "CREATE DATABASE styleforge OWNER styleforge ENCODING 'UTF8';"
-E:\PostgreSQL\bin\psql.exe -U postgres -h 127.0.0.1 -c "CREATE DATABASE styleforge_test OWNER styleforge ENCODING 'UTF8';"
+E:\PostgreSQL\pgsql\bin\psql.exe -U postgres -h 127.0.0.1 -c "CREATE ROLE styleforge LOGIN;"
+E:\PostgreSQL\pgsql\bin\psql.exe -U postgres -h 127.0.0.1 -c "CREATE DATABASE styleforge OWNER styleforge ENCODING 'UTF8';"
+E:\PostgreSQL\pgsql\bin\psql.exe -U postgres -h 127.0.0.1 -c "CREATE DATABASE styleforge_test OWNER styleforge ENCODING 'UTF8';"
 ```
 
-`STYLEFORGE_DATABASE_DSN` 形如 `postgresql://styleforge@127.0.0.1:5432/styleforge`。API 首次启动会自动建表（`initialize_database`，SCHEMA_VERSION=10）。
+`STYLEFORGE_DATABASE_DSN` 形如 `postgresql://styleforge@127.0.0.1:5432/styleforge`。API 首次启动会自动建表并执行幂等增量迁移（`initialize_database`，SCHEMA_VERSION=14）。`artifacts/init_pg_schema.py` 只是同一初始化函数的命令行入口，不再维护第二份 SQL。
+
+Schema v14 将批量照片识别任务和逐图状态持久化到 PostgreSQL。API 启动时会恢复 `accepted/recognizing/retrying/embedding` 状态的任务；输入图片仅暂存在项目 `artifacts/recognition_batches/`，删除终态批次时同步清理。`E:\image.tar\image\images` 与 `E:\style-dataset` 始终按只读数据集处理。
 
 ### 4.2 Redis（会话状态缓存，可选）
 
@@ -143,6 +145,7 @@ D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app `
 验证：
 
 - 健康检查：`http://127.0.0.1:8000/health`
+- Prometheus 指标：`http://127.0.0.1:8000/metrics`
 - API 文档：`http://127.0.0.1:8000/docs`
 
 访问 API 根路径 `/` 返回 404 是正常行为。
@@ -160,6 +163,42 @@ HTTP 200 之外，还应检查：
 - `weather.provider == "open-meteo"`
 
 索引缺失不会阻断小衣柜 NumPy 检索，但意味着全目录检索评估产物不完整；嵌入或图片根目录缺失会导致视觉降级或图片不可用。
+
+### 可观测性与系统健康面板
+
+- `/health.observability` 是当前 API 进程启动后的聚合快照，包含 HTTP、任务、Agent、LLM、工具、数据库的调用/失败/可重试失败/重试/降级计数，以及累计、平均和最大耗时。
+- `/metrics` 输出 Prometheus text exposition 0.0.4，可直接配置为抓取目标；外部 Prometheus 负责跨进程重启持久化和告警。本项目不强制内置 Prometheus 服务。
+- Web 启动后访问 `http://127.0.0.1:5173/health` 查看“系统脉搏”面板，默认每 15 秒刷新。
+- 公共健康数据只含低基数分类，不包含用户输入、工具参数、异常正文、`request_id` 或 `run_id`。
+
+### Prometheus + Grafana 本地监控
+
+Docker Desktop 运行后，从仓库根目录执行：
+
+```powershell
+.\scripts\start_monitoring.ps1 -Action Check
+.\scripts\start_monitoring.ps1 -Action Start -ApiPort 8000
+.\scripts\start_monitoring.ps1 -Action Status
+```
+
+如果 StyleForge API 使用了其他端口，`-ApiPort` 必须与之保持一致。例如当前机器的 8000 端口被其他项目占用时：
+
+```powershell
+.\scripts\start_styleforge.ps1 -Action Start -ApiPort 18000 -UiPort 15173
+.\scripts\start_monitoring.ps1 -Action Start -ApiPort 18000 -GrafanaPort 3300
+```
+
+- Prometheus：`http://127.0.0.1:9090`，固定镜像 `prom/prometheus:v3.5.5`，15 秒抓取，时序数据保留 15 天。
+- Grafana：`http://127.0.0.1:3300/d/styleforge-system-overview`，固定镜像 `grafana/grafana:13.1.0`，数据源与 9 块面板自动预置。
+- Grafana 本地默认登录为 `admin / styleforge-local`。可在启动前设置 `GRAFANA_ADMIN_USER`、`GRAFANA_ADMIN_PASSWORD` 覆盖；服务只绑定 `127.0.0.1`，不对局域网开放。
+- 7 条 Prometheus 告警规则覆盖 API 下线、HTTP 高失败率/高平均耗时、数据库失败、连续 LLM 失败、重试风暴和降级执行。当前没有接入 Alertmanager，所以规则会在 Prometheus/Grafana 中进入告警状态，但不会发送邮件或即时消息。
+- 指标与 Grafana 数据只写入 `artifacts/monitoring/`；停止不会删除历史数据：
+
+```powershell
+.\scripts\start_monitoring.ps1 -Action Stop
+```
+
+需要变更 Web 端口时可用 `-PrometheusPort`、`-GrafanaPort`；默认分别为 9090、3300。启动器同时兼容独立 `docker-compose.exe` 和 Docker Compose 插件，并为 file-SD 生成 UTF-8 无 BOM 的动态 API 目标文件。
 
 ## 7. 启动 Streamlit
 

@@ -1,5 +1,9 @@
 # StyleForge 系统功能覆盖评估报告
 
+> 历史状态（2026-09-01）：本文是 2026-08-14 的功能覆盖快照，其中 p-outfit runner 与部分测试
+> 已随 legacy 主链退役。历史分数和缺陷记录保留，但当前评估范围、命令和完成定义以
+> [评估计划 v2](EVALUATION_PLAN_V2.md) 为准。
+
 > 撰写日期：2026-08-14
 > 定位：回答「系统实现了哪些功能、每个功能被哪些评估用例覆盖、证据强度如何」。
 > 设计依据：[FUNCTIONAL_TEST_CASES.md](FUNCTIONAL_TEST_CASES.md)（60 用例手册）

@@ -27,6 +27,14 @@ def test_shirt_constraint_rejects_round_neck_top() -> None:
     assert item_matches_subtype(round_neck, "shirt") is False
 
 
+def test_common_chinese_sportswear_names_match_hard_sport_subtypes() -> None:
+    top = _item("速干运动短袖", "top")
+    shoes = _item("黑白缓震训练鞋", "shoes")
+
+    assert item_matches_subtype(top, "t_shirt") is True
+    assert item_matches_subtype(shoes, "sneakers") is True
+
+
 def test_subtype_taxonomy_covers_every_major_component() -> None:
     covered_types = {
         item_type

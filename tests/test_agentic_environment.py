@@ -378,6 +378,62 @@ def test_modify_outfit_add_from_outside_wardrobe_is_rejected(seeded_conn: Any) -
     assert "not-in-wardrobe" in issues[0]
 
 
+def test_modify_outfit_rejects_known_catalog_item_not_owned_by_user(
+    seeded_conn: Any,
+) -> None:
+    catalog_only = make_item(
+        "catalog-only-shoes", "shoes", "Catalog-only shoes", "white"
+    )
+    upsert_items(seeded_conn, [catalog_only], "test")
+    env, draft = _draft_from_active(seeded_conn)
+    plan = ModifyPlan(
+        ops=[
+            ModifyOp(
+                action="replace",
+                item_id="boots_c",
+                replacement_item_id="catalog-only-shoes",
+                placement=Placement(
+                    region=BodyRegion.feet,
+                    layer=GarmentLayer.base,
+                ),
+            )
+        ]
+    )
+
+    next_draft, issues = env.modify_outfit(draft, plan)
+
+    assert next_draft is None
+    assert "衣橱中不存在" in issues[0]
+    assert "catalog-only-shoes" in issues[0]
+
+
+def test_check_environment_rejects_item_outside_current_user_wardrobe(
+    seeded_conn: Any,
+) -> None:
+    env, draft = _draft_from_active(seeded_conn)
+    outside = ItemSnapshot(
+        item_id="other-user-shoes",
+        item_type="shoes",
+        name="Other user's shoes",
+        structure=draft.outfit.items[-1].structure,
+    )
+    draft = Draft(
+        outfit=draft.outfit.model_copy(
+            update={
+                "item_ids": ["shirt_a", "pants_b", "other-user-shoes"],
+                "items": [draft.outfit.items[0], draft.outfit.items[1], outside],
+            }
+        ),
+        layers={"other-user-shoes": GarmentLayer.base},
+    )
+
+    result = env.check_environment(draft)
+
+    assert result.valid is False
+    assert any("other-user-shoes" in issue for issue in result.issues)
+    assert any("不属于当前用户衣橱" in issue for issue in result.issues)
+
+
 def test_check_environment_surfaces_unknown_structures(seeded_conn: Any) -> None:
     env, draft = _draft_from_active(seeded_conn)
     # A candidate containing an UNKNOWN-type item: structure is unknown, not a

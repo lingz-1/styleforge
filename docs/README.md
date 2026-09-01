@@ -10,6 +10,8 @@
 | [问题与解决记录](ISSUE_LOG.md) | 按日期记录每次排查与修复（现象、根因、修复、验证） |
 | [开发过程记录](DEVELOPMENT_LOG.md) | 按批次记录需求边界、设计、实现顺序、开发故障与验证证据 |
 | [系统架构](ARCHITECTURE.md) | 多 Agent 边界、数据流、约束与降级路径 |
+| [MCP 集成](MCP_INTEGRATION.md) | 官方 Time/Fetch 公共 MCP、StyleForge MCP Server、六任务调用流程、安全边界与验证方法 |
+| [Prompt 注入防护](PROMPT_SECURITY.md) | 动态上下文信任边界、工具授权、出站拦截、测试与剩余风险 |
 | [扩展任务业务与 API](EXTENDED_TASKS.md) | Context Pack、五类扩展业务、统一执行接口、输入输出与边界 |
 | [会话与记忆契约](SESSION_CHAT_MEMORY.md) | 多轮对话持久化 + Context-Aware 偏好记忆闭环的接口与 Schema 契约 |
 | [小程序衣柜接口](WARDROBE_MOBILE_API.md) | 微信小程序衣柜管理 API 契约（上传/编辑/订单导入/实拍图） |
@@ -19,6 +21,7 @@
 | [中英分类结构](category_taxonomy.md) | 27 大类 + 70 细分类中英标签、上传表单大类必选/细分类可选联动 |
 | [本地部署](LOCAL_DEPLOYMENT.md) | 环境、初始化、API、Streamlit 和故障排查 |
 | [测试与评估](TESTING_AND_EVALUATION.md) | 评估方案总纲：单元/集成测试与离线质量指标 |
+| [评估计划 v2](EVALUATION_PLAN_V2.md) | 当前六任务 Harness 的分层评估、公开 Benchmark、基线、消融与实施阶段 |
 | [功能测试用例手册](FUNCTIONAL_TEST_CASES.md) | 60 个黑盒功能用例（输入/动作/测试范围/判定方法） |
 | [功能覆盖评估报告](EVALUATION_REPORT.md) | 60 用例↔门禁↔实测对照、独立裁判质量级证据、盲区与缺陷记录 |
 | [p-outfit 门禁覆盖设计稿](P_OUTFIT_EVAL_TEST_COVERAGE.md) | p-outfit 独立 LLM 评估的门禁测试覆盖表（A-F 组设计） |

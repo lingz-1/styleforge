@@ -69,8 +69,17 @@ _FORMALITY_TERMS = (
     ("商务", "business"),
 )
 
-# Sources whose item-level rows can contribute to category induction.
-_BEHAVIOR_SOURCES = tuple(_BEHAVIOR_RULES)
+# Only behaviors that express an actual accept/reject judgement may generalize
+# to a category. A plain replacement often means "this piece does not fit this
+# outfit", not "I dislike every item of this category".
+_CATEGORY_INDUCTION_SOURCES = {
+    "item_rejected",
+    "outfit_rejected",
+    "outfit_selected",
+    "wardrobe_adopted",
+    "wardrobe_removed",
+    "feedback_submitted",
+}
 
 
 def _occasions_from_request(request: str) -> list[str]:
@@ -102,6 +111,16 @@ def _scope_from_context(context: dict[str, Any] | None) -> dict[str, Any]:
     if formality:
         scope["formality"] = formality
     return scope
+
+
+def _scope_signature(scope: dict[str, Any] | None) -> tuple[str, tuple[str, ...], str]:
+    """Canonical scene key used to keep weak behavior signals isolated."""
+    value = scope or {}
+    return (
+        str(value.get("type") or "contextual"),
+        tuple(sorted(str(item) for item in value.get("occasions") or [])),
+        str(value.get("formality") or ""),
+    )
 
 
 def _target_item_ids(event: dict[str, Any]) -> list[str]:
@@ -141,24 +160,55 @@ def _category_induction_evidence(
     """A category-level claim once enough distinct items of the same category
     show the same polarity.
 
-    Distinct item ids come from this event plus every historical item-level
-    claim of the same polarity. A claim is emitted at each crossing of the
-    threshold, so ``3 distinct`` produces one claim, ``6`` a second, etc.
-    Consolidation keeps only the strongest row per key afterwards.
+    Distinct item ids come from judgement events in the same scene. At least
+    three different events are also required, so rejecting one whole outfit
+    cannot immediately become a category preference. Existing induction rows
+    define emitted milestones, making threshold crossings idempotent even when
+    one event adds more than one new item.
     """
-    distinct: set[str] = set(_target_item_ids(event))
-    for row in list_evidence(connection, event["user_id"], limit=5000):
-        if row["attribute"] == "item" and row["polarity"] == polarity:
-            distinct.add(row["value"])
+    if event["event_type"] not in _CATEGORY_INDUCTION_SOURCES:
+        return None
+    scope_key = _scope_signature(scope)
+    history = list_evidence(connection, event["user_id"], limit=5000)
+    item_events: dict[str, int | str] = {
+        item_id: event.get("event_id") or f"current:{item_id}"
+        for item_id in _target_item_ids(event)
+        if item_id
+    }
+    for row in history:
+        if (
+            row["attribute"] == "item"
+            and row["polarity"] == polarity
+            and row["source"] in _CATEGORY_INDUCTION_SOURCES
+            and _scope_signature(row.get("scope")) == scope_key
+        ):
+            item_events[row["value"]] = row.get("event_id") or row["evidence_id"]
+    distinct = set(item_events)
     if not distinct:
         return None
     attrs = _lookup_item_attrs(connection, list(distinct))
-    count_in_category = sum(
-        1 for attrs_by_id in attrs.values() if attrs_by_id.get("category") == category
-    )
+    items_in_category = {
+        item_id
+        for item_id, attrs_by_id in attrs.items()
+        if attrs_by_id.get("category") == category
+    }
+    count_in_category = len(items_in_category)
     if count_in_category < CATEGORY_INDUCTION_THRESHOLD:
         return None
-    if count_in_category % CATEGORY_INDUCTION_THRESHOLD != 0:
+    event_count = len({item_events[item_id] for item_id in items_in_category})
+    if event_count < CATEGORY_INDUCTION_THRESHOLD:
+        return None
+    earned_milestones = count_in_category // CATEGORY_INDUCTION_THRESHOLD
+    emitted_milestones = sum(
+        1
+        for row in history
+        if row["attribute"] == "category"
+        and row["value"] == category
+        and row["polarity"] == polarity
+        and row["source"] == "category_induction"
+        and _scope_signature(row.get("scope")) == scope_key
+    )
+    if emitted_milestones >= earned_milestones:
         return None
     return {
         "dimension": "garment",
@@ -210,6 +260,7 @@ def behavior_evidence_from_event(
 
     evidence: list[dict[str, Any]] = []
     seen: set[str] = set()
+    induced_categories: set[str] = set()
     for item_id in item_ids:
         if not item_id or item_id in seen:
             continue
@@ -245,7 +296,8 @@ def behavior_evidence_from_event(
             )
         # 3) Category induction (only after enough distinct items).
         category = item_attrs.get("category")
-        if category:
+        if category and category not in induced_categories:
+            induced_categories.add(category)
             induction = _category_induction_evidence(
                 connection, event, polarity, category, scope
             )

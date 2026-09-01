@@ -1,0 +1,77 @@
+{
+  "schema_version": "styleforge.wardrobe-fixtures.v1",
+  "items": [
+    {"key": "white_shirt", "item_type": "top", "name": "白色挺括衬衫", "color": "white", "features": ["minimal", "formal"], "description": "通勤基础款，利落挺括"},
+    {"key": "silk_blouse", "item_type": "top", "name": "米白真丝衬衫", "color": "ivory", "features": ["elegant", "formal"], "description": "轻薄优雅的通勤上衣"},
+    {"key": "knit_top", "item_type": "top", "name": "灰色细针织上衣", "color": "gray", "features": ["warm", "minimal"], "description": "适合降温和叠穿"},
+    {"key": "sport_tee", "item_type": "top", "name": "速干运动短袖", "color": "blue", "features": ["sport", "breathable"], "description": "吸湿速干运动上衣"},
+    {"key": "black_trousers", "item_type": "pants", "name": "黑色直筒西裤", "color": "black", "features": ["formal", "minimal"], "description": "通勤正式下装"},
+    {"key": "blue_jeans", "item_type": "pants", "name": "深蓝直筒牛仔裤", "color": "blue", "features": ["casual", "durable"], "description": "日常耐穿长裤"},
+    {"key": "sport_shorts", "item_type": "pants", "name": "黑色运动短裤", "color": "black", "features": ["sport", "breathable"], "description": "跑步和球类运动下装"},
+    {"key": "midi_skirt", "item_type": "skirt", "name": "灰色中长半身裙", "color": "gray", "features": ["elegant", "formal"], "description": "适合通勤的中长裙"},
+    {"key": "black_loafers", "item_type": "shoes", "name": "黑色皮质乐福鞋", "color": "black", "features": ["comfortable", "formal"], "description": "适合久站的低跟通勤鞋"},
+    {"key": "white_sneakers", "item_type": "shoes", "name": "白色防滑运动鞋", "color": "white", "features": ["casual", "non_slip"], "description": "日常轻量运动鞋"},
+    {"key": "rain_boots", "item_type": "shoes", "name": "黑色防水短靴", "color": "black", "features": ["waterproof", "non_slip"], "description": "雨天防水防滑短靴"},
+    {"key": "nude_pumps", "item_type": "shoes", "name": "裸色低跟尖头鞋", "color": "beige", "features": ["elegant", "formal"], "description": "婚礼和正式场合低跟鞋"},
+    {"key": "black_stilettos", "item_type": "shoes", "name": "黑色细高跟鞋", "color": "black", "features": ["formal", "high_heel"], "description": "正式场合细高跟鞋"},
+    {"key": "sport_trainers", "item_type": "shoes", "name": "黑白缓震训练鞋", "color": "black", "features": ["sport", "cushioned"], "description": "适合训练和球类活动"},
+    {"key": "trench", "item_type": "outwear", "name": "卡其色短风衣", "color": "beige", "features": ["windproof", "formal"], "description": "通勤防风外套"},
+    {"key": "raincoat", "item_type": "outwear", "name": "深蓝轻量防雨外套", "color": "navy", "features": ["waterproof", "windproof"], "description": "雨天轻量防护层"},
+    {"key": "black_blazer", "item_type": "outwear", "name": "黑色合身西装外套", "color": "black", "features": ["formal", "tailored"], "description": "正式场合结构化外套"},
+    {"key": "soft_cardigan", "item_type": "outwear", "name": "米色柔软针织开衫", "color": "beige", "features": ["warm", "elegant"], "description": "连衣裙外搭保暖层"},
+    {"key": "lace_dress", "item_type": "dress", "name": "藏蓝蕾丝连衣裙", "color": "navy", "features": ["wedding", "elegant"], "description": "适合婚礼宾客的正式连衣裙"},
+    {"key": "slip_dress", "item_type": "dress", "name": "墨绿色真丝吊带裙", "color": "green", "features": ["date", "elegant"], "description": "适合晚间约会的吊带裙"},
+    {"key": "tote", "item_type": "bag", "name": "棕色通勤托特包", "color": "brown", "features": ["practical", "formal"], "description": "可容纳电脑的通勤包"},
+    {"key": "clutch", "item_type": "bag", "name": "银色小号手拿包", "color": "silver", "features": ["wedding", "elegant"], "description": "正式活动小包"},
+    {"key": "pearl_earrings", "item_type": "earrings", "name": "小颗珍珠耳钉", "color": "white", "features": ["wedding", "minimal"], "description": "低调正式配饰"},
+    {"key": "sport_cap", "item_type": "hats", "name": "深蓝运动帽", "color": "navy", "features": ["sport", "sun_protection"], "description": "户外训练遮阳帽"},
+    {"key": "polyvore_207483977", "source": "polyvore", "dataset_item_id": "207483977", "item_type": "bag", "main_category": "bags", "name": "Pre-owned Hermes Tangerine Ostrich Exotic", "color": "orange", "features": ["wedding", "statement", "luxury"], "description": "Official Polyvore Outfits item from set 223055822 (Summer Wedding).", "image_filename": "207483977.jpg", "relative_image_path": "nondisjoint/train/207483977.jpg"},
+    {"key": "polyvore_209557897", "source": "polyvore", "dataset_item_id": "209557897", "item_type": "shoes", "main_category": "shoes", "name": "Gianvito Rossi Sandals", "color": "orange", "features": ["wedding", "formal", "high_heel"], "description": "Orange ankle-strap sandals from official Polyvore Outfits set 223055822.", "image_filename": "209557897.jpg", "relative_image_path": "nondisjoint/train/209557897.jpg"},
+    {"key": "polyvore_189174949", "source": "polyvore", "dataset_item_id": "189174949", "item_type": "accessory", "main_category": "accessories", "name": "Wedding Small Flower Hair Accessory", "color": "orange", "features": ["wedding", "floral", "hair_accessory"], "description": "Flower hair accessory from official Polyvore Outfits set 223055822.", "image_filename": "189174949.jpg", "relative_image_path": "nondisjoint/train/189174949.jpg"},
+    {"key": "polyvore_202458704", "source": "polyvore", "dataset_item_id": "202458704", "item_type": "eyewear", "main_category": "sunglasses", "name": "Prada PR 51SS Round Sunglasses", "color": "gold", "features": ["wedding", "round", "statement"], "description": "Round sunglasses from official Polyvore Outfits set 223055822.", "image_filename": "202458704.jpg", "relative_image_path": "nondisjoint/train/202458704.jpg"},
+    {"key": "polyvore_201181532", "source": "polyvore", "dataset_item_id": "201181532", "item_type": "dress", "main_category": "all-body", "name": "Topshop Crochet Lace Trim Mini Dress", "color": "orange", "features": ["wedding", "lace", "mini"], "description": "Crochet lace-trim mini dress from official Polyvore Outfits set 223055822.", "image_filename": "201181532.jpg", "relative_image_path": "nondisjoint/train/201181532.jpg"},
+    {"key": "polyvore_196030328", "source": "polyvore", "dataset_item_id": "196030328", "item_type": "bag", "main_category": "bags", "name": "Eddie Borgo Chet Minaudiere", "color": "black", "features": ["date", "evening", "leather_trimmed"], "description": "Leather-trimmed minaudiere from official Polyvore Outfits set 215963824 (Maxi Coats).", "image_filename": "196030328.jpg", "relative_image_path": "nondisjoint/train/196030328.jpg"},
+    {"key": "polyvore_196144884", "source": "polyvore", "dataset_item_id": "196144884", "item_type": "shoes", "main_category": "shoes", "name": "Jushee Pointed Toe Stiletto Pumps", "color": "black", "features": ["date", "formal", "stiletto"], "description": "Closed pointed-toe stiletto pumps from official Polyvore Outfits set 215963824.", "image_filename": "196144884.jpg", "relative_image_path": "nondisjoint/test/196144884.jpg"},
+    {"key": "polyvore_193047150", "source": "polyvore", "dataset_item_id": "193047150", "item_type": "jewellery", "main_category": "jewellery", "name": "Anissa Kermiche Trio Noir Diamond", "color": "black", "features": ["date", "diamond", "elegant"], "description": "Diamond jewellery from official Polyvore Outfits set 215963824.", "image_filename": "193047150.jpg", "relative_image_path": "nondisjoint/train/193047150.jpg"},
+    {"key": "polyvore_192792274", "source": "polyvore", "dataset_item_id": "192792274", "item_type": "jewellery", "main_category": "jewellery", "name": "Diamond Oval-X Bracelet", "color": "silver", "features": ["date", "diamond", "bracelet"], "description": "Diamond bracelet from official Polyvore Outfits set 215963824.", "image_filename": "192792274.jpg", "relative_image_path": "nondisjoint/train/192792274.jpg"},
+    {"key": "polyvore_151616863", "source": "polyvore", "dataset_item_id": "151616863", "item_type": "dress", "main_category": "all-body", "name": "Equipment Racquel Silk Slip Dress", "color": "green", "features": ["date", "silk", "elegant"], "description": "Dark green silk slip dress from official Polyvore Outfits set 215963824.", "image_filename": "151616863.jpg", "relative_image_path": "nondisjoint/train/151616863.jpg"},
+    {"key": "polyvore_95456824", "source": "polyvore", "dataset_item_id": "95456824", "item_type": "outwear", "main_category": "outerwear", "name": "Marni Coat", "color": "black", "features": ["date", "floral", "elegant"], "description": "Long floral coat from official Polyvore Outfits set 215963824.", "image_filename": "95456824.jpg", "relative_image_path": "nondisjoint/train/95456824.jpg"}
+  ],
+  "profiles": {
+    "commute": {
+      "user_id": "eval-fixture-commute",
+      "purpose": "验证通勤、正式度和舒适度",
+      "item_keys": ["white_shirt", "silk_blouse", "black_trousers", "midi_skirt", "black_loafers", "nude_pumps", "black_stilettos", "trench", "black_blazer", "tote"]
+    },
+    "rain": {
+      "user_id": "eval-fixture-rain",
+      "purpose": "验证降雨事实对防水、防滑和分层的影响",
+      "item_keys": ["knit_top", "black_trousers", "blue_jeans", "white_sneakers", "rain_boots", "raincoat", "trench", "tote"]
+    },
+    "one_piece": {
+      "user_id": "eval-fixture-one-piece",
+      "purpose": "复现 EXT-002，验证连衣裙的鞋、外套和配饰完整性",
+      "item_keys": ["lace_dress", "slip_dress", "nude_pumps", "black_loafers", "black_blazer", "soft_cardigan", "clutch", "pearl_earrings"]
+    },
+    "sport": {
+      "user_id": "eval-fixture-sport",
+      "purpose": "验证运动硬约束和实穿性",
+      "item_keys": ["sport_tee", "sport_shorts", "sport_trainers", "white_sneakers", "sport_cap"]
+    },
+    "limited": {
+      "user_id": "eval-fixture-limited",
+      "purpose": "验证最小可行衣柜和有限候选池",
+      "item_keys": ["white_shirt", "black_trousers", "black_loafers"]
+    },
+    "no_solution": {
+      "user_id": "eval-fixture-no-solution",
+      "purpose": "验证缺少核心槽位时诚实返回无解",
+      "item_keys": ["clutch", "pearl_earrings"]
+    },
+    "polyvore_one_piece": {
+      "user_id": "eval-polyvore-one-piece",
+      "purpose": "使用 Polyvore Outfits 官方真实商品与真实套装关系复验 EXT-002",
+      "item_keys": ["polyvore_207483977", "polyvore_209557897", "polyvore_189174949", "polyvore_202458704", "polyvore_201181532", "polyvore_196030328", "polyvore_196144884", "polyvore_193047150", "polyvore_192792274", "polyvore_151616863", "polyvore_95456824"]
+    }
+  }
+}

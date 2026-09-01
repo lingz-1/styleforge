@@ -99,6 +99,7 @@ TYPE_TO_STRUCTURE: dict[str, GarmentStructure] = {
     "brooch": _garment(ACCESSORY, [], exclusive=False),
     "hairwear": _garment(ACCESSORY, [], exclusive=False),
     "gloves": _garment(ACCESSORY, [], exclusive=False),
+    "accessory": _garment(ACCESSORY, [], exclusive=False),
 }
 
 

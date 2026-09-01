@@ -14,12 +14,20 @@ Layer-3 precondition, surfaced here as ``PRECONDITION_FAILED``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
+from time import perf_counter
 from typing import Any
 
 from pydantic import ValidationError
 
 from styleforge.agentic.hooks.manager import HookManager, ON_TOOL_ERROR, POST_TOOL_USE, PRE_TOOL_USE
 from styleforge.agentic.runtime.capability_registry import CapabilityRegistry
+from styleforge.agentic.context.prompt_security import validate_outbound_tool_arguments
+from styleforge.common.errors import ErrorCode
+from styleforge.common.observability import observability
+
+
+logger = logging.getLogger(__name__)
 
 # ToolCallResult.status values — a fact the Agent observes, never a crash.
 STATUS_OK = "ok"
@@ -54,6 +62,8 @@ class ToolCallResult:
     observation: str
     state_updates: dict[str, Any] = field(default_factory=dict)
     status: str = STATUS_OK
+    error_code: str | None = None
+    retryable: bool = False
 
 
 class ToolRuntime:
@@ -77,10 +87,58 @@ class ToolRuntime:
         state: dict[str, Any],
     ) -> ToolCallResult:
         """Run one tool call and normalize the result for the Agent loop."""
-        if not self.registry.contains(name):
-            return self._fail(name, STATUS_ERROR, f"未注册的工具：{name}")
+        started_at = perf_counter()
 
-        self.hooks.trigger(PRE_TOOL_USE, {"tool": name, "arguments": arguments})
+        def observed(result: ToolCallResult) -> ToolCallResult:
+            observability.record_operation(
+                "tool_call",
+                success=result.status == STATUS_OK,
+                duration_ms=(perf_counter() - started_at) * 1000.0,
+                retryable=result.retryable,
+                error_code=result.error_code or "",
+                component="tool_runtime",
+                tool=name,
+                run_id=str(state.get("run_id") or ""),
+            )
+            return result
+
+        if not self.registry.contains(name):
+            return observed(
+                self._fail(
+                    name,
+                    STATUS_ERROR,
+                    f"未注册的工具：{name}",
+                    error_code=ErrorCode.TOOL_NOT_FOUND,
+                )
+            )
+
+        capability = self.registry.capability(name)
+        try:
+            validated = capability.input_model.model_validate(arguments)
+        except ValidationError as error:
+            return observed(
+                self._fail(
+                    name,
+                    STATUS_ERROR,
+                    f"工具参数不合法（{name}）：{error}",
+                    error_code=ErrorCode.TOOL_INPUT_INVALID,
+                )
+            )
+
+        outbound_violation = validate_outbound_tool_arguments(name, validated)
+        if outbound_violation is not None:
+            return observed(
+                self._fail(
+                    name,
+                    STATUS_ERROR,
+                    "外部工具调用已被 Prompt Security 策略阻止",
+                    error_code=ErrorCode.PROMPT_INJECTION_BLOCKED,
+                )
+            )
+
+        # Hooks only receive arguments after schema and prompt-security checks;
+        # rejected external payloads must not escape through telemetry hooks.
+        self.hooks.trigger(PRE_TOOL_USE, {"tool": name, "arguments": validated.model_dump()})
 
         # Layer 3 — temporary execution conditions (never schema removal).
         precondition = self.registry.check_precondition(name, state)
@@ -88,6 +146,7 @@ class ToolRuntime:
             result = ToolCallResult(
                 observation=precondition,
                 status=STATUS_PRECONDITION_FAILED,
+                error_code=ErrorCode.TOOL_PRECONDITION_FAILED.value,
             )
             self.hooks.trigger(
                 POST_TOOL_USE,
@@ -95,24 +154,39 @@ class ToolRuntime:
                     "tool": name,
                     "observation": precondition,
                     "status": STATUS_PRECONDITION_FAILED,
+                    "error_code": result.error_code,
+                    "retryable": False,
                 },
             )
-            return result
-
-        capability = self.registry.capability(name)
-        try:
-            validated = capability.input_model.model_validate(arguments)
-        except ValidationError as error:
-            return self._fail(
-                name,
-                STATUS_ERROR,
-                f"工具参数不合法（{name}）：{error}",
-            )
+            return observed(result)
 
         try:
             outcome = capability.handler(validated, ToolContext(state))
         except Exception as error:  # noqa: BLE001 — normalize every failure into a fact
-            return self._fail(name, STATUS_ERROR, f"工具执行失败（{name}）：{type(error).__name__}: {error}")
+            if isinstance(error, TimeoutError):
+                code = ErrorCode.TOOL_TIMEOUT
+                retryable = True
+            elif isinstance(error, ConnectionError):
+                code = ErrorCode.TOOL_UNAVAILABLE
+                retryable = True
+            else:
+                code = ErrorCode.TOOL_EXECUTION_FAILED
+                retryable = False
+            logger.exception(
+                "tool_execution_failed tool=%s code=%s error_type=%s",
+                name,
+                code.value,
+                type(error).__name__,
+            )
+            return observed(
+                self._fail(
+                    name,
+                    STATUS_ERROR,
+                    f"工具执行失败（{name}）：{type(error).__name__}: {error}",
+                    error_code=code,
+                    retryable=retryable,
+                )
+            )
 
         if not isinstance(outcome, ToolCallResult):
             outcome = ToolCallResult(observation=str(outcome))
@@ -123,10 +197,33 @@ class ToolRuntime:
                 "observation": outcome.observation,
                 "status": outcome.status,
                 "state_updates": outcome.state_updates,
+                "error_code": outcome.error_code,
+                "retryable": outcome.retryable,
             },
         )
-        return outcome
+        return observed(outcome)
 
-    def _fail(self, name: str, status: str, observation: str) -> ToolCallResult:
-        self.hooks.trigger(ON_TOOL_ERROR, {"tool": name, "error": observation})
-        return ToolCallResult(observation=observation, status=status)
+    def _fail(
+        self,
+        name: str,
+        status: str,
+        observation: str,
+        *,
+        error_code: ErrorCode,
+        retryable: bool = False,
+    ) -> ToolCallResult:
+        self.hooks.trigger(
+            ON_TOOL_ERROR,
+            {
+                "tool": name,
+                "error": observation,
+                "error_code": error_code.value,
+                "retryable": retryable,
+            },
+        )
+        return ToolCallResult(
+            observation=observation,
+            status=status,
+            error_code=error_code.value,
+            retryable=retryable,
+        )

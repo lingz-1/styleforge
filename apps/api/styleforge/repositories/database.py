@@ -9,12 +9,18 @@ old ``sqlite3.Row`` semantics so callers and repositories work unchanged.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import logging
+from time import perf_counter
 from typing import Any, Iterator
 
 import psycopg
 
+from styleforge.common.errors import ErrorCode
+from styleforge.common.observability import observability
 
-SCHEMA_VERSION = 12
+
+logger = logging.getLogger(__name__)
+SCHEMA_VERSION = 14
 
 
 class SqliteLikeRow(dict):
@@ -311,9 +317,70 @@ CREATE TABLE IF NOT EXISTS personal_item_embeddings (
     dimension INTEGER NOT NULL CHECK (dimension > 0),
     vector_blob BYTEA NOT NULL,
     model_revision TEXT NOT NULL,
+    input_fingerprint TEXT NOT NULL DEFAULT '',
     embedded_at TEXT NOT NULL,
     FOREIGN KEY (item_id) REFERENCES personal_wardrobe_items(item_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS recognition_batches (
+    batch_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'accepted', 'recognizing', 'embedding', 'retrying',
+            'completed', 'partial_failed', 'interrupted', 'cancelled'
+        )
+    ),
+    total INTEGER NOT NULL CHECK (total > 0),
+    done INTEGER NOT NULL DEFAULT 0 CHECK (done >= 0),
+    succeeded INTEGER NOT NULL DEFAULT 0 CHECK (succeeded >= 0),
+    failed INTEGER NOT NULL DEFAULT 0 CHECK (failed >= 0),
+    gender TEXT NOT NULL DEFAULT 'women',
+    auto_embed INTEGER NOT NULL DEFAULT 1 CHECK (auto_embed IN (0, 1)),
+    embedding_json TEXT NOT NULL DEFAULT '{}',
+    last_error_code TEXT NOT NULL DEFAULT '',
+    ema_ms REAL NOT NULL DEFAULT 8000 CHECK (ema_ms >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_recognition_batches_user_updated
+ON recognition_batches (user_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_recognition_batches_status
+ON recognition_batches (status, updated_at);
+
+CREATE TABLE IF NOT EXISTS recognition_batch_items (
+    batch_id TEXT NOT NULL,
+    item_index INTEGER NOT NULL CHECK (item_index >= 0),
+    filename TEXT NOT NULL,
+    input_relative_path TEXT NOT NULL,
+    input_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('pending', 'recognizing', 'succeeded', 'failed', 'cancelled')
+    ),
+    reason TEXT NOT NULL DEFAULT '',
+    wardrobe_item_id TEXT,
+    item_type TEXT NOT NULL DEFAULT '',
+    subtype TEXT NOT NULL DEFAULT '',
+    color TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 0 CHECK (confidence >= 0 AND confidence <= 1),
+    attributes_json TEXT NOT NULL DEFAULT '{}',
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (batch_id, item_index),
+    FOREIGN KEY (batch_id) REFERENCES recognition_batches(batch_id) ON DELETE CASCADE,
+    FOREIGN KEY (wardrobe_item_id) REFERENCES catalog_items(item_id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_recognition_batch_items_status
+ON recognition_batch_items (batch_id, status, item_index);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recognition_batch_items_input
+ON recognition_batch_items (batch_id, input_sha256, item_index);
 
 CREATE TABLE IF NOT EXISTS user_preferences (
     user_id TEXT PRIMARY KEY,
@@ -380,6 +447,7 @@ CREATE TABLE IF NOT EXISTS task_runs (
     ),
     context_pack_json TEXT NOT NULL DEFAULT '{}',
     result_json TEXT,
+    diagnostics_json TEXT NOT NULL DEFAULT '{}',
     error_message TEXT,
     created_at TEXT NOT NULL,
     finished_at TEXT
@@ -513,6 +581,14 @@ def initialize_database(dsn: str) -> None:
             "ALTER TABLE IF EXISTS catalog_items "
             "ADD COLUMN IF NOT EXISTS dataset_item_id TEXT NOT NULL DEFAULT ''"
         )
+        connection.execute(
+            "ALTER TABLE IF EXISTS task_runs "
+            "ADD COLUMN IF NOT EXISTS diagnostics_json TEXT NOT NULL DEFAULT '{}'"
+        )
+        connection.execute(
+            "ALTER TABLE IF EXISTS personal_item_embeddings "
+            "ADD COLUMN IF NOT EXISTS input_fingerprint TEXT NOT NULL DEFAULT ''"
+        )
         connection.execute(PG_SCHEMA_SQL)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES('schema_version', %s) "
@@ -520,11 +596,24 @@ def initialize_database(dsn: str) -> None:
             (str(SCHEMA_VERSION),),
         )
         connection.commit()
-    except BaseException:
-        connection.rollback()
+    except BaseException as error:
+        try:
+            connection.rollback()
+        except Exception as rollback_error:
+            logger.exception(
+                "database_initialize_rollback_failed root_error_type=%s rollback_error_type=%s",
+                type(error).__name__,
+                type(rollback_error).__name__,
+            )
         raise
     finally:
-        connection.close()
+        try:
+            connection.close()
+        except Exception as close_error:
+            logger.warning(
+                "database_initialize_close_failed error_type=%s",
+                type(close_error).__name__,
+            )
 
 
 @contextmanager
@@ -534,12 +623,65 @@ def database_session(dsn: str) -> Iterator[PgConnection]:
     Mirrors the old SQLite ``database_session(path)`` contract; callers pass a
     PostgreSQL DSN string instead of a file path.
     """
-    connection = connect(dsn)
+    started_at = perf_counter()
+    try:
+        connection = connect(dsn)
+    except Exception as error:
+        observability.record_operation(
+            "database_session",
+            success=False,
+            duration_ms=(perf_counter() - started_at) * 1000.0,
+            retryable=isinstance(error, (psycopg.OperationalError, TimeoutError, ConnectionError)),
+            error_code=ErrorCode.DATABASE_ERROR.value,
+            component="database",
+            phase="connect",
+            error_type=type(error).__name__,
+        )
+        raise
+    completed = False
     try:
         yield connection
         connection.commit()
-    except BaseException:
-        connection.rollback()
+        completed = True
+    except BaseException as error:
+        root_code = getattr(error, "code", None)
+        error_code = (
+            ErrorCode.DATABASE_ERROR.value
+            if isinstance(error, psycopg.DatabaseError)
+            else str(getattr(root_code, "value", root_code) or "TRANSACTION_ABORTED")
+        )
+        observability.record_operation(
+            "database_session",
+            success=False,
+            duration_ms=(perf_counter() - started_at) * 1000.0,
+            retryable=bool(getattr(error, "retryable", False))
+            or isinstance(error, (psycopg.OperationalError, TimeoutError, ConnectionError)),
+            error_code=error_code,
+            component="database",
+            phase="transaction",
+            error_type=type(error).__name__,
+        )
+        try:
+            connection.rollback()
+        except Exception as rollback_error:
+            logger.exception(
+                "database_session_rollback_failed root_error_type=%s rollback_error_type=%s",
+                type(error).__name__,
+                type(rollback_error).__name__,
+            )
         raise
     finally:
-        connection.close()
+        if completed:
+            observability.record_operation(
+                "database_session",
+                success=True,
+                duration_ms=(perf_counter() - started_at) * 1000.0,
+                component="database",
+            )
+        try:
+            connection.close()
+        except Exception as close_error:
+            logger.warning(
+                "database_session_close_failed error_type=%s",
+                type(close_error).__name__,
+            )

@@ -17,6 +17,7 @@ Evidence Synthesizer (frozen #22).
 
 from __future__ import annotations
 
+import json
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -42,8 +43,14 @@ MAX_EXTENSION_STEPS = 8
 # Bounded repair budget for the closing node (mirrors the legacy
 # ``_critic_with_repair`` semantics): a draft that fails the hard validators is
 # fed back to the model at most this many times before a deterministic
-# clarification fallback ends the run — never a fabricated completion.
+# grounded fallback or clarification ends the run without fabricated IDs.
 MAX_CLOSING_RETRIES = 2
+
+_CLOSING_MODE_INSTRUCTION = """【结果综合模式】
+你现在是扩展任务的最终结果综合节点，不再执行 Extension 决策循环。
+禁止输出 control、READY、NEED_USER 或工具调用。必须严格返回本次提供的 JSON Schema：
+顶层包含 status、summary、result，result 必须填写对应任务合同的全部必填字段。
+所有衣橱单品、候选新品、槽位统计和缺口只能来自【确定性分析事实】；不得编造 ID。"""
 
 
 class ExtensionState(TypedDict, total=False):
@@ -74,6 +81,45 @@ class ExtensionState(TypedDict, total=False):
     # products shared with the parent (frozen #20)
     handoff_result: AgentHandoffResult | None
     extension_result: Any  # {task_type, status, summary, result} — task contract
+    extension_validation_failures: list[str]
+
+
+def can_direct_close_extension(state: dict[str, Any]) -> bool:
+    """Return whether verified extension facts can bypass redundant planning."""
+    facts = state.get("extension_facts") or {}
+    task_type = facts.get("task_type")
+    if facts.get("needs_clarification"):
+        return False
+    fact_body = facts.get("facts") or {}
+    resolved = facts.get("resolved_target") or {}
+    if task_type in (TaskType.STYLE_ADVICE, TaskType.STYLE_ADVICE.value):
+        return bool(
+            resolved.get("style")
+            and "knowledge_entries" in fact_body
+            and "wardrobe_matches" in fact_body
+        )
+    if task_type in (
+        TaskType.WARDROBE_COMPATIBILITY,
+        TaskType.WARDROBE_COMPATIBILITY.value,
+    ):
+        compatible = fact_body.get("compatible_items_by_slot") or {}
+        return bool(
+            fact_body.get("candidate_item")
+            and fact_body.get("candidate_slot")
+            and any(compatible.values())
+        )
+    if task_type in (TaskType.WARDROBE_GAP, TaskType.WARDROBE_GAP.value):
+        return "wardrobe_item_count" in fact_body and "slot_counts" in fact_body
+    if task_type not in (TaskType.ITEM_ADVICE, TaskType.ITEM_ADVICE.value):
+        return False
+    anchor = fact_body.get("anchor_item") or {}
+    compatible = fact_body.get("compatible_items_by_slot") or {}
+    requested_slots = fact_body.get("requested_support_slots") or []
+    return bool(
+        anchor
+        and any(compatible.values())
+        and all(compatible.get(slot) for slot in requested_slots)
+    )
 
 
 def build_extension_subgraph(runtime: AgentRuntime):
@@ -115,7 +161,12 @@ def build_extension_subgraph(runtime: AgentRuntime):
             return {
                 "trajectory_protocol_errors": state.get("trajectory_protocol_errors", 0) + 1,
                 "tool_observations": state.get("tool_observations", [])
-                + [{"tool": "__protocol__", "observation": result.protocol_error}],
+                + [{
+                    "tool": "__protocol__",
+                    "observation": result.protocol_error,
+                    "error_code": result.error_code,
+                    "retryable": result.retryable,
+                }],
             }
 
         trace = state.get("trace", []) + [result.trace]
@@ -161,7 +212,12 @@ def build_extension_subgraph(runtime: AgentRuntime):
         )
         updates: dict[str, Any] = {
             "tool_observations": state.get("tool_observations", [])
-            + [{"tool": pending["name"], "observation": tool_result.observation}],
+            + [{
+                "tool": pending["name"],
+                "observation": tool_result.observation,
+                "error_code": tool_result.error_code,
+                "retryable": tool_result.retryable,
+            }],
             "trajectory_step_count": state.get("trajectory_step_count", 0) + 1,
             "pending_tools": remaining,
         }
@@ -177,11 +233,23 @@ def build_extension_subgraph(runtime: AgentRuntime):
             return "tool_step"
         return "extension_agent"  # protocol-error re-entry with an appended observation
 
+    def _start_route(state: ExtensionState) -> str:
+        """Skip redundant analysis when deterministic item facts are complete."""
+        return (
+            "closing"
+            if can_direct_close_extension(dict(state))
+            else "extension_agent"
+        )
+
     builder = StateGraph(ExtensionState)
     builder.add_node("extension_agent", extension_agent)
     builder.add_node("tool_step", tool_step)
     builder.add_node("closing", closing_node)
-    builder.add_edge(START, "extension_agent")
+    builder.add_conditional_edges(
+        START,
+        _start_route,
+        {"extension_agent": "extension_agent", "closing": "closing"},
+    )
     builder.add_conditional_edges(
         "extension_agent",
         _route,
@@ -212,10 +280,14 @@ def make_extension_closing(runtime: AgentRuntime):
         facts = state.get("extension_facts") or {}
         try:
             agent1 = Agent1TaskOutput(**facts)
-        except ValidationError:
+        except ValidationError as error:
             # Malformed deterministic facts cannot produce any result — the
             # boundary was broken by the caller, not the model.
-            return _protocol_envelope(state)
+            failed = _protocol_envelope(state)
+            failed["extension_validation_failures"] = [
+                f"agent1_contract: {str(error)[:500]}"
+            ]
+            return failed
         trace = state.get("trace", [])
 
         if facts.get("needs_clarification"):
@@ -230,10 +302,20 @@ def make_extension_closing(runtime: AgentRuntime):
             raise ContextLimitError(
                 f"context guard: {guard.status}: {'；'.join(guard.warnings)}"
             )
-        system = guard.bundle.system_text
-        base_user = guard.bundle.user_message
+        system = guard.bundle.system_text + "\n\n" + _CLOSING_MODE_INSTRUCTION
+        base_user = (
+            guard.bundle.model_user_message
+            + "\n\n【本轮目标 JSON Schema】\n"
+            + json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+        )
         user = base_user
-        for attempt in range(MAX_CLOSING_RETRIES + 1):
+        validation_failures: list[str] = []
+        attempt_count = (
+            1
+            if task_type is TaskType.ITEM_ADVICE
+            else MAX_CLOSING_RETRIES + 1
+        )
+        for attempt in range(attempt_count):
             payload, _ = runtime.llm.chat_json(
                 system=system,
                 user=user,
@@ -247,16 +329,99 @@ def make_extension_closing(runtime: AgentRuntime):
             }
             shipped = _try_finalize(agent1, trace, draft)
             if not isinstance(shipped, str):
+                if validation_failures:
+                    shipped["extension_validation_failures"] = validation_failures
                 return shipped
+            validation_failures.append(shipped)
             user = base_user + "\n\n上一轮产出未通过硬校验，请修正：\n" + shipped
-        # Bounded repair exhausted → deterministic clarification (honest, never
-        # a fabricated completion). The model had its chances.
+        # The facts already contain verified wardrobe candidates. For feasible
+        # item advice, compose a grounded result from those facts instead of
+        # asking the user to clarify information the system already resolved.
+        if task_type is TaskType.ITEM_ADVICE:
+            fallback = _grounded_item_advice_fallback(agent1)
+            if fallback is not None:
+                shipped = _try_finalize(agent1, trace, fallback)
+                if not isinstance(shipped, str):
+                    shipped["extension_validation_failures"] = validation_failures
+                    return shipped
+        # Other tasks, or an item-advice fact set without enough candidates,
+        # retain the honest clarification fallback after bounded repair.
         shipped = _try_finalize(agent1, trace, _clarification_draft(agent1, facts))
         if isinstance(shipped, str):
-            return _protocol_envelope(state)
+            failed = _protocol_envelope(state)
+            failed["extension_validation_failures"] = validation_failures + [shipped]
+            return failed
+        shipped["extension_validation_failures"] = validation_failures
         return shipped
 
     return closing_node
+
+
+def _grounded_item_advice_fallback(
+    agent1: Agent1TaskOutput,
+) -> dict[str, Any] | None:
+    """Build item advice only from deterministic Agent 1 wardrobe facts."""
+    facts = agent1.facts
+    anchor = dict(facts.get("anchor_item") or {})
+    anchor_id = str(anchor.get("item_id") or "")
+    compatible = {
+        str(slot): list(items)
+        for slot, items in (facts.get("compatible_items_by_slot") or {}).items()
+        if items
+    }
+    requested_slots = [
+        str(slot) for slot in (facts.get("requested_support_slots") or [])
+    ]
+    selected_slots = requested_slots or sorted(compatible)
+    if (
+        not anchor_id
+        or not selected_slots
+        or any(not compatible.get(slot) for slot in selected_slots)
+    ):
+        return None
+
+    outfit_count = min(3, max(len(compatible[slot]) for slot in selected_slots))
+    outfits: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for index in range(outfit_count):
+        item_ids = [anchor_id]
+        for slot in selected_slots:
+            candidates = compatible[slot]
+            candidate = candidates[index % len(candidates)]
+            item_ids.append(str(candidate["item_id"]))
+        item_ids = list(dict.fromkeys(item_ids))
+        signature = tuple(item_ids)
+        if len(item_ids) < 2 or signature in seen:
+            continue
+        seen.add(signature)
+        outfits.append(
+            {
+                "outfit_id": f"grounded-{index + 1}",
+                "item_ids": item_ids,
+                "reasoning": "保留指定单品，并按用户点名槽位选用衣橱内已验证的高匹配单品。",
+            }
+        )
+    if not outfits:
+        return None
+
+    result = {
+        "status": "completed",
+        "title": str(anchor.get("name") or "单品搭配建议"),
+        "summary": "已基于当前衣橱中通过匹配与边界校验的真实单品生成搭配。",
+        "anchor_item": anchor,
+        "anchor_source": str(facts.get("anchor_source") or "wardrobe"),
+        "compatible_items_by_slot": {
+            slot: compatible[slot] for slot in selected_slots
+        },
+        "wardrobe_matches": list(facts.get("wardrobe_matches") or []),
+        "wardrobe_matches_by_slot": {},
+        "sample_outfits": outfits,
+        "evidence": [],
+        "clarification_question": "",
+        "limitations": ["模型结构化输出未通过硬校验，已使用确定性候选事实降级生成。"],
+        "generation_mode": "deterministic_grounded_fallback",
+    }
+    return {"status": "completed", "summary": result["summary"], "result": result}
 
 
 def _try_finalize(

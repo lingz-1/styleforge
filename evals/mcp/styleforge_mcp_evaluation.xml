@@ -1,0 +1,42 @@
+<evaluation>
+  <qa_pair>
+    <question>同时读取能力资源与系统状态，并核对实际工具目录。StyleForge 当前支持多少种业务任务类型？只回答数字。</question>
+    <answer>6</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>比较能力资源、安全元数据与工具注解：五个工具中唯一非只读、非幂等的工具名是什么？只回答工具名。</question>
+    <answer>styleforge_execute_task</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>读取系统状态并与实际工具目录交叉核对。StyleForge MCP Server 对外暴露多少个工具？只回答数字。</question>
+    <answer>5</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>读取能力资源、系统状态和对外工具目录，判断声明的五个工具是否全部真实存在。只回答 true 或 false。</question>
+    <answer>true</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>核对能力资源和系统状态中的传输声明。两处共同支持的传输数量是多少？只回答数字。</question>
+    <answer>2</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>读取能力资源与系统状态，找出供外部客户端连接、且不是普通状态查询接口的 MCP 路径。只回答路径。</question>
+    <answer>/mcp/</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>综合能力资源的安全声明与所有工具输入 Schema，判断 Server 是否提供任意 SQL 或原始数据库访问。只回答 true 或 false。</question>
+    <answer>false</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>比较能力资源与系统状态：天气链配置了多少个外部 MCP Server？只回答数字。</question>
+    <answer>2</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>检查执行工具的输入 Schema 与文档。一次请求允许的 max_results 最大值是多少？只回答数字。</question>
+    <answer>5</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>读取能力资源、工具目录和系统状态，判断所有衣柜读取工具是否都要求 user_id。只回答 true 或 false。</question>
+    <answer>true</answer>
+  </qa_pair>
+</evaluation>

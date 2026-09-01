@@ -8,10 +8,12 @@ graph is retired — no fallback chain exists in this module.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from styleforge.agentic.context.grounding import GroundingResolver
@@ -30,8 +32,11 @@ from styleforge.agentic.tools.local_tools import (
     CAP_WEB_SEARCH,
 )
 from styleforge.context.builder import ContextPackBuilder
+from styleforge.common.errors import ErrorCode
+from styleforge.common.observability import observability, observability_context
 from styleforge.core.categories import infer_slot
 from styleforge.core.request_parser import parse_request
+from styleforge.core.rubric import aggregate_score, dimension_keys, normalize_weights
 from styleforge.core.schemas import OutfitCandidate, RecommendationResult, TaskSpec
 from styleforge.knowledge.retriever import KnowledgeRetriever
 from styleforge.llm.client import LlmUnavailable
@@ -52,8 +57,14 @@ from styleforge.repositories.wardrobe_repository import list_items
 from styleforge.services.memory_aggregator import apply_evidence
 from styleforge.services.memory_evidence import extract_language_evidence
 from styleforge.services.presentation import present_result
+from styleforge.services.recommend_result_contract import (
+    normalize_outfit_recommend_result,
+)
 from styleforge.services.recommendation import recommend_for_user
 from styleforge.tools.extension_analysis import analyze_extension_task
+
+
+logger = logging.getLogger(__name__)
 
 # H3a-2 Memory scope gate: turn-scoped requests never feed long-term memory.
 # EvidenceScope only distinguishes global/contextual (no turn type), so the gate
@@ -68,13 +79,47 @@ def _scope_gate(request: str) -> bool:
     """Whether a request is turn-scoped and must skip the long-term extractor."""
     return bool(_TURN_SCOPE_RE.search(request or ""))
 
+
 _FOLLOW_UP_ADJUST_WORDS = (
-    "更", "再", "别", "不", "一点", "太", "有点", "调整", "改变",
-    "换成", "换", "改", "替换", "色系", "风格", "正式", "休闲", "简约", "商务", "酷", "花",
+    "更",
+    "再",
+    "别",
+    "不",
+    "一点",
+    "太",
+    "有点",
+    "调整",
+    "改变",
+    "换成",
+    "换",
+    "改",
+    "替换",
+    "色系",
+    "风格",
+    "正式",
+    "休闲",
+    "简约",
+    "商务",
+    "酷",
+    "花",
 )
 _FRESH_SCENARIO_WORDS = (
-    "推荐", "面试", "聚会", "约会", "通勤", "上班", "旅行", "婚礼",
-    "出席", "晚宴", "周末", "今天", "明天", "穿什么", "搭配", "选一套",
+    "推荐",
+    "面试",
+    "聚会",
+    "约会",
+    "通勤",
+    "上班",
+    "旅行",
+    "婚礼",
+    "出席",
+    "晚宴",
+    "周末",
+    "今天",
+    "明天",
+    "穿什么",
+    "搭配",
+    "选一套",
 )
 
 # The four extension task types migrated into the Multi-Agent Harness (Stage
@@ -129,6 +174,7 @@ class MultiTaskWorkflow:
         llm_client: Any | None,
         chroma_store: Any | None = None,
         text_embedder: Any | None = None,
+        wardrobe_retriever: Any | None = None,
         # Web search for the agentic ``search_web`` tool. None degrades the
         # tool to an "unconfigured" observation; the loop keeps working.
         web_search_provider: Any | None = None,
@@ -144,6 +190,7 @@ class MultiTaskWorkflow:
         self.database_path = database_path
         self.knowledge_root = knowledge_root.resolve()
         self.llm_client = llm_client
+        self.wardrobe_retriever = wardrobe_retriever
         self.web_search_provider = web_search_provider
         self.weather_provider = weather_provider
         self.skills_root = skills_root
@@ -167,7 +214,6 @@ class MultiTaskWorkflow:
         # H3a-4: layered long-term preference recall (read-chain tail). Shared
         # by recommend and modify; the Thread layer stays in thread_context.
         self.memory_retriever = PreferenceRetriever()
-
 
     def _route_with_session(
         self,
@@ -195,9 +241,7 @@ class MultiTaskWorkflow:
             return route0
         with database_session(self.database_path) as connection:
             active_ids = {item.item_id for item in list_items(connection, task_input.user_id)}
-        session_item_ids = [
-            item_id for item_id in session_item_ids if item_id in active_ids
-        ]
+        session_item_ids = [item_id for item_id in session_item_ids if item_id in active_ids]
         if not session_item_ids:
             return route0
         # The Multi-Agent Harness resolves its own targets from ``session_context``
@@ -224,11 +268,37 @@ class MultiTaskWorkflow:
                 return
             with database_session(self.database_path) as connection:
                 apply_evidence(connection, task_input.user_id, evidence)
-        except Exception:
+        except Exception as error:
             # Memory extraction is best-effort and must never fail a task run.
-            pass
+            logger.warning(
+                "memory_extraction_dropped user_id=%s error_type=%s",
+                task_input.user_id,
+                type(error).__name__,
+            )
 
-
+    def _record_task_failure(
+        self,
+        *,
+        run_id: str,
+        error: Exception,
+        context_pack: dict[str, Any],
+    ) -> None:
+        """Persist a failed run without ever masking the original exception."""
+        try:
+            with database_session(self.database_path) as connection:
+                fail_task_run(
+                    connection,
+                    run_id=run_id,
+                    error=error,
+                    context_pack=context_pack,
+                )
+        except Exception as journal_error:
+            logger.exception(
+                "task_failure_journal_failed run_id=%s root_error_type=%s journal_error_type=%s",
+                run_id,
+                type(error).__name__,
+                type(journal_error).__name__,
+            )
 
     def execute(
         self,
@@ -236,15 +306,65 @@ class MultiTaskWorkflow:
         *,
         session_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        route = self._route_with_session(task_input, session_context)
-        with database_session(self.database_path) as connection:
-            run_id = start_task_run(
-                connection,
-                user_id=task_input.user_id,
-                task_type=route.task_type,
-                request=task_input.request,
+        started_at = perf_counter()
+        run_id = ""
+        try:
+            route = self._route_with_session(task_input, session_context)
+            with database_session(self.database_path) as connection:
+                run_id = start_task_run(
+                    connection,
+                    user_id=task_input.user_id,
+                    task_type=route.task_type,
+                    request=task_input.request,
+                )
+            with observability_context(run_id=run_id):
+                result = self._execute_started_run(
+                    task_input,
+                    route,
+                    run_id,
+                    session_context,
+                )
+        except Exception as error:
+            code = (
+                ErrorCode.LLM_UNAVAILABLE.value
+                if isinstance(error, LlmUnavailable)
+                else ErrorCode.AGENT_EXECUTION_FAILED.value
             )
-        initial_context = self.context_builder.build(task_input, route)
+            observability.record_operation(
+                "task_run",
+                success=False,
+                duration_ms=(perf_counter() - started_at) * 1000.0,
+                retryable=isinstance(error, (LlmUnavailable, TimeoutError, ConnectionError)),
+                error_code=code,
+                component="task_workflow",
+                run_id=run_id,
+                task_type=(route.task_type.value if "route" in locals() else "unknown"),
+                error_type=type(error).__name__,
+            )
+            raise
+        observability.record_operation(
+            "task_run",
+            success=True,
+            duration_ms=(perf_counter() - started_at) * 1000.0,
+            component="task_workflow",
+            run_id=run_id,
+            task_type=route.task_type.value,
+            status=str(result.get("status") or ""),
+        )
+        return result
+
+    def _execute_started_run(
+        self,
+        task_input: TaskExecutionInput,
+        route: TaskRoute,
+        run_id: str,
+        session_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        try:
+            initial_context = self.context_builder.build(task_input, route)
+        except Exception as error:
+            self._record_task_failure(run_id=run_id, error=error, context_pack={})
+            raise
         # Every task runs the Multi-Agent Harness as the primary chain. A
         # no-LLM OUTFIT_RECOMMEND degrades to the deterministic recommendation
         # pipeline; no-LLM modify / extension raise ``LlmUnavailable`` (503)
@@ -258,14 +378,14 @@ class MultiTaskWorkflow:
                 return self._run_agentic_recommend(
                     task_input, route, initial_context, run_id, session_context
                 )
-            return self._deterministic_recommend(
-                task_input, route, initial_context, run_id
-            )
+            return self._deterministic_recommend(task_input, route, initial_context, run_id)
         if route.task_type in _EXTENSION_TYPES:
             return self._run_agentic_extension(
                 task_input, route, initial_context, run_id, session_context
             )
-        raise ValueError(f"Unhandled task type: {route.task_type}")
+        error = ValueError(f"Unhandled task type: {route.task_type}")
+        self._record_task_failure(run_id=run_id, error=error, context_pack={})
+        raise error
 
     # --- no-LLM OUTFIT_RECOMMEND: deterministic pipeline ------------------
 
@@ -282,24 +402,37 @@ class MultiTaskWorkflow:
         same no-key recommend contract as before the legacy graph was retired.
         No agent call is made; the payload marks ``llm_enabled=false``.
         """
-        parsed = parse_request(
-            task_input.user_id,
-            task_input.request,
-            task_input.max_results,
-        )
-        recommendation = recommend_for_user(self.database_path, parsed)
-        result = present_result(self.database_path, recommendation)
-        status = str(recommendation.status)
         context_json = initial_context.model_dump(mode="json")
-        with database_session(self.database_path) as connection:
-            finish_task_run(
-                connection,
+        try:
+            parsed = parse_request(
+                task_input.user_id,
+                task_input.request,
+                task_input.max_results,
+            )
+            recommendation = recommend_for_user(self.database_path, parsed)
+            result = present_result(self.database_path, recommendation)
+            status = str(recommendation.status)
+            result = normalize_outfit_recommend_result(
+                result,
                 run_id=run_id,
                 status=status,
-                context_pack=context_json,
-                result=result,
             )
-        self._extract_memories(task_input)
+            with database_session(self.database_path) as connection:
+                finish_task_run(
+                    connection,
+                    run_id=run_id,
+                    status=status,
+                    context_pack=context_json,
+                    result=result,
+                )
+            self._extract_memories(task_input)
+        except Exception as error:
+            self._record_task_failure(
+                run_id=run_id,
+                error=error,
+                context_pack=context_json,
+            )
+            raise
         return {
             "run_id": run_id,
             "user_id": task_input.user_id,
@@ -346,7 +479,9 @@ class MultiTaskWorkflow:
     def _runtime_capabilities(self) -> frozenset[str]:
         """Deployed capability keys (Layer 2) from the workflow's providers."""
         caps: set[str] = set()
-        if self.web_search_provider is not None:
+        if self.web_search_provider is not None and bool(
+            getattr(self.web_search_provider, "available", True)
+        ):
             caps.add(CAP_WEB_SEARCH)
         if self.weather_provider is not None:
             caps.add(CAP_WEATHER)
@@ -355,6 +490,87 @@ class MultiTaskWorkflow:
         if self.skills_root is not None:
             caps.add(CAP_SKILLS)
         return frozenset(caps)
+
+    @staticmethod
+    def _task_diagnostics(
+        outcomes: dict[str, Any] | list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Aggregate safe wardrobe-search telemetry for response and storage."""
+        outcome_list = outcomes if isinstance(outcomes, list) else [outcomes]
+        allowed_keys = (
+            "mode",
+            "matched",
+            "returned",
+            "semantic_available",
+            "degraded",
+            "duration_ms",
+            "requested_slots",
+            "errors",
+            "query_chars",
+        )
+        calls = [
+            {key: call.get(key) for key in allowed_keys if key in call}
+            for outcome in outcome_list
+            for call in outcome.get("wardrobe_retrievals") or []
+            if isinstance(call, dict)
+        ]
+        modes = list(dict.fromkeys(str(call.get("mode") or "keyword") for call in calls))
+        errors = sorted(
+            {str(error) for call in calls for error in call.get("errors") or [] if error}
+        )
+        mcp_allowed_keys = (
+            "call_id",
+            "server",
+            "tool",
+            "transport",
+            "success",
+            "duration_ms",
+            "error_code",
+            "result_chars",
+            "called_at",
+        )
+        mcp_calls = [
+            {key: call.get(key) for key in mcp_allowed_keys if key in call}
+            for outcome in outcome_list
+            for call in outcome.get("mcp_calls") or []
+            if isinstance(call, dict)
+        ]
+        return {
+            "wardrobe_retrieval": {
+                "calls": len(calls),
+                "modes": modes,
+                "semantic_used": any(call.get("mode") in {"semantic", "hybrid"} for call in calls),
+                "keyword_fallback_calls": sum(call.get("mode") == "keyword" for call in calls),
+                "degraded_calls": sum(bool(call.get("degraded")) for call in calls),
+                "total_duration_ms": round(
+                    sum(float(call.get("duration_ms") or 0.0) for call in calls),
+                    2,
+                ),
+                "errors": errors,
+                "details": calls,
+            },
+            "mcp": {
+                "calls": len(mcp_calls),
+                "successful_calls": sum(bool(call.get("success")) for call in mcp_calls),
+                "failed_calls": sum(not bool(call.get("success")) for call in mcp_calls),
+                "servers": list(
+                    dict.fromkeys(
+                        str(call.get("server")) for call in mcp_calls if call.get("server")
+                    )
+                ),
+                "tools": list(
+                    dict.fromkeys(str(call.get("tool")) for call in mcp_calls if call.get("tool"))
+                ),
+                "total_duration_ms": round(
+                    sum(float(call.get("duration_ms") or 0.0) for call in mcp_calls),
+                    2,
+                ),
+                "errors": sorted(
+                    {str(call.get("error_code")) for call in mcp_calls if call.get("error_code")}
+                ),
+                "details": mcp_calls,
+            },
+        }
 
     def _thread_context(
         self,
@@ -385,7 +601,12 @@ class MultiTaskWorkflow:
         """
         try:
             return get_environment_profile(connection, user_id)
-        except Exception:
+        except Exception as error:
+            logger.warning(
+                "environment_profile_unavailable user_id=%s error_type=%s",
+                user_id,
+                type(error).__name__,
+            )
             return {}
 
     def _raw_preferences(self, initial_context: ContextPack) -> list[Any]:
@@ -394,9 +615,7 @@ class MultiTaskWorkflow:
         ``memory_profile`` may be a flat list of preference entries or a dict
         carrying a ``preferences`` key; the retriever consumes a flat list.
         """
-        profile = (
-            (initial_context.user_context.preferences or {}).get("memory_profile") or []
-        )
+        profile = (initial_context.user_context.preferences or {}).get("memory_profile") or []
         if isinstance(profile, dict):
             return list(profile.get("preferences") or [])
         return list(profile)
@@ -454,9 +673,7 @@ class MultiTaskWorkflow:
             item_type_by_id: dict[str, str] = {}
             with database_session(self.database_path) as connection:
                 wardrobe_items = list_items(connection, task_input.user_id)
-                item_type_by_id = {
-                    item.item_id: item.item_type for item in wardrobe_items
-                }
+                item_type_by_id = {item.item_id: item.item_type for item in wardrobe_items}
                 for target in targets:
                     sub_input = task_input.model_copy(
                         update={
@@ -464,14 +681,13 @@ class MultiTaskWorkflow:
                             "current_item_ids": target["item_ids"],
                         }
                     )
-                    facts = build_facts(
-                        connection, sub_input, initial_context, wardrobe_items
-                    )
+                    facts = build_facts(connection, sub_input, initial_context, wardrobe_items)
                     environment = Environment(
                         connection,
                         wardrobe_items,
                         facts,
                         search_limit=12,
+                        wardrobe_retriever=self.wardrobe_retriever,
                         web_search_provider=self.web_search_provider,
                     )
                     harness = self._harness(environment, target_candidates=1)
@@ -487,6 +703,7 @@ class MultiTaskWorkflow:
                         {
                             "run_id": run_id,
                             "request": task_input.request,
+                            "task_type": TaskType.OUTFIT_MODIFY.value,
                             "base_draft": Draft(outfit=base_snapshot, layers={}),
                             "thread_context": thread_context,
                             "grounding_context": self._grounding_context(
@@ -497,10 +714,17 @@ class MultiTaskWorkflow:
                             "grounding_resolved_kinds": [],
                         }
                     )
+                    outcome["wardrobe_retrievals"] = list(environment.wardrobe_search_diagnostics)
+                    outcome["mcp_calls"] = list(environment.mcp_call_traces)
                     outcome["_llm_call_count"] = harness.model_calls
                     outcomes.append(outcome)
+            diagnostics = self._task_diagnostics(outcomes)
             result = self._agentic_modify_to_result(
-                task_input, targets, outcomes, item_type_by_id
+                task_input,
+                targets,
+                outcomes,
+                item_type_by_id,
+                evaluation_weights=self._evaluation_weights(initial_context),
             )
             status = str(result.get("status", "infeasible"))
             with database_session(self.database_path) as connection:
@@ -510,18 +734,17 @@ class MultiTaskWorkflow:
                     status=status,
                     context_pack=context_json,
                     result=result,
+                    diagnostics=diagnostics,
                 )
             if status == "completed":
                 self._persist_agentic_candidate(task_input, result)
             self._extract_memories(task_input)
         except Exception as error:
-            with database_session(self.database_path) as connection:
-                fail_task_run(
-                    connection,
-                    run_id=run_id,
-                    error=error,
-                    context_pack=context_json,
-                )
+            self._record_task_failure(
+                run_id=run_id,
+                error=error,
+                context_pack=context_json,
+            )
             raise
         return {
             "run_id": run_id,
@@ -534,14 +757,12 @@ class MultiTaskWorkflow:
             "context_pack": context_json,
             "result": result,
             "trace": [],
-            "diagnostics": {},
+            "diagnostics": diagnostics,
             "image_endpoint_template": "/items/{item_id}/image",
             "agents": {"harness": "styleforge_harness"},
             "agentic_outcome": outcomes[0] if len(outcomes) == 1 else outcomes,
             "llm_enabled": True,
-            "llm_call_count": sum(
-                int(outcome.get("_llm_call_count", 0)) for outcome in outcomes
-            ),
+            "llm_call_count": sum(int(outcome.get("_llm_call_count", 0)) for outcome in outcomes),
         }
 
     def _agentic_modify_to_result(
@@ -550,12 +771,17 @@ class MultiTaskWorkflow:
         targets: list[dict[str, Any]],
         outcomes: list[dict[str, Any]],
         item_type_by_id: dict[str, str] | None = None,
+        evaluation_weights: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Wrap one or more Harness modify outcomes into the OutfitModifyResult
         contract — one alternative per successful target."""
         if len(outcomes) == 1:
             return self._agentic_modify_outcome_to_result(
-                task_input, targets[0], outcomes[0], item_type_by_id
+                task_input,
+                targets[0],
+                outcomes[0],
+                item_type_by_id,
+                evaluation_weights=evaluation_weights,
             )
         item_type_by_id = item_type_by_id or {}
         base_id = task_input.current_outfit_id or ""
@@ -565,7 +791,11 @@ class MultiTaskWorkflow:
         first_success: dict[str, Any] | None = None
         for target, outcome in zip(targets, outcomes):
             alternative, reason = self._harness_modify_alternative(
-                task_input, target, outcome, item_type_by_id
+                task_input,
+                target,
+                outcome,
+                item_type_by_id,
+                evaluation_weights=evaluation_weights,
             )
             if alternative is not None:
                 alternatives.append(alternative)
@@ -581,9 +811,7 @@ class MultiTaskWorkflow:
                 first_failure is not None
                 and str(first_failure.get("status")) == "needs_clarification"
             ):
-                question = str(
-                    first_failure.get("clarification_question") or "需要你进一步说明"
-                )
+                question = str(first_failure.get("clarification_question") or "需要你进一步说明")
                 return validate_task_result(
                     TaskType.OUTFIT_MODIFY,
                     {
@@ -652,6 +880,7 @@ class MultiTaskWorkflow:
         target: dict[str, Any],
         outcome: dict[str, Any],
         item_type_by_id: dict[str, str] | None = None,
+        evaluation_weights: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Wrap ONE Harness modify outcome into the OutfitModifyResult contract.
 
@@ -677,7 +906,11 @@ class MultiTaskWorkflow:
                 },
             )
         alternative, reason = self._harness_modify_alternative(
-            task_input, target, outcome, item_type_by_id
+            task_input,
+            target,
+            outcome,
+            item_type_by_id,
+            evaluation_weights=evaluation_weights,
         )
         if alternative is None:
             if reason == "skipped":
@@ -734,6 +967,7 @@ class MultiTaskWorkflow:
         target: dict[str, Any],
         outcome: dict[str, Any],
         item_type_by_id: dict[str, str],
+        evaluation_weights: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, str]:
         """One alternative from one Harness modify outcome (``candidates[0]``).
 
@@ -752,9 +986,13 @@ class MultiTaskWorkflow:
         base_id = target.get("outfit_id") or task_input.current_outfit_id or ""
         new_outfit_id = f"{base_id or 'outfit'}-mod-{uuid.uuid4().hex[:6]}"
         outfit = candidate.get("outfit")
-        reasoning = str((outfit.reasoning if outfit is not None else None) or "") or "已按你的要求修改搭配"
+        reasoning = (
+            str((outfit.reasoning if outfit is not None else None) or "") or "已按你的要求修改搭配"
+        )
         replaced = [item_id for item_id in base_item_ids if item_id not in item_ids]
         locked = [item_id for item_id in base_item_ids if item_id in item_ids]
+        score = self._score_harness_candidate(candidate, evaluation_weights)
+        acceptance_status = str(candidate.get("status") or "STAGED")
         return (
             {
                 "outfit_id": new_outfit_id,
@@ -762,6 +1000,15 @@ class MultiTaskWorkflow:
                 "reasoning": reasoning,
                 "replaced_item_ids": replaced,
                 "locked_item_ids": locked,
+                "hard_valid": bool(candidate.get("environment_valid", False)),
+                "score": score["score"],
+                "llm_score": score["llm_score"],
+                "score_details": score["score_details"],
+                "dimension_scores": score["dimension_scores"],
+                "evaluation_weights": score["evaluation_weights"],
+                "score_source": score["score_source"],
+                "acceptance_status": acceptance_status,
+                "degraded_reason": self._candidate_degraded_reason(candidate),
             },
             "ok",
         )
@@ -794,58 +1041,67 @@ class MultiTaskWorkflow:
         context_json = initial_context.model_dump(mode="json")
         harness: StyleForgeHarness | None = None
         try:
+            thread_context = self._thread_context(session_context)
             with database_session(self.database_path) as connection:
                 wardrobe_items = list_items(connection, task_input.user_id)
-                item_type_by_id = {
-                    item.item_id: item.item_type for item in wardrobe_items
+                item_type_by_id = {item.item_id: item.item_type for item in wardrobe_items}
+                facts = build_facts(connection, task_input, initial_context, wardrobe_items)
+                grounding_context = self._grounding_context(
+                    task_input, initial_context, connection, thread_context
+                )
+            # No transaction is held while waiting on LLM/MCP calls. Personal
+            # vector lookup opens a short-lived session only when the tool runs.
+            environment = Environment(
+                None,
+                wardrobe_items,
+                facts,
+                search_limit=12,
+                wardrobe_retriever=self.wardrobe_retriever,
+                web_search_provider=self.web_search_provider,
+                weather_provider=self.weather_provider,
+                skills_root=self.skills_root,
+                connection_factory=lambda: database_session(self.database_path),
+            )
+            harness = self._harness(environment, target_candidates=task_input.max_results)
+            outcome = harness.invoke(
+                {
+                    "run_id": run_id,
+                    "request": task_input.request,
+                    "task_type": TaskType.OUTFIT_RECOMMEND.value,
+                    "base_draft": Draft(
+                        outfit=OutfitSnapshot(outfit_id="base", item_ids=[], items=[]),
+                        layers={},
+                    ),
+                    "thread_context": thread_context,
+                    "grounding_context": grounding_context,
+                    "raw_preferences": self._raw_preferences(initial_context),
+                    "grounding_attempted_kinds": [],
+                    "grounding_resolved_kinds": [],
                 }
-                facts = build_facts(
-                    connection, task_input, initial_context, wardrobe_items
-                )
-                environment = Environment(
-                    connection,
-                    wardrobe_items,
-                    facts,
-                    search_limit=12,
-                    web_search_provider=self.web_search_provider,
-                    weather_provider=self.weather_provider,
-                    skills_root=self.skills_root,
-                )
-                harness = self._harness(environment)
-                thread_context = self._thread_context(session_context)
-                outcome = harness.invoke(
-                    {
-                        "run_id": run_id,
-                        "request": task_input.request,
-                        "base_draft": Draft(
-                            outfit=OutfitSnapshot(
-                                outfit_id="base", item_ids=[], items=[]
-                            ),
-                            layers={},
-                        ),
-                        "thread_context": thread_context,
-                        "grounding_context": self._grounding_context(
-                            task_input, initial_context, connection, thread_context
-                        ),
-                        "raw_preferences": self._raw_preferences(initial_context),
-                        "grounding_attempted_kinds": [],
-                        "grounding_resolved_kinds": [],
-                    }
-                )
-                weather_facts = environment.last_weather_facts
-                # H3a: expose the layered preference view the Stylist actually
-                # saw so the front end renders the new agentic context (环境定位
-                # + 分层偏好 + 对话上下文) instead of the full legacy dump.
-                outcome["preference_context"] = self._preference_context(outcome)
+            )
+            outcome["wardrobe_retrievals"] = list(environment.wardrobe_search_diagnostics)
+            outcome["mcp_calls"] = list(environment.mcp_call_traces)
+            weather_facts = environment.last_weather_facts
+            # H3a: expose the layered preference view the Stylist actually
+            # saw so the front end renders the new agentic context (环境定位
+            # + 分层偏好 + 对话上下文) instead of the full legacy dump.
+            outcome["preference_context"] = self._preference_context(outcome)
             assert harness is not None
+            diagnostics = self._task_diagnostics(outcome)
             result = self._agentic_recommend_to_result(
                 task_input,
                 outcome,
                 item_type_by_id,
                 weather_facts=weather_facts,
                 llm_call_count=harness.model_calls,
+                evaluation_weights=self._evaluation_weights(initial_context),
             )
             status = str(result.get("status", "infeasible"))
+            result = normalize_outfit_recommend_result(
+                result,
+                run_id=run_id,
+                status=status,
+            )
             with database_session(self.database_path) as connection:
                 finish_task_run(
                     connection,
@@ -853,18 +1109,17 @@ class MultiTaskWorkflow:
                     status=status,
                     context_pack=context_json,
                     result=result,
+                    diagnostics=diagnostics,
                 )
             if status == "completed":
                 self._persist_agentic_recommend(task_input, result)
             self._extract_memories(task_input)
         except Exception as error:
-            with database_session(self.database_path) as connection:
-                fail_task_run(
-                    connection,
-                    run_id=run_id,
-                    error=error,
-                    context_pack=context_json,
-                )
+            self._record_task_failure(
+                run_id=run_id,
+                error=error,
+                context_pack=context_json,
+            )
             raise
         return {
             "run_id": run_id,
@@ -877,7 +1132,7 @@ class MultiTaskWorkflow:
             "context_pack": context_json,
             "result": result,
             "trace": [],
-            "diagnostics": {},
+            "diagnostics": diagnostics,
             "image_endpoint_template": "/items/{item_id}/image",
             "agents": {"harness": "styleforge_harness"},
             "agentic_outcome": outcome,
@@ -916,14 +1171,13 @@ class MultiTaskWorkflow:
                 raise LlmUnavailable("OUTFIT extension tasks require an LLM client")
             with database_session(self.database_path) as connection:
                 wardrobe_items = list_items(connection, task_input.user_id)
-                facts = build_facts(
-                    connection, task_input, initial_context, wardrobe_items
-                )
+                facts = build_facts(connection, task_input, initial_context, wardrobe_items)
                 environment = Environment(
                     connection,
                     wardrobe_items,
                     facts,
                     search_limit=12,
+                    wardrobe_retriever=self.wardrobe_retriever,
                     web_search_provider=self.web_search_provider,
                     weather_provider=self.weather_provider,
                     skills_root=self.skills_root,
@@ -942,10 +1196,9 @@ class MultiTaskWorkflow:
                     {
                         "run_id": run_id,
                         "request": task_input.request,
+                        "task_type": route.task_type.value,
                         "base_draft": Draft(
-                            outfit=OutfitSnapshot(
-                                outfit_id="base", item_ids=[], items=[]
-                            ),
+                            outfit=OutfitSnapshot(outfit_id="base", item_ids=[], items=[]),
                             layers={},
                         ),
                         "thread_context": thread_context,
@@ -958,7 +1211,10 @@ class MultiTaskWorkflow:
                         "extension_facts": extension_facts,
                     }
                 )
+                outcome["wardrobe_retrievals"] = list(environment.wardrobe_search_diagnostics)
+                outcome["mcp_calls"] = list(environment.mcp_call_traces)
             assert harness is not None
+            diagnostics = self._task_diagnostics(outcome)
             result = self._agentic_extension_to_result(task_input, outcome)
             status = str(result.get("status", "infeasible"))
             with database_session(self.database_path) as connection:
@@ -968,16 +1224,15 @@ class MultiTaskWorkflow:
                     status=status,
                     context_pack=context_json,
                     result=result,
+                    diagnostics=diagnostics,
                 )
             self._extract_memories(task_input)
         except Exception as error:
-            with database_session(self.database_path) as connection:
-                fail_task_run(
-                    connection,
-                    run_id=run_id,
-                    error=error,
-                    context_pack=context_json,
-                )
+            self._record_task_failure(
+                run_id=run_id,
+                error=error,
+                context_pack=context_json,
+            )
             raise
         return {
             "run_id": run_id,
@@ -990,7 +1245,7 @@ class MultiTaskWorkflow:
             "context_pack": context_json,
             "result": result,
             "trace": [],
-            "diagnostics": {},
+            "diagnostics": diagnostics,
             "image_endpoint_template": "/items/{item_id}/image",
             "agents": {"harness": "styleforge_harness"},
             "agentic_outcome": outcome,
@@ -1043,6 +1298,7 @@ class MultiTaskWorkflow:
         item_type_by_id: dict[str, str] | None,
         weather_facts: Any | None = None,
         llm_call_count: int = 0,
+        evaluation_weights: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Wrap one Harness outcome into the recommend result contract.
 
@@ -1065,16 +1321,26 @@ class MultiTaskWorkflow:
                 slot = infer_slot(str(item_type_by_id.get(item_id, "")))
                 if slot and slot != "other":
                     slot_items[slot] = item_id
+            score = self._score_harness_candidate(candidate, evaluation_weights)
+            acceptance_status = str(candidate.get("status") or "STAGED")
             recommendations.append(
                 {
                     "outfit_id": outfit_id,
                     "item_ids": item_ids,
                     "slot_items": slot_items,
-                    "hard_valid": True,
-                    "score": 0.0,
+                    "hard_valid": bool(candidate.get("environment_valid", False)),
+                    "score": score["score"],
+                    "llm_score": score["llm_score"],
+                    "score_details": score["score_details"],
+                    "dimension_scores": score["dimension_scores"],
+                    "evaluation_weights": score["evaluation_weights"],
+                    "score_source": score["score_source"],
+                    "acceptance_status": acceptance_status,
+                    "degraded_reason": self._candidate_degraded_reason(candidate),
                     "reasons": self._harness_recommend_reasons(candidate, evidence),
                 }
             )
+        recommendations.sort(key=lambda recommendation: -recommendation["score"])
         base = {
             "environment_context": (
                 {"weather": weather_facts.model_dump(mode="json")}
@@ -1086,9 +1352,7 @@ class MultiTaskWorkflow:
         }
         if not recommendations:
             if str(outcome.get("status")) == "needs_clarification":
-                question = str(
-                    outcome.get("clarification_question") or "需要你进一步说明"
-                )
+                question = str(outcome.get("clarification_question") or "需要你进一步说明")
                 return {
                     **base,
                     "status": "needs_clarification",
@@ -1113,6 +1377,12 @@ class MultiTaskWorkflow:
         detail = f"已为你搭配 {len(recommendations)} 套方案"
         if skipped:
             detail += f"，另有 {skipped} 套候选单品过少已跳过"
+        degraded_count = sum(
+            recommendation["acceptance_status"] == "DEGRADED_ACCEPTED"
+            for recommendation in recommendations
+        )
+        if degraded_count:
+            detail += f"；其中 {degraded_count} 套为审校重试后保留的降级候选"
         return {
             **base,
             "status": "completed",
@@ -1123,6 +1393,69 @@ class MultiTaskWorkflow:
                 "recommendations": recommendations,
             },
         }
+
+    @staticmethod
+    def _evaluation_weights(context: ContextPack) -> dict[str, Any]:
+        preferences = context.user_context.preferences or {}
+        profile = preferences.get("evaluation_profile") or {}
+        weights = profile.get("weights") if isinstance(profile, dict) else None
+        return dict(weights) if isinstance(weights, dict) else {}
+
+    @staticmethod
+    def _score_harness_candidate(
+        candidate: dict[str, Any],
+        evaluation_weights: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Aggregate one staged Critic review with an explicit neutral fallback."""
+        review = candidate.get("review") or {}
+        if hasattr(review, "model_dump"):
+            review = review.model_dump(mode="json")
+        raw_scores = review.get("dimension_scores") if isinstance(review, dict) else None
+        if hasattr(raw_scores, "model_dump"):
+            raw_scores = raw_scores.model_dump(mode="json")
+
+        keys = dimension_keys()
+        critic_scored = isinstance(raw_scores, dict) and all(
+            isinstance(raw_scores.get(key), (int, float)) for key in keys
+        )
+        if critic_scored:
+            dimension_scores = {
+                key: int(max(1, min(10, round(float(raw_scores[key]))))) for key in keys
+            }
+            score_source = "critic"
+        else:
+            dimension_scores = {key: 5 for key in keys}
+            score_source = "neutral_fallback"
+
+        weights = normalize_weights(evaluation_weights)
+        score = aggregate_score(dimension_scores, weights)
+        score_details: dict[str, Any] = {
+            **{key: float(value) for key, value in dimension_scores.items()},
+            **{f"weight_{key}": value for key, value in weights.items()},
+            "critic_scored": 1.0 if critic_scored else 0.0,
+            "degraded": (1.0 if str(candidate.get("status")) == "DEGRADED_ACCEPTED" else 0.0),
+        }
+        return {
+            "score": score,
+            "llm_score": score if critic_scored else None,
+            "score_details": score_details,
+            "dimension_scores": dimension_scores,
+            "evaluation_weights": weights,
+            "score_source": score_source,
+        }
+
+    @staticmethod
+    def _candidate_degraded_reason(candidate: dict[str, Any]) -> str:
+        if str(candidate.get("status")) != "DEGRADED_ACCEPTED":
+            return ""
+        review = candidate.get("review") or {}
+        if hasattr(review, "model_dump"):
+            review = review.model_dump(mode="json")
+        if not isinstance(review, dict):
+            return "审校重试达到上限"
+        feedback = str(review.get("feedback") or "").strip()
+        issues = [str(issue) for issue in review.get("issues") or [] if str(issue)]
+        return feedback or "；".join(issues) or "审校重试达到上限"
 
     @staticmethod
     def _harness_recommend_reasons(
@@ -1154,7 +1487,6 @@ class MultiTaskWorkflow:
                     reasons.append(text[:240])
         return reasons
 
-
     def _persist_agentic_recommend(
         self,
         task_input: TaskExecutionInput,
@@ -1180,8 +1512,14 @@ class MultiTaskWorkflow:
                     outfit_id=outfit_id,
                     item_ids=tuple(item_ids),
                     slot_items=dict(recommendation.get("slot_items") or {}),
-                    hard_valid=True,
+                    hard_valid=bool(recommendation.get("hard_valid", False)),
                     score=float(recommendation.get("score") or 0.0),
+                    llm_score=(
+                        float(recommendation["llm_score"])
+                        if recommendation.get("llm_score") is not None
+                        else None
+                    ),
+                    score_details=dict(recommendation.get("score_details") or {}),
                     reasons=tuple(recommendation.get("reasons") or []),
                 )
             )
@@ -1243,7 +1581,6 @@ class MultiTaskWorkflow:
             }
         ]
 
-
     def _persist_agentic_candidate(
         self,
         task_input: TaskExecutionInput,
@@ -1268,8 +1605,14 @@ class MultiTaskWorkflow:
                     outfit_id=outfit_id,
                     item_ids=tuple(item_ids),
                     slot_items={},
-                    hard_valid=True,
-                    score=0.0,
+                    hard_valid=bool(alternative.get("hard_valid", False)),
+                    score=float(alternative.get("score") or 0.0),
+                    llm_score=(
+                        float(alternative["llm_score"])
+                        if alternative.get("llm_score") is not None
+                        else None
+                    ),
+                    score_details=dict(alternative.get("score_details") or {}),
                 )
             )
         if not candidates:

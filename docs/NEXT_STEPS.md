@@ -1,7 +1,17 @@
 # 后续工作
 
-> 更新时间：2026-08-20  
-> 原则：先验证最新代码，再预览真实订单，最后才允许提交衣柜或导入 Mytheresa 主库。
+> 更新时间：2026-09-01
+> 原则：聚焦项目核心，不新增外围基础设施；真实个人衣橱生产闭环 v1 已完成。下一主线应转向官方 Polyvore Compatibility/FITB 离线基线，之后再决定是否训练或引入学习型兼容模型。真实订单提交和 Mytheresa 主库扩容仍需用户单独确认。
+> 2026-09-01：评估范围、指标、数据隔离、基线、消融和阶段已重新冻结到
+> [评估计划 v2](EVALUATION_PLAN_V2.md)。下一批严格执行其中 P1，不恢复旧 p-outfit runner。
+
+## 当前优先级（2026-08-29）
+
+1. **P0：官方 Polyvore Compatibility/FITB 离线基线**：先实现随机、品类共现、FashionCLIP 三个可复现基线，统一 train/valid/test 映射、指标和报告，不调用外部 API。
+2. **P1：真实个人衣橱质量回归扩容**：把目前 11 张真实图片/7 条六任务验收扩成固定的 30~50 件小衣橱集，覆盖图片损坏、识别低置信、服务中断、重启恢复和向量失败；只复用现有 PostgreSQL、API、Web 与测试框架。
+3. **P2：数据生命周期产品化**：在现有“移出衣柜”软删除之外，只有用户明确需要时再增加导出与永久删除入口，并定义图片、个人向量、批任务原图和行为记录的级联策略。
+
+暂不做：MCP 扩展、Celery/Redis 队列、pgvector 迁移、新监控栈、Mytheresa 全量导入或新的 Agent。当前规模下这些不会直接提高核心穿搭质量。
 
 ## P0：Multi-Agent Harness（H1+H2）+ H3a 上下文分层（✅ 2026-08-20 已完成）
 
@@ -62,7 +72,8 @@ D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests
 D:\anaconda\envs\style\python.exe -m evals.runners.evaluate_task_routing
 ```
 
-该报告只记录 Task Routing Accuracy。P2.5 的 Wardrobe Fixtures 与五维穿搭 benchmark 尚未实现，完成前不要把 P2.5 整体标记为已完成。
+该报告只记录 Task Routing Accuracy。Wardrobe Fixtures 与五维固定穿搭 benchmark 后续已经落地；
+当前缺口改为 [评估计划 v2](EVALUATION_PLAN_V2.md) 定义的官方 Compatibility/FITB、系统基线与消融。
 
 ## P0：Context Pack 与五类扩展业务（✅ 2026-08-09 已完成）
 

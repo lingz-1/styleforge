@@ -83,6 +83,29 @@ def test_fully_grounded_is_ready() -> None:
     assert ctx.approximate_time == "下周"
 
 
+def test_local_commute_is_not_treated_as_missing_event_grounding() -> None:
+    ctx = _resolver(default_location="上海").resolve(
+        "明天见客户，搭一套专业通勤穿搭",
+        capabilities=frozenset({CAP_WEB_SEARCH, CAP_WEATHER}),
+    )
+
+    assert ctx.decision == GroundingDecision.READY
+    assert ctx.missing == []
+    assert ctx.reason == "no_event_context"
+
+
+def test_generic_seasonal_wedding_is_an_outfit_constraint_not_live_event() -> None:
+    ctx = _resolver().resolve(
+        "从我的衣柜推荐一套夏季婚礼宾客穿搭",
+        capabilities=frozenset({CAP_WEB_SEARCH, CAP_WEATHER}),
+    )
+
+    assert ctx.decision == GroundingDecision.READY
+    assert ctx.activity is None
+    assert ctx.missing == []
+    assert ctx.reason == "no_event_context"
+
+
 def test_event_with_web_capability_is_search_first() -> None:
     # destination missing but search_web can resolve it → SEARCH_FIRST.
     ctx = _resolver().resolve(
@@ -363,7 +386,8 @@ def test_stylist_prompt_carries_grounding_after_thread_and_memories() -> None:
     register_local_tools(registry, object())
     tools = registry.runtime_available(AGENT_STYLIST, frozenset({CAP_WEB_SEARCH}))
     bundle = PromptAssembler(instructions_root=_INSTRUCTIONS).build(AGENT_STYLIST, context, tools)
-    text = bundle.system_text
+    assert "【环境定位】" not in bundle.system_text
+    text = bundle.model_user_message
     assert "【环境定位】" in text
     assert "【对话上下文】" in text
     assert "【相关记忆】" in text

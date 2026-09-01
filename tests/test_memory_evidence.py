@@ -205,6 +205,84 @@ def test_item_replaced_only_targets_replaced_ids(db_dsn: str) -> None:
         assert not any(e["value"] == "blazer-1" for e in evidence)
 
 
+def test_item_replaced_never_induces_category_preference(db_dsn: str) -> None:
+    """换掉三件同类单品仍只是当前搭配行为，不升级成整类排斥。"""
+    initialize_database(db_dsn)
+    items = [
+        make_item(f"shoe-{i}", "shoes", f"鞋子{i}", color)
+        for i, color in zip(range(1, 4), ["red", "blue", "black"])
+    ]
+    with database_session(db_dsn) as connection:
+        upsert_items(connection, items, "test")
+        claims: list[dict] = []
+        for i in range(1, 4):
+            claims += _fold(
+                connection,
+                "u",
+                "item_replaced",
+                context={"request": "换双鞋"},
+                features={"replaced_item_ids": [f"shoe-{i}"]},
+            )
+        assert _category_claims(claims) == []
+
+
+def test_category_induction_does_not_mix_contexts(db_dsn: str) -> None:
+    """通勤、约会、婚礼各拒一条裙子不能合并成整类负偏好。"""
+    initialize_database(db_dsn)
+    items = [
+        make_item(f"dress-{i}", "dress", f"连衣裙{i}", color)
+        for i, color in zip(range(1, 4), ["red", "blue", "green"])
+    ]
+    with database_session(db_dsn) as connection:
+        upsert_items(connection, items, "test")
+        claims: list[dict] = []
+        for item_id, request in zip(
+            ["dress-1", "dress-2", "dress-3"],
+            ["通勤不合适", "约会不合适", "婚礼不合适"],
+        ):
+            claims += _fold(
+                connection,
+                "u",
+                "outfit_rejected",
+                context={"request": request, "item_ids": [item_id]},
+            )
+        assert _category_claims(claims) == []
+
+
+def test_category_induction_requires_distinct_events_and_deduplicates(
+    db_dsn: str,
+) -> None:
+    """单次拒绝多件同类不归纳；跨三次事件越过阈值时只产出一条。"""
+    initialize_database(db_dsn)
+    items = [
+        make_item(f"dress-{i}", "dress", f"连衣裙{i}", color)
+        for i, color in zip(range(1, 5), ["red", "blue", "green", "black"])
+    ]
+    with database_session(db_dsn) as connection:
+        upsert_items(connection, items, "test")
+        first = _fold(
+            connection,
+            "u",
+            "outfit_rejected",
+            context={"request": "约会不合适", "item_ids": ["dress-1", "dress-2"]},
+        )
+        assert _category_claims(first) == []
+        second = _fold(
+            connection,
+            "u",
+            "outfit_rejected",
+            context={"request": "约会还是不合适", "item_ids": ["dress-3"]},
+        )
+        assert _category_claims(second) == []
+        third = _fold(
+            connection,
+            "u",
+            "outfit_rejected",
+            context={"request": "约会依然不合适", "item_ids": ["dress-4"]},
+        )
+        assert len(_category_claims(third)) == 1
+
+
 def test_behavior_evidence_never_global(db_dsn: str) -> None:
     """行为弱证据一律 contextual 且携带场景词，绝不写 global（防旧 bug 复发）."""
     initialize_database(db_dsn)

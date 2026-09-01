@@ -65,7 +65,11 @@ Page({
     const taskType = payload.task_type
     let sourceOutfits = []
     if (taskType === 'outfit_recommend') {
-      sourceOutfits = (result.structured_result && result.structured_result.recommendations) || []
+      // Keep the flat fallback for deterministic sessions saved before the
+      // versioned recommendation result contract was introduced.
+      sourceOutfits = (result.structured_result && result.structured_result.recommendations)
+        || result.recommendations
+        || []
     } else if (taskType === 'outfit_modify') {
       sourceOutfits = result.alternatives || []
     } else if (taskType === 'item_advice' || taskType === 'wardrobe_compatibility') {

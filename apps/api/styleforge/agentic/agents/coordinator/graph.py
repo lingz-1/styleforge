@@ -93,7 +93,12 @@ def build_coordinator_subgraph(runtime: AgentRuntime):
             return {
                 "trajectory_protocol_errors": state.get("trajectory_protocol_errors", 0) + 1,
                 "tool_observations": state.get("tool_observations", [])
-                + [{"tool": "__protocol__", "observation": result.protocol_error}],
+                + [{
+                    "tool": "__protocol__",
+                    "observation": result.protocol_error,
+                    "error_code": result.error_code,
+                    "retryable": result.retryable,
+                }],
             }
 
         trace = state.get("trace", []) + [result.trace]
@@ -145,7 +150,12 @@ def build_coordinator_subgraph(runtime: AgentRuntime):
         )
         updates: dict[str, Any] = {
             "tool_observations": state.get("tool_observations", [])
-            + [{"tool": pending["name"], "observation": tool_result.observation}],
+            + [{
+                "tool": pending["name"],
+                "observation": tool_result.observation,
+                "error_code": tool_result.error_code,
+                "retryable": tool_result.retryable,
+            }],
             "trajectory_step_count": state.get("trajectory_step_count", 0) + 1,
             "pending_tools": remaining,
         }

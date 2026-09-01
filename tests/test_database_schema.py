@@ -8,7 +8,18 @@ from __future__ import annotations
 
 import pytest
 
-from styleforge.repositories.database import SCHEMA_VERSION, connect, initialize_database
+from styleforge.orchestration.task_router import TaskType
+from styleforge.repositories.database import (
+    SCHEMA_VERSION,
+    connect,
+    database_session,
+    initialize_database,
+)
+from styleforge.repositories.task_run_repository import (
+    finish_task_run,
+    get_task_run,
+    start_task_run,
+)
 
 
 def _table_names(dsn: str) -> set[str]:
@@ -88,7 +99,9 @@ def test_schema_contains_personal_wardrobe_import_tables(db_dsn: str) -> None:
     }.issubset(personal_item_columns)
 
 
-def test_schema_v12_contains_chat_and_preference_memory_tables(db_dsn: str) -> None:
+def test_schema_v14_contains_chat_memory_tasks_and_recognition_batches(
+    db_dsn: str,
+) -> None:
     initialize_database(db_dsn)
     with connect(db_dsn) as connection:
         tables = _table_names(db_dsn)
@@ -103,8 +116,14 @@ def test_schema_v12_contains_chat_and_preference_memory_tables(db_dsn: str) -> N
         evidence_columns = _column_names(db_dsn, "preference_evidence")
         preference_columns = _column_names(db_dsn, "preference_model")
         catalog_columns = _column_names(db_dsn, "catalog_items")
+        task_run_columns = _column_names(db_dsn, "task_runs")
+        batch_columns = _column_names(db_dsn, "recognition_batches")
+        batch_item_columns = _column_names(db_dsn, "recognition_batch_items")
+        personal_embedding_columns = _column_names(
+            db_dsn, "personal_item_embeddings"
+        )
 
-    assert SCHEMA_VERSION == 12
+    assert SCHEMA_VERSION == 14
     assert {"chat_sessions", "chat_messages"}.issubset(tables)
     # The retired user_memories table is gone, replaced by the evidence + model pair.
     assert "user_memories" not in tables
@@ -127,7 +146,59 @@ def test_schema_v12_contains_chat_and_preference_memory_tables(db_dsn: str) -> N
     }.issubset(preference_columns)
     # v12: catalog_items carries the raw dataset ID alongside UUID item_id.
     assert "dataset_item_id" in catalog_columns
+    assert "diagnostics_json" in task_run_columns
     assert {"idx_catalog_dataset_item"}.issubset(indexes)
+    assert {"recognition_batches", "recognition_batch_items"}.issubset(tables)
+    assert {
+        "status",
+        "total",
+        "done",
+        "succeeded",
+        "failed",
+        "embedding_json",
+    }.issubset(batch_columns)
+    assert {
+        "item_index",
+        "input_relative_path",
+        "input_sha256",
+        "attempt_count",
+        "wardrobe_item_id",
+    }.issubset(batch_item_columns)
+    assert {
+        "idx_recognition_batches_user_updated",
+        "idx_recognition_batches_status",
+        "idx_recognition_batch_items_status",
+    }.issubset(indexes)
+    assert "input_fingerprint" in personal_embedding_columns
+
+
+def test_task_run_round_trips_diagnostics(db_dsn: str) -> None:
+    initialize_database(db_dsn)
+    with database_session(db_dsn) as connection:
+        run_id = start_task_run(
+            connection,
+            user_id="u",
+            task_type=TaskType.OUTFIT_RECOMMEND,
+            request="通勤穿什么",
+        )
+        finish_task_run(
+            connection,
+            run_id=run_id,
+            status="completed",
+            context_pack={},
+            result={"status": "completed"},
+            diagnostics={
+                "wardrobe_retrieval": {"calls": 1, "modes": ["hybrid"]}
+            },
+        )
+    with database_session(db_dsn) as connection:
+        stored = get_task_run(connection, user_id="u", run_id=run_id)
+
+    assert stored is not None
+    assert stored["diagnostics"]["wardrobe_retrieval"] == {
+        "calls": 1,
+        "modes": ["hybrid"],
+    }
 
 
 def test_initialize_database_is_idempotent(db_dsn: str) -> None:
@@ -135,3 +206,4 @@ def test_initialize_database_is_idempotent(db_dsn: str) -> None:
     initialize_database(db_dsn)
     assert _schema_version(db_dsn) == str(SCHEMA_VERSION)
     assert {"catalog_items", "chat_messages", "task_runs"}.issubset(_table_names(db_dsn))
+    assert "diagnostics_json" in _column_names(db_dsn, "task_runs")

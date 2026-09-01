@@ -18,6 +18,8 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from styleforge.agentic.context.prompt_security import scan_prompt_injection
+from styleforge.common.observability import observability
 from styleforge.llm.memory_prompts import (
     MEMORY_PROMPT_VERSION,
     build_memory_extraction_prompt,
@@ -42,6 +44,19 @@ def extract_language_evidence(
     A missing client, a failed call, or a fully-invalid response yields ``[]``.
     """
     if llm is None or not request.strip():
+        return []
+    security_report = scan_prompt_injection(request, source="memory_extraction")
+    if security_report.signal_count:
+        # Memory distillation is optional. A suspicious request must not be
+        # allowed to turn an indirect prompt injection into durable profile
+        # state, so skip the side effect while preserving the completed task.
+        observability.record_operation(
+            "prompt_security",
+            success=True,
+            degraded=True,
+            component="memory_extractor",
+            signal_count=security_report.signal_count,
+        )
         return []
     try:
         system, user = build_memory_extraction_prompt(request)

@@ -30,6 +30,7 @@ class PromptContext:
 
     view: AgentContextView | None = None
     user_request: str = ""
+    task_type: str = ""
     goal: str = ""
     task_state: TaskState | None = None
     plan: PlanState | None = None
@@ -75,6 +76,8 @@ class ContextAssembler:
         context = PromptContext(view=view)
         if view.user_request:
             context.user_request = state.get("request", "")
+        if view.task_type:
+            context.task_type = state.get("task_type", "")
         if view.user_request or view.goal:
             context.goal = state.get("goal", "")
         if view.task_state:

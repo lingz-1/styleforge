@@ -282,6 +282,7 @@ class StyleForgeState(TypedDict, total=False):
     user_id: str
     thread_id: str
     request: str
+    task_type: str  # authoritative route selected by MultiTaskWorkflow
     interaction: InteractionContext
 
     goal: str
@@ -311,6 +312,7 @@ class StyleForgeState(TypedDict, total=False):
     # ``extension_result`` so the Main Graph can end without an outfit chain.
     extension_facts: Any  # Agent1TaskOutput.model_dump(mode="json") (deterministic)
     extension_result: Any  # {task_type, status, summary, result} — task contract dict
+    extension_validation_failures: list[str]  # safe closing-boundary diagnostics
 
     research_evidence: ResearchEvidence | None
     base_draft: Any  # OutfitDraft: recommend=empty base, modify=original snapshot
@@ -325,10 +327,15 @@ class StyleForgeState(TypedDict, total=False):
     gate_feedback: str | None  # last Env/Critic feedback for the next candidate
     critic_result: Any  # ReviewResult from the Main-Graph Critic node
     environment_valid: bool
+    intent_constraint_failed: bool
+    intent_constraint_issues: list[str]
     candidate_retries: int  # consecutive Critic rejections for the CURRENT candidate
     # (a bounded replan budget: after MAX_CRITIC_RETRIES rejections the gate
     #  accepts the physically-valid candidate instead of looping forever)
     degraded_accept: bool  # last Critic reject was force-accepted by the budget
+    candidate_recovered: bool  # grounded fallback after an empty protocol failure
+    candidate_recovery_attempted: bool
+    candidate_recovery_issues: list[str]
     # (stage_candidate marks the entry DEGRADED_ACCEPTED, never a fabricated PASS)
     enough_candidates: bool  # goal_gate: len(candidates) >= target_candidates
     clarification_question: str | None  # ClarificationNode output (frozen #16)
