@@ -286,10 +286,11 @@ artifacts/evaluation/v2/
 
 ### P1：官方 Polyvore 离线基线
 
-- 实现只读 adapter、Random、Category Co-occurrence、FashionCLIP；
-- 先跑小 fixture，再跑完整 Compatibility/FITB/hard-negative；
-- 输出 `polyvore_baselines.json`；
-- 完成标准：同 seed 可复现，映射缺失为 0，三基线均有完整指标与性能数据。
+- ✅ 已实现只读 adapter、Random、Category Co-occurrence、FashionCLIP；
+- ✅ 小 fixture 12 项合同测试、全量 Random/Category、Maryland token-only Random 已完成；
+- ✅ 双主 split 的真实 FashionCLIP 抽样报告 `polyvore_baselines.json` 已完成；
+- ⏳ 全量 FashionCLIP 尚待使用已落盘缓存继续，Maryland 因数据包缺 item/category/image 映射只能明确标记不可用；
+- 当前证据和复现命令见 [Polyvore 官方离线基线](POLYVORE_BASELINES.md)。只有全量视觉结果完成后，P1 才算完全关闭。
 
 ### P2：当前 Harness v2 质量集
 

@@ -200,3 +200,15 @@ D:\anaconda\envs\style\python.exe -m ruff check apps\api\styleforge tests evals
 - `test_session_multiturn.py::test_negative_feedback_then_footwear_swap`：推荐 → `这套太严肃了`（整体 session_follow_up）→ `换成乐福鞋`（footwear 槽位）。验证否定反馈走整体调整、下一轮换鞋槽位锁定连衣裙，修改链逐轮携带最新搭配。
 
 > 注：consolidation 的 `_dedupe_key` 不含 scope——同 dimension/attribute/value/polarity 的 global 与 contextual 证据会被去重为一条。当前为既有行为，是否应把 scope 纳入去重键待设计确认。
+
+## 11. Polyvore 官方 Compatibility/FITB 基线（2026-09-01）
+
+- adapter/指标/基线：`evals/polyvore_benchmark.py`；
+- runner：`D:\anaconda\envs\style\python.exe -m evals.runners.evaluate_polyvore_baselines`；
+- 合同测试：`tests/test_polyvore_benchmark.py`，12 项；
+- 全量统计：disjoint 30,290/15,145、nondisjoint 20,000/10,000、Maryland 6,081/3,076 条 Compatibility/FITB；
+- 映射门禁：两个主 split 的 token、metadata、semantic category、image 缺失均为 0；
+- 视觉运行：两个主 split 各 256 条 test Compatibility/FITB，真实编码/复用 13,055 张图片；
+- Maryland 限制：包内无 item/category/image 映射，Category/FashionCLIP 如实标记 unavailable。
+
+详细方法、指标表、数据异常和复现命令见 [Polyvore 官方离线基线](POLYVORE_BASELINES.md)。全量统计与视觉抽样必须分开陈述，抽样 FashionCLIP 不得标成完整公开 Benchmark。

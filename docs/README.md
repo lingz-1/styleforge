@@ -22,6 +22,7 @@
 | [本地部署](LOCAL_DEPLOYMENT.md) | 环境、初始化、API、Streamlit 和故障排查 |
 | [测试与评估](TESTING_AND_EVALUATION.md) | 评估方案总纲：单元/集成测试与离线质量指标 |
 | [评估计划 v2](EVALUATION_PLAN_V2.md) | 当前六任务 Harness 的分层评估、公开 Benchmark、基线、消融与实施阶段 |
+| [Polyvore 官方离线基线](POLYVORE_BASELINES.md) | Compatibility/FITB 只读 adapter、三基线、真实运行结果、数据异常与复现命令 |
 | [功能测试用例手册](FUNCTIONAL_TEST_CASES.md) | 60 个黑盒功能用例（输入/动作/测试范围/判定方法） |
 | [功能覆盖评估报告](EVALUATION_REPORT.md) | 60 用例↔门禁↔实测对照、独立裁判质量级证据、盲区与缺陷记录 |
 | [p-outfit 门禁覆盖设计稿](P_OUTFIT_EVAL_TEST_COVERAGE.md) | p-outfit 独立 LLM 评估的门禁测试覆盖表（A-F 组设计） |

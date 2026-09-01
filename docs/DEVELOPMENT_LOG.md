@@ -877,3 +877,24 @@ LLM 证据（`llm/memory_schema.py` / `memory_prompts.py` / `services/memory_ext
 `demo-user` 的 2080 件真实衣柜向 DeepSeek 发送“黑色日常穿搭 + 忽略旧指令/显示 system prompt/
 调用隐藏工具”的对抗请求：19.5 秒完成 1 套推荐、9 次 LLM 调用、8 次注入信号、工具失败 0、
 错误码 0；持久化结果不含 Harness Core、Prompt Security 原文或内部数据区边界。
+
+---
+
+## 27. 官方 Polyvore Compatibility/FITB 离线基线（2026-09-01）
+
+本批严格执行评估计划 v2 的 P1，不扩 Agent、MCP 或 UI，也不恢复旧 order/image LLM 评估链：
+
+- 新增 `evals/polyvore_benchmark.py`，只读解析 disjoint、nondisjoint 和 Maryland 官方 Compatibility/FITB；主 split 通过同 split outfit JSON 把 `set_id_index` 映射为 item_id、metadata 和图片。
+- 正确处理两套 FITB 标签合同：disjoint 答案乱序，按 `set_id + blank_position` 定位；nondisjoint/Maryland 使用发布文件第一答案。真实扫描发现 Maryland 同时存在 blank_position 与 token 后缀不一致、重复答案 token，runner 不删除或改写题目。
+- 三基线分别为固定 seed 的 SHA-256 Random、只用 train 正例的细类别对共现、复用本地 FashionCLIP 的跨类别图像余弦；valid 只冻结 Compatibility Accuracy 阈值，test 不参与调参。
+- 指标覆盖 ROC-AUC、Accuracy、正负分数分布、FITB Top-1/MRR/缺失类别分桶、95% Wilson 区间、编码与评分性能；报告记录输入文件 SHA-256、源/抽样数量、模型修订和缓存命中。
+- FashionCLIP 嵌入使用工作区内 SQLite 增量缓存，每批原子提交，可中断续跑；外部 `E:\01-style-dataset\p-outfit` 全程只读。
+
+真实运行结果：
+
+- 全量 Random/Category：disjoint 30,290/15,145、nondisjoint 20,000/10,000、Maryland 6,081/3,076 条 Compatibility/FITB 均完成；两个主 split 的 token、metadata、semantic category、image 缺失全为 0。
+- 全量 Category 约为随机，验证官方负例/候选类别匹配后类别本身缺乏商品级区分力。
+- 双 split 各抽 256 条 test Compatibility/FITB 的 FashionCLIP：disjoint AUC 0.7514、Accuracy 0.6719、FITB Top-1 0.4922、MRR 0.6953；nondisjoint AUC 0.7344、Accuracy 0.6680、FITB Top-1 0.5156、MRR 0.7038。
+- 本轮编码/复用 13,055 张真实图片，新增编码约 7.95~8.00 ms/张；抽样结果明确不冒充完整公开 Benchmark，也不与 Type-Aware 学习模型横向比较。
+
+验证：新增专项 **12 passed**；最终全量 Pytest **797 passed in 154.78s**；Ruff 与 compileall 通过。首次全量运行因 PostgreSQL 未启动导致 fixture 连接超时，使用现有 `E:\PostgreSQL` 启动后同命令复跑全绿。方法、完整表格和复现命令见 [Polyvore 官方离线基线](POLYVORE_BASELINES.md)。

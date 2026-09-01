@@ -1,15 +1,15 @@
 # 后续工作
 
 > 更新时间：2026-09-01
-> 原则：聚焦项目核心，不新增外围基础设施；真实个人衣橱生产闭环 v1 已完成。下一主线应转向官方 Polyvore Compatibility/FITB 离线基线，之后再决定是否训练或引入学习型兼容模型。真实订单提交和 Mytheresa 主库扩容仍需用户单独确认。
+> 原则：聚焦项目核心，不新增外围基础设施；真实个人衣橱生产闭环 v1 已完成。官方 Polyvore adapter、全量统计基线和双 split FashionCLIP 抽样已完成，下一步先续跑全量 FashionCLIP，再进入 Harness v2 质量集。真实订单提交和 Mytheresa 主库扩容仍需用户单独确认。
 > 2026-09-01：评估范围、指标、数据隔离、基线、消融和阶段已重新冻结到
 > [评估计划 v2](EVALUATION_PLAN_V2.md)。下一批严格执行其中 P1，不恢复旧 p-outfit runner。
 
 ## 当前优先级（2026-08-29）
 
-1. **P0：官方 Polyvore Compatibility/FITB 离线基线**：先实现随机、品类共现、FashionCLIP 三个可复现基线，统一 train/valid/test 映射、指标和报告，不调用外部 API。
-2. **P1：真实个人衣橱质量回归扩容**：把目前 11 张真实图片/7 条六任务验收扩成固定的 30~50 件小衣橱集，覆盖图片损坏、识别低置信、服务中断、重启恢复和向量失败；只复用现有 PostgreSQL、API、Web 与测试框架。
-3. **P2：数据生命周期产品化**：在现有“移出衣柜”软删除之外，只有用户明确需要时再增加导出与永久删除入口，并定义图片、个人向量、批任务原图和行为记录的级联策略。
+1. **P0：完成全量 FashionCLIP Compatibility/FITB**：复用 `artifacts/evaluation/v2/fashionclip_embeddings.sqlite3` 续跑 disjoint+nondisjoint 全量视觉基线；不改模型、不用 test 调参。实现与当前结果见 [Polyvore 官方离线基线](POLYVORE_BASELINES.md)。
+2. **P1：Harness v2 固定质量集**：按 [评估计划 v2](EVALUATION_PLAN_V2.md) 冻结 18 条 Validation + 12 条 Holdout，补 Independent Judge、Code Grader、失败续跑与不污染主库的当前 Harness runner。
+3. **P2：系统基线与消融**：在同一质量集上比较规则、检索+单模型、完整 StyleForge，并测记忆、MCP/RAG、Critic/revision 和 Prompt Security；暂不先训练兼容模型。
 
 暂不做：MCP 扩展、Celery/Redis 队列、pgvector 迁移、新监控栈、Mytheresa 全量导入或新的 Agent。当前规模下这些不会直接提高核心穿搭质量。
 
