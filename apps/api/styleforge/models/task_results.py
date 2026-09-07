@@ -33,6 +33,7 @@ class OutfitModifyResult(ExtensionResultModel):
     current_outfit_id: str = ""
     target_slot: str
     replaced_item_ids: list[str] = Field(default_factory=list)
+    added_item_ids: list[str] = Field(default_factory=list)
     locked_item_ids: list[str] = Field(default_factory=list)
     alternatives: list[OutfitReference] = Field(default_factory=list)
     message: str

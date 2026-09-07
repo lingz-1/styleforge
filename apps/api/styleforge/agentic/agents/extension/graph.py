@@ -303,6 +303,14 @@ def make_extension_closing(runtime: AgentRuntime):
                 f"context guard: {guard.status}: {'；'.join(guard.warnings)}"
             )
         system = guard.bundle.system_text + "\n\n" + _CLOSING_MODE_INSTRUCTION
+        if task_type is TaskType.STYLE_ADVICE:
+            system += (
+                "\n风格建议的 wardrobe_matches 每项必须包含已提供的 item_id 和原始 name，"
+                "可另写 usage 说明如何落地；不得仅写泛称、编造颜色或把知识条目的示例当成已有衣物。"
+                "principles 和 summary 必须回应本次请求及已确认偏好；"
+                "若要求多个组合方向，应分别给出具体单品名称和搭配方法。"
+                "未知颜色、材质、主题细节要明确说明，不能猜测。"
+            )
         base_user = (
             guard.bundle.model_user_message
             + "\n\n【本轮目标 JSON Schema】\n"
@@ -383,12 +391,27 @@ def _grounded_item_advice_fallback(
     outfit_count = min(3, max(len(compatible[slot]) for slot in selected_slots))
     outfits: list[dict[str, Any]] = []
     seen: set[tuple[str, ...]] = set()
+    request = str(facts.get("user_request") or "").strip()
+    anchor_name = str(anchor.get("name") or "指定单品")
+    slot_labels = {
+        "top": "上衣",
+        "bottom": "下装",
+        "one_piece": "裙装/连体装",
+        "footwear": "鞋履",
+        "outerwear": "外套",
+        "bag": "包",
+        "accessory": "配饰",
+    }
     for index in range(outfit_count):
         item_ids = [anchor_id]
+        selected_details: list[str] = []
         for slot in selected_slots:
             candidates = compatible[slot]
             candidate = candidates[index % len(candidates)]
             item_ids.append(str(candidate["item_id"]))
+            selected_details.append(
+                f"{slot_labels.get(slot, slot)} {candidate.get('name') or candidate['item_id']}"
+            )
         item_ids = list(dict.fromkeys(item_ids))
         signature = tuple(item_ids)
         if len(item_ids) < 2 or signature in seen:
@@ -398,7 +421,12 @@ def _grounded_item_advice_fallback(
             {
                 "outfit_id": f"grounded-{index + 1}",
                 "item_ids": item_ids,
-                "reasoning": "保留指定单品，并按用户点名槽位选用衣橱内已验证的高匹配单品。",
+                "reasoning": (
+                    f"保留 {anchor_name}，搭配"
+                    + "、".join(selected_details)
+                    + (f"，用于回应“{request}”。" if request else "。")
+                    + "仅依据现有商品文字信息，未知颜色或材质不作推断。"
+                ),
             }
         )
     if not outfits:
@@ -407,7 +435,10 @@ def _grounded_item_advice_fallback(
     result = {
         "status": "completed",
         "title": str(anchor.get("name") or "单品搭配建议"),
-        "summary": "已基于当前衣橱中通过匹配与边界校验的真实单品生成搭配。",
+        "summary": (
+            f"已围绕 {anchor_name} 从当前衣橱生成 {len(outfits)} 套可执行搭配"
+            + (f"，对应你的请求“{request}”。" if request else "。")
+        ),
         "anchor_item": anchor,
         "anchor_source": str(facts.get("anchor_source") or "wardrobe"),
         "compatible_items_by_slot": {

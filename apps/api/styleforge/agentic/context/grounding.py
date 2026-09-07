@@ -71,6 +71,16 @@ _RELATIVE_TIME = {
 }
 _APPROX_RE = re.compile(r"(今天|今晚|明天|明晚|后天|昨晚|上周|这周|本周|下周|上个月|这个月|本月|下个月|下半年|上半年|最近|近期|年底|今年|春节|国庆|圣诞|元旦|中秋|\d{1,2}月)")
 _ISO_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+_UNKNOWN_LATIN_TRAVEL_RE = re.compile(
+    r"(?:去|到|前往|飞往|赴)\s*([a-z][a-z0-9_-]{2,})",
+    re.IGNORECASE,
+)
+
+
+def unknown_latin_travel_target(request: str) -> str | None:
+    """Return an unclassified Latin token after a travel verb, if present."""
+    match = _UNKNOWN_LATIN_TRAVEL_RE.search((request or "").strip())
+    return match.group(1) if match else None
 
 PENDING_FIELD = Literal["destination_city", "date"]
 
@@ -307,6 +317,11 @@ def _decision_sensitive(
         word for word in _SENSITIVE_EVENT_WORDS if word not in _GENERIC_OCCASION_WORDS
     )
     if any(word in text for word in specific_events):
+        return True
+    # An unclassified Latin destination/event token (for example a misspelled
+    # venue name) needs search-before-ask. Treating it as ordinary styling
+    # intent makes the outfit agent silently guess what the user meant.
+    if unknown_latin_travel_target(text):
         return True
     if any(word in text for word in _GENERIC_OCCASION_WORDS) and any(
         action in text for action in _EVENT_ACTION_WORDS

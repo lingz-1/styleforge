@@ -46,7 +46,18 @@ def make_environment_gate(environment: Environment):
                 "gate_feedback": "物理校验未通过：" + "；".join(result.issues),
             }
 
-        if str(state.get("task_type") or "") != "outfit_recommend":
+        if str(state.get("task_type") or "") == "outfit_modify":
+            base = state.get("base_draft")
+            base_ids = list(base.outfit.item_ids) if base is not None else []
+            if base_ids and set(base_ids) == set(draft.outfit.item_ids):
+                return {
+                    "environment_valid": False,
+                    "intent_constraint_failed": True,
+                    "intent_constraint_issues": ["修改任务没有改变任何单品"],
+                    "gate_feedback": "明确需求校验未通过：修改任务至少需要改变一件单品",
+                }
+
+        if str(state.get("task_type") or "") not in {"outfit_recommend", "outfit_modify"}:
             return {
                 "environment_valid": True,
                 "intent_constraint_failed": False,

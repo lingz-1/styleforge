@@ -16,8 +16,12 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from styleforge.agentic.context.grounding import GroundingResolver
+from styleforge.agentic.context.grounding import (
+    GroundingResolver,
+    unknown_latin_travel_target,
+)
 from styleforge.agentic.context.memory_context import PreferenceRetriever
+from styleforge.agentic.context.prompt_security import scan_prompt_injection
 from styleforge.agentic.environment import (
     Draft,
     Environment,
@@ -25,6 +29,7 @@ from styleforge.agentic.environment import (
     resolve_active_outfit,
 )
 from styleforge.agentic.harness import StyleForgeHarness
+from styleforge.agentic.intent_constraints import unavailable_feature_requirements
 from styleforge.agentic.tools.local_tools import (
     CAP_KNOWLEDGE,
     CAP_SKILLS,
@@ -134,6 +139,26 @@ _EXTENSION_TYPES = frozenset(
         TaskType.WARDROBE_GAP,
     }
 )
+
+
+def _complete_outfit_slots(
+    item_ids: list[str],
+    item_type_by_id: dict[str, str],
+) -> bool:
+    """Require shoes plus either separates or a one-piece garment."""
+    slots = {
+        infer_slot(item_type_by_id.get(str(item_id), ""))
+        for item_id in item_ids
+    }
+    return "footwear" in slots and (
+        "one_piece" in slots or {"top", "bottom"} <= slots
+    )
+
+
+def _wardrobe_can_form_complete_outfit(
+    item_type_by_id: dict[str, str],
+) -> bool:
+    return _complete_outfit_slots(list(item_type_by_id), item_type_by_id)
 
 
 def is_follow_up(request: str) -> bool:
@@ -309,6 +334,31 @@ class MultiTaskWorkflow:
         started_at = perf_counter()
         run_id = ""
         try:
+            security_inputs = [("request", task_input.request)]
+            if task_input.candidate_item is not None:
+                security_inputs.extend(
+                    (
+                        ("candidate_name", task_input.candidate_item.name),
+                        ("candidate_description", task_input.candidate_item.description),
+                    )
+                )
+            security_categories = {
+                category
+                for source, value in security_inputs
+                for category in scan_prompt_injection(
+                    value, source=f"task_input:{source}"
+                ).categories
+            }
+            if security_categories:
+                observability.record_operation(
+                    "prompt_security",
+                    success=True,
+                    degraded=True,
+                    component="prompt_security",
+                    source="task_input",
+                    signal_count=len(security_categories),
+                    categories=sorted(security_categories),
+                )
             route = self._route_with_session(task_input, session_context)
             with database_session(self.database_path) as connection:
                 run_id = start_task_run(
@@ -674,50 +724,102 @@ class MultiTaskWorkflow:
             with database_session(self.database_path) as connection:
                 wardrobe_items = list_items(connection, task_input.user_id)
                 item_type_by_id = {item.item_id: item.item_type for item in wardrobe_items}
-                for target in targets:
-                    sub_input = task_input.model_copy(
-                        update={
-                            "current_outfit_id": target["outfit_id"],
-                            "current_item_ids": target["item_ids"],
-                        }
-                    )
-                    facts = build_facts(connection, sub_input, initial_context, wardrobe_items)
-                    environment = Environment(
-                        connection,
-                        wardrobe_items,
-                        facts,
-                        search_limit=12,
-                        wardrobe_retriever=self.wardrobe_retriever,
-                        web_search_provider=self.web_search_provider,
-                    )
-                    harness = self._harness(environment, target_candidates=1)
-                    base_snapshot = resolve_active_outfit(
-                        connection, sub_input, initial_context
-                    ) or OutfitSnapshot(
-                        outfit_id=target["outfit_id"] or "active_outfit",
-                        item_ids=list(target["item_ids"]),
-                        items=[],
-                    )
-                    thread_context = self._thread_context(session_context)
-                    outcome = harness.invoke(
+                unavailable = unavailable_feature_requirements(
+                    task_input.request,
+                    wardrobe_items,
+                )
+                if not _wardrobe_can_form_complete_outfit(item_type_by_id) or unavailable:
+                    outcomes = [
                         {
-                            "run_id": run_id,
-                            "request": task_input.request,
-                            "task_type": TaskType.OUTFIT_MODIFY.value,
-                            "base_draft": Draft(outfit=base_snapshot, layers={}),
-                            "thread_context": thread_context,
-                            "grounding_context": self._grounding_context(
-                                task_input, initial_context, connection, thread_context
+                            "status": "infeasible",
+                            "candidates": [],
+                            "wardrobe_retrievals": [],
+                            "mcp_calls": [],
+                            "_llm_call_count": 0,
+                            "infeasible_reason": (
+                                "intent_requirements_unavailable"
+                                if unavailable
+                                else "wardrobe_missing_complete_outfit_slots"
                             ),
-                            "raw_preferences": self._raw_preferences(initial_context),
-                            "grounding_attempted_kinds": [],
-                            "grounding_resolved_kinds": [],
+                            "intent_constraint_issues": [
+                                requirement.reason for requirement in unavailable
+                            ],
                         }
-                    )
-                    outcome["wardrobe_retrievals"] = list(environment.wardrobe_search_diagnostics)
-                    outcome["mcp_calls"] = list(environment.mcp_call_traces)
-                    outcome["_llm_call_count"] = harness.model_calls
-                    outcomes.append(outcome)
+                        for _target in targets
+                    ]
+                else:
+                    for target in targets:
+                        target_item_ids = list(target.get("item_ids") or [])
+                        if not target_item_ids and target.get("outfit_id"):
+                            lookup_input = task_input.model_copy(
+                                update={
+                                    "current_outfit_id": target["outfit_id"],
+                                    "current_item_ids": [],
+                                }
+                            )
+                            stored = resolve_active_outfit(connection, lookup_input, None)
+                            if stored is not None:
+                                target_item_ids = list(stored.item_ids)
+                        target["item_ids"] = target_item_ids
+                        if not target_item_ids:
+                            outcomes.append(
+                                {
+                                    "status": "needs_clarification",
+                                    "clarification_question": "请先选择要修改的当前搭配。",
+                                    "candidates": [],
+                                    "wardrobe_retrievals": [],
+                                    "mcp_calls": [],
+                                    "_llm_call_count": 0,
+                                }
+                            )
+                            continue
+                        sub_input = task_input.model_copy(
+                            update={
+                                "current_outfit_id": target["outfit_id"],
+                                "current_item_ids": target_item_ids,
+                            }
+                        )
+                        facts = build_facts(
+                            connection, sub_input, initial_context, wardrobe_items
+                        )
+                        environment = Environment(
+                            connection,
+                            wardrobe_items,
+                            facts,
+                            search_limit=12,
+                            wardrobe_retriever=self.wardrobe_retriever,
+                            web_search_provider=self.web_search_provider,
+                        )
+                        harness = self._harness(environment, target_candidates=1)
+                        base_snapshot = environment.snapshot_outfit(
+                            target["outfit_id"],
+                            target_item_ids,
+                        )
+                        thread_context = self._thread_context(session_context)
+                        outcome = harness.invoke(
+                            {
+                                "run_id": run_id,
+                                "request": task_input.request,
+                                "task_type": TaskType.OUTFIT_MODIFY.value,
+                                "base_draft": Draft(outfit=base_snapshot, layers={}),
+                                "thread_context": thread_context,
+                                "grounding_context": self._grounding_context(
+                                    task_input,
+                                    initial_context,
+                                    connection,
+                                    thread_context,
+                                ),
+                                "raw_preferences": self._raw_preferences(initial_context),
+                                "grounding_attempted_kinds": [],
+                                "grounding_resolved_kinds": [],
+                            }
+                        )
+                        outcome["wardrobe_retrievals"] = list(
+                            environment.wardrobe_search_diagnostics
+                        )
+                        outcome["mcp_calls"] = list(environment.mcp_call_traces)
+                        outcome["_llm_call_count"] = harness.model_calls
+                        outcomes.append(outcome)
             diagnostics = self._task_diagnostics(outcomes)
             result = self._agentic_modify_to_result(
                 task_input,
@@ -847,9 +949,18 @@ class MultiTaskWorkflow:
             for alternative in alternatives
             for item_id in alternative.get("locked_item_ids", [])
         ]
+        all_added = [
+            item_id
+            for alternative in alternatives
+            for item_id in alternative.get("added_item_ids", [])
+        ]
         assert first_success is not None
         target_slot = ""
-        for item_id in first_success.get("replaced_item_ids", []):
+        changed_ids = [
+            *first_success.get("replaced_item_ids", []),
+            *first_success.get("added_item_ids", []),
+        ]
+        for item_id in changed_ids:
             item_type = item_type_by_id.get(item_id)
             if item_type:
                 slot = infer_slot(item_type)
@@ -868,6 +979,7 @@ class MultiTaskWorkflow:
                 "current_outfit_id": alternatives[0]["outfit_id"],
                 "target_slot": target_slot,
                 "replaced_item_ids": all_replaced,
+                "added_item_ids": all_added,
                 "locked_item_ids": all_locked,
                 "alternatives": alternatives,
                 "message": detail,
@@ -905,14 +1017,22 @@ class MultiTaskWorkflow:
                     "clarification_question": question,
                 },
             )
-        alternative, reason = self._harness_modify_alternative(
-            task_input,
-            target,
-            outcome,
-            item_type_by_id,
-            evaluation_weights=evaluation_weights,
-        )
-        if alternative is None:
+        alternatives: list[dict[str, Any]] = []
+        reason = "failed"
+        for candidate_index, _candidate in enumerate(outcome.get("candidates") or []):
+            alternative, candidate_reason = self._harness_modify_alternative(
+                task_input,
+                target,
+                outcome,
+                item_type_by_id,
+                evaluation_weights=evaluation_weights,
+                candidate_index=candidate_index,
+            )
+            if alternative is not None:
+                alternatives.append(alternative)
+            else:
+                reason = candidate_reason
+        if not alternatives:
             if reason == "skipped":
                 message = "当前搭配单品过少，请补充想怎么调整"
                 return validate_task_result(
@@ -941,23 +1061,49 @@ class MultiTaskWorkflow:
                 },
             )
         target_slot = ""
-        for item_id in alternative.get("replaced_item_ids", []):
+        changed_ids = [
+            *alternatives[0].get("replaced_item_ids", []),
+            *alternatives[0].get("added_item_ids", []),
+        ]
+        for item_id in changed_ids:
             item_type = item_type_by_id.get(item_id)
             if item_type:
                 slot = infer_slot(item_type)
                 if slot and slot != "other":
                     target_slot = slot
                     break
+        all_replaced = list(
+            dict.fromkeys(
+                item_id
+                for alternative in alternatives
+                for item_id in alternative.get("replaced_item_ids", [])
+            )
+        )
+        all_locked = list(
+            dict.fromkeys(
+                item_id
+                for alternative in alternatives
+                for item_id in alternative.get("locked_item_ids", [])
+            )
+        )
+        all_added = list(
+            dict.fromkeys(
+                item_id
+                for alternative in alternatives
+                for item_id in alternative.get("added_item_ids", [])
+            )
+        )
         return validate_task_result(
             TaskType.OUTFIT_MODIFY,
             {
                 "status": "completed",
-                "current_outfit_id": alternative["outfit_id"],
+                "current_outfit_id": alternatives[0]["outfit_id"],
                 "target_slot": target_slot,
-                "replaced_item_ids": alternative.get("replaced_item_ids", []),
-                "locked_item_ids": alternative.get("locked_item_ids", []),
-                "alternatives": [alternative],
-                "message": alternative.get("reasoning", "已按你的要求修改搭配"),
+                "replaced_item_ids": all_replaced,
+                "added_item_ids": all_added,
+                "locked_item_ids": all_locked,
+                "alternatives": alternatives,
+                "message": f"已按你的要求生成 {len(alternatives)} 个修改方案",
             },
         )
 
@@ -968,6 +1114,7 @@ class MultiTaskWorkflow:
         outcome: dict[str, Any],
         item_type_by_id: dict[str, str],
         evaluation_weights: dict[str, Any] | None = None,
+        candidate_index: int = 0,
     ) -> tuple[dict[str, Any] | None, str]:
         """One alternative from one Harness modify outcome (``candidates[0]``).
 
@@ -978,27 +1125,66 @@ class MultiTaskWorkflow:
         candidates = list(outcome.get("candidates") or [])
         if not candidates:
             return None, "failed"
-        candidate = candidates[0]
+        if candidate_index < 0 or candidate_index >= len(candidates):
+            return None, "failed"
+        candidate = candidates[candidate_index]
         item_ids = list(candidate.get("item_ids") or [])
         if len(item_ids) < 2:
             return None, "skipped"
+        if not _complete_outfit_slots(item_ids, item_type_by_id):
+            return None, "incomplete"
         base_item_ids = list(target.get("item_ids") or [])
+        if set(item_ids) == set(base_item_ids):
+            return None, "unchanged"
         base_id = target.get("outfit_id") or task_input.current_outfit_id or ""
         new_outfit_id = f"{base_id or 'outfit'}-mod-{uuid.uuid4().hex[:6]}"
-        outfit = candidate.get("outfit")
-        reasoning = (
-            str((outfit.reasoning if outfit is not None else None) or "") or "已按你的要求修改搭配"
-        )
         replaced = [item_id for item_id in base_item_ids if item_id not in item_ids]
         locked = [item_id for item_id in base_item_ids if item_id in item_ids]
+        added = [item_id for item_id in item_ids if item_id not in base_item_ids]
+        changed_slots = list(
+            dict.fromkeys(
+                infer_slot(item_type_by_id.get(item_id, ""))
+                for item_id in [*replaced, *added]
+                if infer_slot(item_type_by_id.get(item_id, "")) not in {"", "other"}
+            )
+        )
+        slot_labels = {
+            "top": "上衣",
+            "bottom": "下装",
+            "one_piece": "连衣裙",
+            "footwear": "鞋履",
+            "outerwear": "外套",
+            "bag": "包",
+            "accessory": "配饰",
+        }
+        changed_text = "、".join(slot_labels.get(slot, slot) for slot in changed_slots)
+        if replaced and added:
+            reasoning = f"已替换{changed_text or '目标单品'}，其余原搭配单品保持不变。"
+        elif added:
+            reasoning = (
+                f"当前搭配原本没有{changed_text or '目标类别'}，"
+                "已从现有衣橱补入该单品，其余原搭配单品保持不变。"
+            )
+        else:
+            reasoning = f"已移除{changed_text or '目标单品'}，其余原搭配单品保持不变。"
         score = self._score_harness_candidate(candidate, evaluation_weights)
         acceptance_status = str(candidate.get("status") or "STAGED")
+        degraded_reason = self._candidate_degraded_reason(candidate)
+        if acceptance_status == "DEGRADED_ACCEPTED":
+            # The Critic's free-form feedback may ask to confirm facts already
+            # present in the authoritative base snapshot, or tell the user to
+            # search after the system has completed the change. Keep the honest
+            # degraded status while exposing only a factually stable warning.
+            degraded_reason = (
+                "语义审校未完全通过；该备选已通过衣橱归属、结构和前后差量校验。"
+            )
         return (
             {
                 "outfit_id": new_outfit_id,
                 "item_ids": item_ids,
                 "reasoning": reasoning,
                 "replaced_item_ids": replaced,
+                "added_item_ids": added,
                 "locked_item_ids": locked,
                 "hard_valid": bool(candidate.get("environment_valid", False)),
                 "score": score["score"],
@@ -1008,7 +1194,7 @@ class MultiTaskWorkflow:
                 "evaluation_weights": score["evaluation_weights"],
                 "score_source": score["score_source"],
                 "acceptance_status": acceptance_status,
-                "degraded_reason": self._candidate_degraded_reason(candidate),
+                "degraded_reason": degraded_reason,
             },
             "ok",
         )
@@ -1045,55 +1231,98 @@ class MultiTaskWorkflow:
             with database_session(self.database_path) as connection:
                 wardrobe_items = list_items(connection, task_input.user_id)
                 item_type_by_id = {item.item_id: item.item_type for item in wardrobe_items}
+                unavailable = unavailable_feature_requirements(
+                    task_input.request,
+                    wardrobe_items,
+                )
                 facts = build_facts(connection, task_input, initial_context, wardrobe_items)
                 grounding_context = self._grounding_context(
                     task_input, initial_context, connection, thread_context
                 )
-            # No transaction is held while waiting on LLM/MCP calls. Personal
-            # vector lookup opens a short-lived session only when the tool runs.
-            environment = Environment(
-                None,
-                wardrobe_items,
-                facts,
-                search_limit=12,
-                wardrobe_retriever=self.wardrobe_retriever,
-                web_search_provider=self.web_search_provider,
-                weather_provider=self.weather_provider,
-                skills_root=self.skills_root,
-                connection_factory=lambda: database_session(self.database_path),
-            )
-            harness = self._harness(environment, target_candidates=task_input.max_results)
-            outcome = harness.invoke(
-                {
-                    "run_id": run_id,
-                    "request": task_input.request,
-                    "task_type": TaskType.OUTFIT_RECOMMEND.value,
-                    "base_draft": Draft(
-                        outfit=OutfitSnapshot(outfit_id="base", item_ids=[], items=[]),
-                        layers={},
-                    ),
-                    "thread_context": thread_context,
-                    "grounding_context": grounding_context,
-                    "raw_preferences": self._raw_preferences(initial_context),
-                    "grounding_attempted_kinds": [],
-                    "grounding_resolved_kinds": [],
+            model_calls = 0
+            ambiguous_target = unknown_latin_travel_target(task_input.request)
+            if ambiguous_target:
+                question = (
+                    f"“{ambiguous_target}”具体指哪个城市、地点或活动？"
+                    "请补充名称或纠正拼写，我再根据场景给你搭配。"
+                )
+                outcome = {
+                    "status": "needs_clarification",
+                    "clarification_question": question,
+                    "candidates": [],
+                    "wardrobe_retrievals": [],
+                    "mcp_calls": [],
+                    "infeasible_reason": "ambiguous_travel_target",
                 }
-            )
-            outcome["wardrobe_retrievals"] = list(environment.wardrobe_search_diagnostics)
-            outcome["mcp_calls"] = list(environment.mcp_call_traces)
-            weather_facts = environment.last_weather_facts
+                weather_facts = None
+            elif not _wardrobe_can_form_complete_outfit(item_type_by_id) or unavailable:
+                outcome = {
+                    "status": "infeasible",
+                    "candidates": [],
+                    "wardrobe_retrievals": [],
+                    "mcp_calls": [],
+                    "infeasible_reason": (
+                        "intent_requirements_unavailable"
+                        if unavailable
+                        else "wardrobe_missing_complete_outfit_slots"
+                    ),
+                    "intent_constraint_issues": [
+                        requirement.reason for requirement in unavailable
+                    ],
+                }
+                weather_facts = None
+            else:
+                # No transaction is held while waiting on LLM/MCP calls. Personal
+                # vector lookup opens a short-lived session only when the tool runs.
+                environment = Environment(
+                    None,
+                    wardrobe_items,
+                    facts,
+                    search_limit=12,
+                    wardrobe_retriever=self.wardrobe_retriever,
+                    web_search_provider=self.web_search_provider,
+                    weather_provider=self.weather_provider,
+                    skills_root=self.skills_root,
+                    connection_factory=lambda: database_session(self.database_path),
+                )
+                harness = self._harness(
+                    environment, target_candidates=task_input.max_results
+                )
+                outcome = harness.invoke(
+                    {
+                        "run_id": run_id,
+                        "request": task_input.request,
+                        "task_type": TaskType.OUTFIT_RECOMMEND.value,
+                        "base_draft": Draft(
+                            outfit=OutfitSnapshot(
+                                outfit_id="base", item_ids=[], items=[]
+                            ),
+                            layers={},
+                        ),
+                        "thread_context": thread_context,
+                        "grounding_context": grounding_context,
+                        "raw_preferences": self._raw_preferences(initial_context),
+                        "grounding_attempted_kinds": [],
+                        "grounding_resolved_kinds": [],
+                    }
+                )
+                outcome["wardrobe_retrievals"] = list(
+                    environment.wardrobe_search_diagnostics
+                )
+                outcome["mcp_calls"] = list(environment.mcp_call_traces)
+                weather_facts = environment.last_weather_facts
+                model_calls = harness.model_calls
             # H3a: expose the layered preference view the Stylist actually
             # saw so the front end renders the new agentic context (环境定位
             # + 分层偏好 + 对话上下文) instead of the full legacy dump.
             outcome["preference_context"] = self._preference_context(outcome)
-            assert harness is not None
             diagnostics = self._task_diagnostics(outcome)
             result = self._agentic_recommend_to_result(
                 task_input,
                 outcome,
                 item_type_by_id,
                 weather_facts=weather_facts,
-                llm_call_count=harness.model_calls,
+                llm_call_count=model_calls,
                 evaluation_weights=self._evaluation_weights(initial_context),
             )
             status = str(result.get("status", "infeasible"))
@@ -1113,7 +1342,8 @@ class MultiTaskWorkflow:
                 )
             if status == "completed":
                 self._persist_agentic_recommend(task_input, result)
-            self._extract_memories(task_input)
+            if status == "completed":
+                self._extract_memories(task_input)
         except Exception as error:
             self._record_task_failure(
                 run_id=run_id,
@@ -1137,7 +1367,7 @@ class MultiTaskWorkflow:
             "agents": {"harness": "styleforge_harness"},
             "agentic_outcome": outcome,
             "llm_enabled": True,
-            "llm_call_count": harness.model_calls,
+            "llm_call_count": model_calls,
         }
 
     # --- Stage 4c: agentic primary extension chain ------------------------
@@ -1312,7 +1542,9 @@ class MultiTaskWorkflow:
         skipped = 0
         for candidate in outcome.get("candidates") or []:
             item_ids = list(candidate.get("item_ids") or [])
-            if len(item_ids) < 2:
+            if len(item_ids) < 2 or not _complete_outfit_slots(
+                item_ids, item_type_by_id
+            ):
                 skipped += 1
                 continue
             outfit_id = f"rec-{uuid.uuid4().hex[:8]}"
@@ -1473,6 +1705,22 @@ class MultiTaskWorkflow:
         reasoning = str((outfit.reasoning if outfit is not None else None) or "").strip()
         if reasoning:
             reasons.append(reasoning[:240])
+        item_facts: list[str] = []
+        for item in (getattr(outfit, "items", None) or []):
+            name = str(getattr(item, "name", "") or getattr(item, "item_type", "") or "单品")
+            slot = infer_slot(str(getattr(item, "item_type", "") or ""))
+            color = str(getattr(item, "color", "") or "").strip().lower()
+            features = [str(value) for value in getattr(item, "features", None) or []]
+            details = [slot]
+            if color and color != "unknown":
+                details.append(color)
+            if features:
+                details.append("/".join(features[:3]))
+            item_facts.append(f"{name}（{'，'.join(details)}）")
+        if item_facts:
+            grounded = "本套实际使用的衣柜单品：" + "；".join(item_facts)
+            if grounded not in reasons:
+                reasons.append(grounded[:240])
         if evidence is not None:
             for ctx in getattr(evidence, "dress_context", None) or []:
                 if ctx and ctx not in reasons:
@@ -1553,10 +1801,20 @@ class MultiTaskWorkflow:
         (possibly empty; the loop then asks for clarification).
         """
         if task_input.current_outfit_id:
+            item_ids = list(task_input.current_item_ids)
+            if not item_ids:
+                session = session_context or {}
+                if str(session.get("current_outfit_id") or "") == task_input.current_outfit_id:
+                    item_ids = list(session.get("current_item_ids") or [])
+                if not item_ids:
+                    for candidate in session.get("current_candidates") or []:
+                        if str(candidate.get("outfit_id") or "") == task_input.current_outfit_id:
+                            item_ids = list(candidate.get("item_ids") or [])
+                            break
             return [
                 {
                     "outfit_id": task_input.current_outfit_id,
-                    "item_ids": list(task_input.current_item_ids),
+                    "item_ids": item_ids,
                 }
             ]
         candidates = (session_context or {}).get("current_candidates")

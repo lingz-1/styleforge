@@ -17,6 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 
 from styleforge.models.task import TaskExecutionInput
 from styleforge.orchestration.task_router import TaskType
@@ -85,6 +86,29 @@ def test_targets_explicit_outfit_wins(db_dsn: str) -> None:
         {
             "outfit_id": "outfit-1",
             "item_ids": ["top-1", "bottom-1", "coat-1", "shoes-1"],
+        }
+    ]
+
+
+def test_targets_explicit_outfit_hydrates_missing_ids_from_session(db_dsn: str) -> None:
+    workflow = _workflow(db_dsn, None)
+    task = TaskExecutionInput(
+        user_id="u",
+        request="再换一件外套，其他都保留",
+        current_outfit_id="latest-modified",
+        current_item_ids=[],
+    )
+    session = {
+        "current_outfit_id": "latest-modified",
+        "current_item_ids": ["top-1", "bottom-1", "coat-1", "sneakers-1"],
+    }
+
+    targets = workflow._agentic_targets(task, session)
+
+    assert targets == [
+        {
+            "outfit_id": "latest-modified",
+            "item_ids": ["top-1", "bottom-1", "coat-1", "sneakers-1"],
         }
     ]
 
@@ -264,7 +288,8 @@ def test_execute_multi_targets_runs_one_harness_per_candidate(db_dsn: str) -> No
     ]
 
 
-def test_execute_explicit_outfit_keeps_single_target(db_dsn: str) -> None:
+@pytest.mark.parametrize("stored_only", [False, True])
+def test_execute_explicit_outfit_keeps_single_target(db_dsn: str, stored_only: bool) -> None:
     # An explicit current_outfit_id must not be expanded by session candidates:
     # exactly one harness runs, exactly one alternative survives.
     initialize_database(db_dsn)
@@ -285,6 +310,12 @@ def test_execute_explicit_outfit_keeps_single_target(db_dsn: str) -> None:
         current_outfit_id="outfit-1",
         current_item_ids=["top-1", "bottom-1", "coat-1", "shoes-1"],
     )
+    if stored_only:
+        workflow._persist_agentic_candidate(task, {"alternatives": [{
+            "outfit_id": task.current_outfit_id,
+            "item_ids": list(task.current_item_ids),
+        }]})
+        task = task.model_copy(update={"current_item_ids": []})
     session_context = {
         "current_candidates": _targets(("a", ["x", "y"]), ("b", ["z", "w"]))
     }
@@ -295,3 +326,5 @@ def test_execute_explicit_outfit_keeps_single_target(db_dsn: str) -> None:
     assert len(payload["result"]["alternatives"]) == 1
     assert payload["result"]["alternatives"][0]["outfit_id"].startswith("outfit-1-mod-")
     assert payload["llm_call_count"] == 4
+    assert payload["result"]["replaced_item_ids"] == ["shoes-1"]
+    assert set(payload["result"]["locked_item_ids"]) == {"top-1", "bottom-1", "coat-1"}

@@ -266,6 +266,31 @@ class Environment:
             self._wardrobe_by_id[item_id] for item_id in item_ids if item_id in self._wardrobe_by_id
         ]
 
+    def snapshot_outfit(
+        self,
+        outfit_id: str,
+        item_ids: list[str],
+        *,
+        reasoning: str = "",
+    ) -> OutfitSnapshot:
+        """Build one authoritative snapshot from the exact requested item set.
+
+        Modify orchestration uses this as its sole base-draft constructor. A
+        missing id is rejected instead of silently producing a partial or empty
+        snapshot whose later diff would claim a false successful change.
+        """
+        normalized = list(dict.fromkeys(str(item_id) for item_id in item_ids if item_id))
+        missing = [item_id for item_id in normalized if item_id not in self._wardrobe_by_id]
+        if missing:
+            raise ValueError(f"Outfit contains items outside the active wardrobe: {missing[:3]}")
+        snapshots = [self._snapshot_for(item_id) for item_id in normalized]
+        return OutfitSnapshot(
+            outfit_id=outfit_id or "active_outfit",
+            item_ids=normalized,
+            items=[snapshot for snapshot in snapshots if snapshot is not None],
+            reasoning=reasoning,
+        )
+
     def _placed(self, draft: Draft) -> list[PlacedItem]:
         return [
             PlacedItem(

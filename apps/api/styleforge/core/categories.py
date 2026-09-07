@@ -6,6 +6,7 @@ from __future__ import annotations
 TYPE_TO_SLOT = {
     "top": "top",
     "pants": "bottom",
+    "jeans": "bottom",
     "shorts": "bottom",
     "skirt": "bottom",
     "dress": "one_piece",

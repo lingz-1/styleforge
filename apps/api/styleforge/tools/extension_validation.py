@@ -177,6 +177,25 @@ def _validate_item_advice(agent1: Agent1TaskOutput, result: dict[str, Any]) -> l
     return issues
 
 
+def _validate_style_advice(
+    agent1: Agent1TaskOutput,
+    result: dict[str, Any],
+) -> list[str]:
+    """Require every claimed wardrobe match to resolve to Agent 1 facts."""
+    if result.get("status") != "completed":
+        return []
+    referenced = _item_ids(result.get("wardrobe_matches", []))
+    allowed = set(agent1.candidate_item_ids)
+    issues: list[str] = []
+    if not result.get("wardrobe_matches"):
+        issues.append("风格建议没有提供可落地的真实衣橱单品")
+    if not referenced <= allowed:
+        issues.append("风格建议引用了 Agent 1 候选范围外单品")
+    if len(referenced) != len(result.get("wardrobe_matches", [])):
+        issues.append("风格建议包含无法解析到衣橱 ID 的单品")
+    return issues
+
+
 def _validate_compatibility(result: dict[str, Any], wardrobe_ids: set[str]) -> list[str]:
     issues: list[str] = []
     candidate_id = str((result.get("candidate_item") or {}).get("item_id", ""))
@@ -290,7 +309,12 @@ def _sanitize_compatibility_result(
     result: dict[str, Any],
     allowed_ids: set[str],
 ) -> dict[str, Any]:
-    """Restore authoritative candidate facts and prune wardrobe references."""
+    """Restore authoritative compatibility facts and rebuild derived claims.
+
+    Compatibility and redundancy scores are derived from Agent 1's deterministic
+    item groups. The model may explain those facts, but it cannot turn every item
+    in the same broad category into a "similar" product or invent counts.
+    """
     facts = agent1.facts
     grouped = _filter_slot_refs(
         facts.get("compatible_items_by_slot") or {}, allowed_ids
@@ -310,10 +334,66 @@ def _sanitize_compatibility_result(
         copy = dict(outfit)
         copy["wardrobe_item_ids"] = kept_ids
         outfits.append(copy)
+    if result.get("status") != "completed":
+        return {
+            **result,
+            "candidate_item": dict(facts.get("candidate_item") or {}),
+            "candidate_slot": str(facts.get("candidate_slot") or ""),
+            "compatible_items_by_slot": grouped,
+            "compatible_item_counts": {
+                slot: len(items) for slot, items in grouped.items()
+            },
+            "similar_wardrobe_items": similar,
+            "sample_outfits": outfits,
+            "complete_outfit_count": len(outfits),
+        }
+
+    compatible_count = sum(len(items) for items in grouped.values())
+    compatibility_score = min(
+        100.0,
+        (60.0 if outfits else 45.0)
+        + 5.0 * min(len(outfits), 3)
+        + 5.0 * min(len(grouped), 3),
+    )
+    similarity_scores = [
+        float(item.get("similarity_score") or 0.0) for item in similar
+    ]
+    redundancy_score = (
+        min(100.0, max(similarity_scores) + 5.0 * (len(similar) - 1))
+        if similarity_scores
+        else 0.0
+    )
+    if compatible_count == 0:
+        recommendation = "not_recommended"
+    elif compatibility_score >= 75.0 and redundancy_score < 75.0:
+        recommendation = "recommended"
+    else:
+        recommendation = "consider"
+
+    candidate = dict(facts.get("candidate_item") or {})
+    candidate_name = str(candidate.get("name") or candidate.get("item_type") or "候选单品")
+    slot_counts = "、".join(
+        f"{slot} {len(items)} 件" for slot, items in sorted(grouped.items())
+    ) or "没有可验证的互补单品"
+    if similar:
+        similar_names = "、".join(
+            str(item.get("name") or item.get("item_type") or item.get("item_id"))
+            for item in similar[:3]
+        )
+        redundancy_text = f"找到 {len(similar)} 件有显式颜色或子类型重合的相似单品：{similar_names}"
+    else:
+        redundancy_text = "未发现有显式颜色或子类型重合的相似单品"
+    recommendation_text = (
+        f"{candidate_name}在当前衣橱中找到{slot_counts}，"
+        f"可组成 {len(outfits)} 套已列出的候选搭配；{redundancy_text}。"
+    )
     return {
         **result,
-        "candidate_item": dict(facts.get("candidate_item") or {}),
+        "candidate_item": candidate,
         "candidate_slot": str(facts.get("candidate_slot") or ""),
+        "compatibility_score": compatibility_score,
+        "recommendation": recommendation,
+        "recommendation_text": recommendation_text,
         "compatible_items_by_slot": grouped,
         "compatible_item_counts": {
             slot: len(items) for slot, items in grouped.items()
@@ -321,6 +401,20 @@ def _sanitize_compatibility_result(
         "similar_wardrobe_items": similar,
         "sample_outfits": outfits,
         "complete_outfit_count": len(outfits),
+        "redundancy_score": redundancy_score,
+        "evidence": [
+            {
+                "source": "deterministic_compatibility",
+                "detail": f"按衣橱元数据统计：{slot_counts}；完整候选 {len(outfits)} 套。",
+            },
+            {
+                "source": "deterministic_redundancy",
+                "detail": redundancy_text + "。",
+            },
+        ],
+        "limitations": [
+            "兼容性仅依据候选品类、显式颜色或子类型及当前衣橱元数据；未识别属性不会推断。"
+        ],
     }
 
 
@@ -331,6 +425,11 @@ def _sanitize_gap_result(
     """Restore deterministic wardrobe counts and gap identities."""
     facts = agent1.facts
     gaps = list(facts.get("missing_elements") or [])
+    if gaps:
+        labels = [str(gap.get("label") or gap.get("name") or gap.get("id")) for gap in gaps]
+        summary = "当前目标仍有结构性缺口：" + "、".join(value for value in labels if value)
+    else:
+        summary = "按当前衣橱槽位统计，目标场景所需核心类别已覆盖，未发现结构性缺口。"
     return {
         **result,
         "analysis_mode": str(
@@ -342,6 +441,108 @@ def _sanitize_gap_result(
         "covered_elements": list(facts.get("covered_elements") or []),
         "gaps": gaps,
         "gap_count": len(gaps),
+        "summary": summary,
+    }
+
+
+def _sanitize_style_result(
+    agent1: Agent1TaskOutput,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind style advice to real wardrobe cards and known preferences.
+
+    A compliant draft keeps its semantic prose, but its wardrobe rows are
+    restored from Agent 1 facts so names/colors cannot drift. If the draft
+    cited an unknown item (including a name without an item id), rebuild the
+    explanatory prose from deterministic, non-product-specific principles.
+    """
+    if result.get("status") != "completed":
+        return result
+    facts = agent1.facts
+    allowed = set(agent1.candidate_item_ids)
+    authoritative = [
+        dict(item)
+        for item in (
+            list(facts.get("wardrobe_matches") or [])
+            + list(facts.get("style_wardrobe_items") or [])
+        )
+        if str(item.get("item_id") or "") in allowed
+    ]
+    by_id = {str(item["item_id"]): item for item in authoritative}
+    requested_rows = list(result.get("wardrobe_matches") or [])
+    requested_ids = [str(item.get("item_id") or "") for item in requested_rows]
+    ungrounded = (
+        not requested_rows
+        or any(not item_id or item_id not in by_id for item_id in requested_ids)
+    )
+    selected = [
+        dict(by_id[item_id])
+        for item_id in dict.fromkeys(requested_ids)
+        if item_id in by_id
+    ]
+    if not selected:
+        selected = list(by_id.values())[:8]
+
+    if not ungrounded:
+        usages = {
+            str(item.get("item_id") or ""): str(item.get("usage") or "")
+            for item in requested_rows
+        }
+        return {
+            **result,
+            "wardrobe_matches": [
+                {**item, **({"usage": usages[item["item_id"]]} if usages.get(item["item_id"]) else {})}
+                for item in selected
+            ],
+        }
+
+    preferences = list(facts.get("preference_facts") or [])
+    positive = [
+        str(item.get("value") or "").strip()
+        for item in preferences
+        if str(item.get("polarity") or "positive") != "negative"
+        and str(item.get("value") or "").strip()
+    ]
+    negative = [
+        str(item.get("value") or "").strip()
+        for item in preferences
+        if str(item.get("polarity") or "") == "negative"
+        and str(item.get("value") or "").strip()
+    ]
+    target = str((agent1.resolved_target or {}).get("style") or result.get("title") or "目标风格")
+    baseline = "、".join(positive[:2]) or "日常穿衣偏好"
+    avoid = "、".join(negative[:2])
+    names = [str(item.get("name") or item.get("item_type") or "").strip() for item in selected]
+    names = [name for name in names if name]
+    landing = "、".join(names[:3]) or "已列出的衣橱候选"
+    avoid_text = f"，并避免把{avoid}作为主导元素" if avoid else ""
+    return {
+        **result,
+        "title": target,
+        "summary": (
+            f"以{baseline}为日常基线，为“{target}”只增加一个视觉重点；"
+            f"下列建议仅使用当前衣橱中的真实单品{avoid_text}。"
+        ),
+        "principles": [
+            {
+                "title": "保留偏好基线",
+                "content": f"整体延续{baseline}，不要同时改变轮廓、颜色和配饰三个方向。",
+            },
+            {
+                "title": "单点增加亮点",
+                "content": "每套只选择一个醒目焦点，其余部分保持克制，避免主题元素堆叠。",
+            },
+            {
+                "title": "用真实衣橱落地",
+                "content": f"优先从{landing}中选择，并以返回的 item_id 作为实际搭配依据。",
+            },
+        ],
+        "wardrobe_matches": selected,
+        "limitations": list(dict.fromkeys([
+            *list(result.get("limitations") or []),
+            "原草稿含无法绑定到衣橱的单品描述，已改为真实衣橱事实。",
+        ])),
+        "generation_mode": "grounded_style_sanitizer",
     }
 
 
@@ -418,7 +619,9 @@ def sanitize_extension_references(
     evidence_kept = sorted(set(agent2.evidence_source_ids) & evidence_ids)
 
     result = agent2.result
-    if agent1.task_type is TaskType.ITEM_ADVICE:
+    if agent1.task_type is TaskType.STYLE_ADVICE:
+        result = _sanitize_style_result(agent1, result)
+    elif agent1.task_type is TaskType.ITEM_ADVICE:
         anchor_id = str((agent1.facts.get("anchor_item") or {}).get("item_id", ""))
         allowed = set(agent1.candidate_item_ids)
         if anchor_id:
@@ -445,6 +648,7 @@ def sanitize_extension_references(
             "used_item_ids": used_kept,
             "evidence_source_ids": evidence_kept,
             "result": result,
+            "summary": str(result.get("summary") or agent2.summary),
         }
     )
 
@@ -476,6 +680,8 @@ def validate_extension_draft(
             )
     if agent1.task_type is TaskType.OUTFIT_MODIFY:
         issues.extend(_validate_modify(agent1, result))
+    elif agent1.task_type is TaskType.STYLE_ADVICE:
+        issues.extend(_validate_style_advice(agent1, result))
     elif agent1.task_type is TaskType.ITEM_ADVICE:
         issues.extend(_validate_item_advice(agent1, result))
     elif agent1.task_type is TaskType.WARDROBE_COMPATIBILITY:

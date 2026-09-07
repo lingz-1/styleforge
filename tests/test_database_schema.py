@@ -22,6 +22,33 @@ from styleforge.repositories.task_run_repository import (
 )
 
 
+@pytest.mark.parametrize(
+    ("dsn", "env_timeout", "expected"),
+    [
+        ("postgresql://localhost/test", None, "10"),
+        ("postgresql://localhost/test", "4", "4"),
+        ("postgresql://localhost/test?connect_timeout=3", "4", "3"),
+    ],
+)
+def test_database_connection_has_bounded_default_and_respects_configuration(
+    monkeypatch, dsn: str, env_timeout: str | None, expected: str,
+) -> None:
+    from styleforge.repositories import database
+
+    captured = {}
+
+    def fake_connect(conninfo, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.delenv("PGCONNECT_TIMEOUT", raising=False)
+    if env_timeout is not None:
+        monkeypatch.setenv("PGCONNECT_TIMEOUT", env_timeout)
+    monkeypatch.setattr(database.psycopg, "connect", fake_connect)
+    connect(dsn)
+    assert captured["connect_timeout"] == expected
+
+
 def _table_names(dsn: str) -> set[str]:
     with connect(dsn) as connection:
         return {

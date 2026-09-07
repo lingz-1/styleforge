@@ -72,6 +72,43 @@
       "user_id": "eval-polyvore-one-piece",
       "purpose": "使用 Polyvore Outfits 官方真实商品与真实套装关系复验 EXT-002",
       "item_keys": ["polyvore_207483977", "polyvore_209557897", "polyvore_189174949", "polyvore_202458704", "polyvore_201181532", "polyvore_196030328", "polyvore_196144884", "polyvore_193047150", "polyvore_192792274", "polyvore_151616863", "polyvore_95456824"]
+    },
+    "real_one_piece": {
+      "user_id": "eval-real-one-piece",
+      "purpose": "无场景标签泄漏的真实 Polyvore 连衣裙衣柜",
+      "item_keys": ["polyvore_raw_194059150"],
+      "p_outfit_set_ids": ["223055822", "215963824"]
+    },
+    "real_weekend": {
+      "user_id": "eval-real-weekend",
+      "purpose": "连衣裙衣柜加入真实周末单品，验证跨套装组合",
+      "p_outfit_set_ids": ["223055822", "215963824", "123941575"]
+    },
+    "real_formal_separates": {
+      "user_id": "eval-real-formal-separates",
+      "purpose": "真实上下装、平底鞋、高跟鞋和外套组成的正式衣柜",
+      "item_keys": ["polyvore_raw_203215884"],
+      "p_outfit_set_ids": ["122353276", "166143386", "221354940", "217922141"]
+    },
+    "real_sport_casual": {
+      "user_id": "eval-real-sport-casual",
+      "purpose": "真实低强度运动与夏季休闲衣柜",
+      "p_outfit_set_ids": ["220429472", "201738474"]
+    },
+    "real_winter": {
+      "user_id": "eval-real-winter",
+      "purpose": "真实针织、羊毛羊绒外层和冬季鞋履衣柜",
+      "p_outfit_set_ids": ["180125301", "211510002"]
+    },
+    "real_sparse": {
+      "user_id": "eval-real-sparse",
+      "purpose": "只含真实包和首饰的不可成套衣柜",
+      "item_keys": ["polyvore_raw_99621687", "polyvore_raw_109652248"]
+    },
+    "real_balanced": {
+      "user_id": "eval-real-balanced",
+      "purpose": "跨套装的真实均衡衣柜，用于多轮与无假缺口测试",
+      "p_outfit_set_ids": ["221354940", "217922141", "220429472", "180125301"]
     }
   }
 }

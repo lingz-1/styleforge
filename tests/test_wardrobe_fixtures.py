@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from styleforge.core.categories import infer_slot
 from evals.wardrobe_fixtures import (
     fixture_item_id,
     list_fixture_names,
@@ -20,6 +21,13 @@ EXPECTED_FIXTURES = {
     "one_piece",
     "polyvore_one_piece",
     "rain",
+    "real_balanced",
+    "real_formal_separates",
+    "real_one_piece",
+    "real_sparse",
+    "real_sport_casual",
+    "real_weekend",
+    "real_winter",
     "sport",
 }
 
@@ -67,6 +75,55 @@ def test_profiles_lock_the_intended_quality_scenarios() -> None:
         "95456824",
     }
     assert all(item.relative_image_path and item.image_filename for item in real.items)
+
+    formal = load_fixture("real_formal_separates")
+    assert {"top", "bottom", "footwear", "outerwear"} <= {
+        infer_slot(item.item_type) for item in formal.items
+    }
+    assert any("loafer" in item.name.lower() for item in formal.items)
+    assert any("4'' heel" in item.description.lower() for item in formal.items)
+    assert any(
+        item.dataset_item_id == "203215884"
+        and "cotton and linen" in item.description.lower()
+        for item in formal.items
+    )
+
+    one_piece_real = load_fixture("real_one_piece")
+    assert any(
+        item.dataset_item_id == "194059150"
+        and "loafer" in item.name.lower()
+        and "padded insole" in item.description.lower()
+        for item in one_piece_real.items
+    )
+
+    sport = load_fixture("real_sport_casual")
+    assert {"top", "bottom", "footwear"} <= {
+        infer_slot(item.item_type) for item in sport.items
+    }
+    assert any("low impact" in item.description.lower() for item in sport.items)
+
+    winter = load_fixture("real_winter")
+    assert any("wool and cashmere" in item.description.lower() for item in winter.items)
+
+    sparse = load_fixture("real_sparse")
+    assert {infer_slot(item.item_type) for item in sparse.items} == {"accessory", "bag"}
+
+    # New formal-evaluation fixtures expose only raw item metadata. Outfit
+    # titles and reverse-drafted occasion labels never enter model-visible
+    # features or descriptions.
+    for fixture_name in (
+        "real_balanced",
+        "real_formal_separates",
+        "real_one_piece",
+        "real_sparse",
+        "real_sport_casual",
+        "real_weekend",
+        "real_winter",
+    ):
+        fixture = load_fixture(fixture_name)
+        assert {item.source for item in fixture.items} == {"polyvore"}
+        assert all(not item.features for item in fixture.items)
+        assert all("official polyvore" not in item.description.lower() for item in fixture.items)
 
 
 def test_seed_fixture_is_idempotent_and_user_scoped(db_conn) -> None:

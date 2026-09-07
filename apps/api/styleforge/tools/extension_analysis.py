@@ -12,6 +12,7 @@ from styleforge.core.categories import infer_slot
 from styleforge.core.garment_attributes import item_matches_subtype
 from styleforge.core.relaxation import build_relaxation_plan
 from styleforge.core.request_spec import ChangeAction, RequestSpec, interpret_request
+from styleforge.agentic.context.prompt_security import scan_prompt_injection
 from styleforge.knowledge.retriever import KnowledgeRetriever
 from styleforge.models.agent_tasks import Agent1TaskOutput
 from styleforge.models.context import ContextPack
@@ -36,6 +37,24 @@ from styleforge.tools.extension_items import (
 _CANDIDATE_TEXT_LIMIT = 120
 
 
+def _safe_candidate_input(candidate):
+    """Remove instruction-like text from transient product metadata.
+
+    The workflow records the original security categories before analysis. The
+    fact layer keeps legitimate product fields but never forwards or echoes a
+    detected instruction payload as a product name/description.
+    """
+    if candidate is None:
+        return None
+    updates: dict[str, str] = {}
+    for field in ("name", "subtype", "color", "description", "gender"):
+        value = str(getattr(candidate, field, "") or "")
+        report = scan_prompt_injection(value, source=f"candidate_item:{field}")
+        if report.signal_count:
+            updates[field] = ""
+    return candidate.model_copy(update=updates) if updates else candidate
+
+
 def _candidate_item_texts(
     wardrobe, item_ids: list[str], limit: int | None = None
 ) -> list[dict[str, str]]:
@@ -58,6 +77,29 @@ def _candidate_item_texts(
         if limit is not None and len(cards) >= limit:
             break
     return cards
+
+
+def _compact_preference_facts(context_pack: ContextPack | None) -> list[dict[str, Any]]:
+    """Expose only user-authored preference facts needed by style advice."""
+    if context_pack is None:
+        return []
+    raw = (context_pack.user_context.preferences or {}).get("memory_profile") or []
+    if isinstance(raw, dict):
+        raw = raw.get("preferences") or []
+    if not isinstance(raw, list):
+        return []
+    kept: list[dict[str, Any]] = []
+    for value in raw[:20]:
+        if not isinstance(value, dict):
+            continue
+        fact = {
+            key: value.get(key)
+            for key in ("dimension", "attribute", "value", "polarity", "strength")
+            if value.get(key) not in (None, "")
+        }
+        if fact:
+            kept.append(fact)
+    return kept
 
 
 SLOT_ALIASES = {
@@ -106,6 +148,9 @@ OUTFIT_TEMPLATES = {
 _REQUESTED_SUPPORT_SLOT_TERMS = {
     "top": ("上衣", "衬衫", "毛衣", "针织衫"),
     "bottom": ("下装", "裤子", "半身裙"),
+    # Generic 裙子 in a support request normally asks for a dress; 半身裙 is
+    # deliberately kept in bottom above so the two intents remain distinct.
+    "one_piece": ("连衣裙", "裙装", "裙子", "dress"),
     "footwear": ("鞋", "靴"),
     "outerwear": ("外套", "外搭", "开衫", "风衣", "大衣", "夹克"),
     "bag": ("包", "手拿包", "托特包"),
@@ -524,20 +569,45 @@ def _analyze_style_or_item(
     route: TaskRoute,
     wardrobe,
     retriever: KnowledgeRetriever,
+    context_pack: ContextPack | None = None,
 ) -> Agent1TaskOutput:
     kind = "style" if route.task_type is TaskType.STYLE_ADVICE else "item"
     evidence, entries = retriever.search(task_input.request, kind=kind, limit=6)
     matches = _knowledge_matches(wardrobe, entries)
     if route.task_type is TaskType.STYLE_ADVICE:
         target = str(entries[0]["title"]) if entries else task_input.request.strip()
+        # A style guide is supporting knowledge, not permission to invent
+        # products. Keep a bounded, slot-balanced set of real wardrobe cards in
+        # the Agent contract even when no knowledge keyword matches an item.
+        matched_ids = [str(item["item_id"]) for item in matches]
+        candidate_ids = _bounded_balanced_candidates(
+            wardrobe,
+            [],
+            matched_ids,
+            limit=24,
+            priority_budget=12,
+        )
+        by_id = {item.item_id: item for item in wardrobe}
+        grounded_cards = [
+            item_summary(by_id[item_id])
+            for item_id in candidate_ids
+            if item_id in by_id
+        ]
+        authoritative_matches = matches or grounded_cards[:12]
         return Agent1TaskOutput(
             task_type=route.task_type,
             intent_summary=f"理解目标风格 {target}，检索知识依据和衣橱可落地单品",
             resolved_target={"style": target, "knowledge_entry_ids": [e["id"] for e in entries]},
             constraints={"wardrobe_only": True, "knowledge_is_supporting_evidence": True},
-            facts={"knowledge_entries": entries, "wardrobe_matches": matches},
+            facts={
+                "user_request": task_input.request,
+                "knowledge_entries": entries,
+                "wardrobe_matches": authoritative_matches,
+                "style_wardrobe_items": grounded_cards,
+                "preference_facts": _compact_preference_facts(context_pack),
+            },
             evidence=evidence,
-            candidate_item_ids=[str(item["item_id"]) for item in matches],
+            candidate_item_ids=candidate_ids,
         )
 
     anchors = resolve_anchor_items(wardrobe, task_input.request, item_id=task_input.item_id)
@@ -547,7 +617,9 @@ def _analyze_style_or_item(
     if len(anchors) > 1:
         clarification = "衣橱中找到多件符合描述的单品，请选择具体一件。"
     if anchor is None and not anchors:
-        candidate = task_input.candidate_item or infer_candidate_item(task_input.request)
+        candidate = _safe_candidate_input(
+            task_input.candidate_item or infer_candidate_item(task_input.request)
+        )
         if candidate is not None:
             anchor = candidate_to_catalog_item(candidate)
             anchor_source = "candidate"
@@ -566,6 +638,7 @@ def _analyze_style_or_item(
         slots.update(requested_support_slots)
         compatible = group_compatible_items(anchor, wardrobe, slots)
     facts = {
+        "user_request": task_input.request,
         "knowledge_entries": entries,
         "wardrobe_matches": matches,
         "anchor_item": item_summary(anchor) if anchor is not None else None,
@@ -609,7 +682,9 @@ def _analyze_compatibility(
     wardrobe,
     retriever: KnowledgeRetriever,
 ) -> Agent1TaskOutput:
-    candidate_input = task_input.candidate_item or infer_candidate_item(task_input.request)
+    candidate_input = _safe_candidate_input(
+        task_input.candidate_item or infer_candidate_item(task_input.request)
+    )
     if candidate_input is None:
         return Agent1TaskOutput(
             task_type=route.task_type,
@@ -648,7 +723,13 @@ def _analyze_compatibility(
             score += 35.0
         if candidate.color and candidate.color.lower() in item.color.lower():
             score += 25.0
-        similar_ranked.append((score, item.item_id, {**item_summary(item), "similarity_score": score}))
+        # Same broad item type is only the comparison baseline, not enough to
+        # call two products similar. Require an explicit color or subtype match
+        # before exposing the item as redundancy evidence to the language model.
+        if score >= 65.0:
+            similar_ranked.append(
+                (score, item.item_id, {**item_summary(item), "similarity_score": score})
+            )
     similar_ranked.sort(key=lambda value: (-value[0], value[1]))
     similar_items = [payload for _, _, payload in similar_ranked[:8]]
     candidate_ids = [
@@ -708,37 +789,66 @@ def _structural_gap_elements(request: str) -> list[dict[str, Any]]:
     """Return narrowly scoped, scenario-specific wardrobe requirements."""
     normalized = request.strip().lower()
     commute_markers = ("通勤", "上班", "职场", "office", "commute", "workwear")
-    if not any(marker in normalized for marker in commute_markers):
-        return []
-    return [
-        {
-            "id": "slot:top",
-            "label": "通勤基础上装",
-            "item_types": ["top"],
-            "subtypes": [],
-            "colors": [],
-            "priority": "high",
-            "suggestion": "补充衬衫、针织衫等可重复组合的通勤基础上装",
-        },
-        {
-            "id": "slot:bottom",
-            "label": "通勤基础下装",
-            "item_types": ["pants", "skirt", "shorts"],
-            "subtypes": [],
-            "colors": [],
-            "priority": "high",
-            "suggestion": "补充西裤、半身裙等可重复组合的通勤基础下装",
-        },
-        {
-            "id": "slot:footwear",
-            "label": "通勤鞋履",
-            "item_types": ["shoes"],
-            "subtypes": [],
-            "colors": [],
-            "priority": "medium",
-            "suggestion": "补充适合长时间穿着的通勤鞋履",
-        },
-    ]
+    formal_event_markers = (
+        "正式晚宴",
+        "晚宴",
+        "宴会",
+        "black tie",
+        "formal dinner",
+        "gala",
+    )
+    if any(marker in normalized for marker in commute_markers):
+        return [
+            {
+                "id": "slot:top",
+                "label": "通勤基础上装",
+                "item_types": ["top"],
+                "subtypes": [],
+                "colors": [],
+                "priority": "high",
+                "suggestion": "补充衬衫、针织衫等可重复组合的通勤基础上装",
+            },
+            {
+                "id": "slot:bottom",
+                "label": "通勤基础下装",
+                "item_types": ["pants", "skirt", "shorts"],
+                "subtypes": [],
+                "colors": [],
+                "priority": "high",
+                "suggestion": "补充西裤、半身裙等可重复组合的通勤基础下装",
+            },
+            {
+                "id": "slot:footwear",
+                "label": "通勤鞋履",
+                "item_types": ["shoes"],
+                "subtypes": [],
+                "colors": [],
+                "priority": "medium",
+                "suggestion": "补充适合长时间穿着的通勤鞋履",
+            },
+        ]
+    if any(marker in normalized for marker in formal_event_markers):
+        return [
+            {
+                "id": "occasion:formal_main",
+                "label": "正式晚宴主体服装",
+                "item_types": ["dress", "suit", "jumpsuit"],
+                "subtypes": [],
+                "colors": [],
+                "priority": "high",
+                "suggestion": "补充正式连衣裙、西装套装或其他晚宴主体服装",
+            },
+            {
+                "id": "occasion:formal_footwear",
+                "label": "正式晚宴鞋履",
+                "item_types": ["shoes"],
+                "subtypes": ["pumps", "loafers", "oxfords", "high_heels"],
+                "colors": [],
+                "priority": "high",
+                "suggestion": "补充与正式服装匹配的皮鞋或正装鞋履",
+            },
+        ]
+    return []
 
 
 def _analyze_gap(
@@ -786,7 +896,11 @@ def _analyze_gap(
                 missing_elements.append(payload)
     target_title = str(entries[0]["title"]) if entries else "整体衣橱覆盖"
     if structural_elements and not entries:
-        target_title = "日常通勤结构覆盖"
+        target_title = (
+            "正式场景结构覆盖"
+            if any("formal_" in str(element.get("id")) for element in structural_elements)
+            else "日常通勤结构覆盖"
+        )
     return Agent1TaskOutput(
         task_type=route.task_type,
         intent_summary=(
@@ -829,7 +943,6 @@ def analyze_extension_task(
     knowledge_retriever: KnowledgeRetriever | None = None,
 ) -> Agent1TaskOutput:
     """Retrieve facts for one extension task without producing its final answer."""
-    del context_pack  # The typed snapshot is supplied to the Agent/LLM prompt separately.
     with database_session(database_path) as connection:
         wardrobe = list_items(connection, task_input.user_id)
     retriever = (
@@ -840,7 +953,13 @@ def analyze_extension_task(
     if route.task_type is TaskType.OUTFIT_MODIFY:
         return _analyze_modify(database_path, task_input, route, wardrobe, retriever)
     if route.task_type in {TaskType.STYLE_ADVICE, TaskType.ITEM_ADVICE}:
-        return _analyze_style_or_item(task_input, route, wardrobe, retriever)
+        return _analyze_style_or_item(
+            task_input,
+            route,
+            wardrobe,
+            retriever,
+            context_pack,
+        )
     if route.task_type is TaskType.WARDROBE_COMPATIBILITY:
         return _analyze_compatibility(task_input, route, wardrobe, retriever)
     if route.task_type is TaskType.WARDROBE_GAP:

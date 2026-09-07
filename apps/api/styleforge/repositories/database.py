@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import logging
+import os
 from time import perf_counter
 from typing import Any, Iterator
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 
 from styleforge.common.errors import ErrorCode
 from styleforge.common.observability import observability
@@ -555,7 +557,11 @@ ON preference_model (user_id, active, updated_at DESC);
 
 def connect(dsn: str) -> PgConnection:
     """Open a PostgreSQL connection with sqlite3.Row-like rows."""
-    return PgConnection(psycopg.connect(dsn, row_factory=sqlite_like_row_factory))
+    options = conninfo_to_dict(dsn)
+    timeout = options.get("connect_timeout") or os.getenv("PGCONNECT_TIMEOUT") or "10"
+    return PgConnection(
+        psycopg.connect(dsn, row_factory=sqlite_like_row_factory, connect_timeout=timeout)
+    )
 
 
 def initialize_database(dsn: str) -> None:

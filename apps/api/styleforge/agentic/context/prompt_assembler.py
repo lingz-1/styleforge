@@ -441,6 +441,24 @@ def _format_extension_fact_body(facts: dict[str, Any]) -> str:
     matches = facts.get("wardrobe_matches")
     if matches:
         body.append("衣橱相关单品：" + "；".join(_item_short(match) for match in matches))
+    style_items = facts.get("style_wardrobe_items")
+    if style_items:
+        body.append("风格建议可引用单品（ID 为真实衣橱标识）：")
+        for item in style_items:
+            body.append(
+                _item_short(item) + " " + str(item.get("description") or "")[:300]
+            )
+    preference_facts = facts.get("preference_facts")
+    if preference_facts:
+        rendered = []
+        for preference in preference_facts:
+            value = str(preference.get("value") or "").strip()
+            if not value:
+                continue
+            polarity = str(preference.get("polarity") or "positive")
+            rendered.append(("避免 " if polarity == "negative" else "偏好 ") + value)
+        if rendered:
+            body.append("用户已确认偏好：" + "；".join(rendered))
     anchor = facts.get("anchor_item")
     if anchor:
         source = facts.get("anchor_source") or "wardrobe"
@@ -507,7 +525,8 @@ def _item_short(item: dict[str, Any]) -> str:
     kind = item.get("item_type") or item.get("slot")
     if kind:
         parts.append(str(kind))
-    return "(" + "/".join(parts) + ")"
+    item_id = str(item.get("item_id") or "")
+    return (f"[{item_id}] " if item_id else "") + "(" + "/".join(parts) + ")"
 
 
 def _candidate_short(item: dict[str, Any]) -> str:

@@ -250,15 +250,23 @@ def refresh_progress(
     if remaining == 0:
         if bool(row["auto_embed"]) and succeeded > 0:
             existing = json.loads(embedding_json or "{}")
-            if existing.get("status") != "completed":
-                should_embed = status != "embedding"
+            embedding_status = str(existing.get("status") or "")
+            if embedding_status == "completed":
+                status = "partial_failed" if failed else "completed"
+                finished_at = _now()
+            elif embedding_status == "failed":
+                # A late recognition callback must not turn an embedding failure
+                # into an implicit retry. Retrying is an explicit API operation.
+                status = "partial_failed"
+                finished_at = row["finished_at"] or _now()
+            elif embedding_status == "running" or status == "embedding":
+                status = "embedding"
+            else:
+                should_embed = True
                 status = "embedding"
                 embedding_json = json.dumps(
                     {"status": "running", "requested_items": succeeded, "retryable": False}
                 )
-            else:
-                status = "partial_failed" if failed else "completed"
-                finished_at = _now()
         else:
             status = "partial_failed" if failed else "completed"
             finished_at = _now()

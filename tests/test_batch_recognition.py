@@ -264,6 +264,7 @@ def test_batch_ownership_enforced(db_dsn, monkeypatch) -> None:
 
     with TestClient(api.app) as client:
         own = client.get(f"/wardrobes/u1/recognition-batches/{batch_id}")
+        _wait_terminal(client, "u1", batch_id)
     assert own.status_code == 200
 
 
@@ -317,6 +318,20 @@ def test_batch_auto_embeds_once_and_failed_embedding_can_retry(
         assert first["embedding"]["status"] == "failed"
         assert first["embedding"]["retryable"] is True
         assert first["embedding"]["wardrobe_commit_preserved"] is True
+
+        # Simulate a late worker callback after the first embedding attempt failed.
+        from styleforge.repositories import recognition_batch_repository as batches
+        from styleforge.repositories.database import database_session
+
+        with database_session(db_dsn) as connection:
+            refreshed, should_embed = batches.refresh_progress(
+                connection,
+                batch_id=batch_id,
+                wall_ms=0,
+            )
+        assert should_embed is False
+        assert refreshed is not None
+        assert refreshed["embedding"]["status"] == "failed"
 
         retry = client.post(
             f"/wardrobes/u1/recognition-batches/{batch_id}/retry-embedding"

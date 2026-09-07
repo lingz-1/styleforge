@@ -19,6 +19,7 @@ StageCandidate → enough?); subgraphs only produce.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -34,7 +35,11 @@ from styleforge.agentic.agents.extension.graph import (
 from styleforge.agentic.agents.research.graph import build_research_subgraph
 from styleforge.agentic.agents.stylist.graph import build_stylist_subgraph
 from styleforge.agentic.gates.environment import make_environment_gate
-from styleforge.agentic.intent_constraints import desired_features_for_request
+from styleforge.agentic.intent_constraints import (
+    desired_features_for_request,
+    explicit_feature_requirements,
+    item_feature_evidence,
+)
 from styleforge.agentic.gates.goal import make_goal_gate
 from styleforge.agentic.runtime.agent_runtime import AgentRuntime
 from styleforge.core.categories import infer_slot
@@ -65,6 +70,28 @@ def _request_needs_outerwear(request: str, desired_features: set[str]) -> bool:
     explicit = ("外套", "大衣", "风衣", "雨衣", "coat", "jacket", "outerwear")
     weather_protection = bool({"waterproof", "warm", "windproof"}.intersection(desired_features))
     return any(marker in text for marker in explicit) or weather_protection
+
+
+def _modify_target_slots(request: str) -> list[str]:
+    """Slots explicitly named by a local modification request."""
+    text = (request or "").lower()
+    # In "保留外套，只把鞋换成……", slot words before the exclusive
+    # change clause describe locked context. Restrict target detection to the
+    # grammatical object of 只把/仅将 so recovery never replaces kept items.
+    exclusive = re.search(
+        r"(?:只|仅)(?:把|将)?(?P<target>[^，。；]{1,48}?)(?:换成|替换为|改成|换掉|更换|换)",
+        text,
+    )
+    if exclusive is not None:
+        text = exclusive.group("target")
+    rules = (
+        ("footwear", ("鞋", "靴", "footwear", "shoe")),
+        ("outerwear", ("外套", "外搭", "大衣", "风衣", "夹克", "coat", "jacket")),
+        ("top", ("上衣", "衬衫", "毛衣", "top", "shirt")),
+        ("bottom", ("下装", "裤", "半身裙", "bottom", "pants", "skirt")),
+        ("one_piece", ("连衣裙", "裙装", "dress")),
+    )
+    return [slot for slot, markers in rules if any(marker in text for marker in markers)]
 
 
 def build_h1b_main_graph(
@@ -219,43 +246,93 @@ def _build_main_graph(
 
         request = str(state.get("request") or "").lower()
         desired_features = _desired_features_for_request(request)
+        if any(marker in request for marker in ("休闲", "轻松", "烧烤", "野餐", "露营")):
+            avoided_features = {"formal"}
+        elif "formal" in desired_features:
+            avoided_features = {"casual", "sport"}
+        else:
+            avoided_features = set()
+        requirements = explicit_feature_requirements(request)
+        prohibited = [requirement for requirement in requirements if requirement.prohibited]
+        required = [requirement for requirement in requirements if not requirement.prohibited]
 
         by_slot: dict[str, list[Any]] = {}
         for item in wardrobe_items:
             by_slot.setdefault(infer_slot(item.item_type), []).append(item)
 
-        def best(slot: str) -> Any | None:
+        def best(slot: str, *, excluded_ids: set[str] | None = None) -> Any | None:
             candidates = by_slot.get(slot) or []
+            excluded_ids = excluded_ids or set()
+            candidates = [
+                item
+                for item in candidates
+                if item.item_id not in excluded_ids
+                if not any(
+                    requirement.feature in item_feature_evidence(item)
+                    for requirement in prohibited
+                    if requirement.slot is None or requirement.slot == slot
+                )
+            ]
             if not candidates:
                 return None
-            return max(
-                candidates,
-                key=lambda item: (
-                    len(
-                        desired_features.intersection(
-                            str(feature).lower() for feature in item.features
-                        )
-                    ),
+
+            def candidate_rank(item: Any) -> tuple[int, int, int, int, str]:
+                evidence = item_feature_evidence(item)
+                required_matches = sum(
+                    requirement.feature in evidence
+                    for requirement in required
+                    if requirement.slot is None or requirement.slot == slot
+                )
+                return (
+                    required_matches,
+                    -len(avoided_features & evidence),
+                    len(desired_features & evidence),
                     sum(
                         token in f"{item.name} {item.description}".lower()
                         for token in desired_features
                     ),
                     item.item_id,
-                ),
+                )
+
+            return max(
+                candidates,
+                key=candidate_rank,
             )
 
         one_piece = best("one_piece")
         footwear = best("footwear")
-        if one_piece is not None and footwear is not None:
-            selected = [one_piece, footwear]
+        one_piece_core = (
+            [one_piece, footwear]
+            if one_piece is not None and footwear is not None
+            else None
+        )
+        separates = [best("top"), best("bottom"), footwear]
+        separates_core = None if any(item is None for item in separates) else separates
+        explicit_one_piece = any(
+            marker in request for marker in ("连衣裙", "裙装", "dress")
+        )
+
+        def core_rank(items: list[Any]) -> tuple[int, int, int, int]:
+            evidence = [item_feature_evidence(item) for item in items]
+            desired_matches = sum(len(desired_features & value) for value in evidence)
+            avoided_matches = sum(len(avoided_features & value) for value in evidence)
+            business_separates = int("formal" in desired_features and len(items) == 3)
+            return desired_matches, -avoided_matches, business_separates, -len(items)
+
+        if explicit_one_piece and one_piece_core is not None:
+            selected = one_piece_core
+        elif one_piece_core is not None and separates_core is not None:
+            selected = max((one_piece_core, separates_core), key=core_rank)
+        elif one_piece_core is not None:
+            selected = one_piece_core
+        elif separates_core is not None:
+            selected = separates_core
         else:
-            selected = [best("top"), best("bottom"), footwear]
-            if any(item is None for item in selected):
-                return {
-                    "candidate_recovered": False,
-                    "candidate_recovery_attempted": True,
-                    "candidate_recovery_issues": ["complete_core_slots_unavailable"],
-                }
+            return {
+                "candidate_recovered": False,
+                "candidate_recovery_attempted": True,
+                "candidate_recovery_issues": ["complete_core_slots_unavailable"],
+            }
 
         if any(marker in request for marker in ("配饰", "首饰", "accessory", "jewelry")):
             accessory = best("accessory")
@@ -265,14 +342,139 @@ def _build_main_graph(
             bag = best("bag")
             if bag is not None:
                 selected.append(bag)
+        elif "完整" in request:
+            # A structurally complete dress look only requires footwear, but a
+            # grounded bag makes a user-requested "完整" look more actionable
+            # without inventing an external product.
+            bag = best("bag")
+            if bag is not None:
+                selected.append(bag)
         if _request_needs_outerwear(request, desired_features):
             outerwear = best("outerwear")
             if outerwear is not None:
                 selected.append(outerwear)
 
+        if str(state.get("task_type") or "") == "outfit_modify":
+            target_slots = list(
+                dict.fromkeys(
+                    [
+                        requirement.slot
+                        for requirement in requirements
+                        if requirement.slot is not None
+                    ]
+                    + _modify_target_slots(request)
+                )
+            )
+            if not target_slots:
+                # Open-ended requests such as "make the whole look more casual"
+                # still require at least one real delta. Pick the replaceable
+                # slot with the largest evidence-backed style improvement while
+                # preserving every other item in the base outfit.
+                open_choices: list[tuple[tuple[int, int, int, int, int], str]] = []
+                slot_priority = ("footwear", "outerwear", "top", "bottom", "one_piece")
+                for priority, slot in enumerate(slot_priority):
+                    current = next(
+                        (
+                            item
+                            for item in wardrobe_items
+                            if item.item_id in base_draft.outfit.item_ids
+                            and infer_slot(item.item_type) == slot
+                        ),
+                        None,
+                    )
+                    if current is None:
+                        continue
+                    replacement = best(slot, excluded_ids={current.item_id})
+                    if replacement is None:
+                        continue
+                    current_features = item_feature_evidence(current)
+                    replacement_features = item_feature_evidence(replacement)
+                    desired_gain = len(desired_features & replacement_features) - len(
+                        desired_features & current_features
+                    )
+                    avoided_reduction = len(avoided_features & current_features) - len(
+                        avoided_features & replacement_features
+                    )
+                    rank = (
+                        desired_gain + avoided_reduction,
+                        avoided_reduction,
+                        desired_gain,
+                        len(desired_features & replacement_features),
+                        -priority,
+                    )
+                    open_choices.append((rank, slot))
+                if open_choices:
+                    target_slots = [max(open_choices)[1]]
+            ops: list[ModifyOp] = []
+            for slot in target_slots:
+                current = next(
+                    (
+                        item
+                        for item in wardrobe_items
+                        if item.item_id in base_draft.outfit.item_ids
+                        and infer_slot(item.item_type) == slot
+                    ),
+                    None,
+                )
+                replacement = best(
+                    slot,
+                    excluded_ids={current.item_id} if current is not None else set(),
+                )
+                if replacement is None:
+                    return {
+                        "candidate_recovered": False,
+                        "candidate_recovery_attempted": True,
+                        "candidate_recovery_issues": [f"required_{slot}_replacement_unavailable"],
+                    }
+                if current is None:
+                    ops.append(ModifyOp(action="add", item_id=replacement.item_id))
+                elif replacement.item_id != current.item_id:
+                    ops.append(
+                        ModifyOp(
+                            action="replace",
+                            item_id=current.item_id,
+                            replacement_item_id=replacement.item_id,
+                        )
+                    )
+            if not ops:
+                return {
+                    "candidate_recovered": False,
+                    "candidate_recovery_attempted": True,
+                    "candidate_recovery_issues": ["no_constrained_modify_replacement"],
+                }
+            plan = ModifyPlan(
+                ops=ops,
+                reasoning=f"按用户明确约束“{state.get('request', '')}”替换冲突槽位",
+            )
+            recovered, issues = environment.modify_outfit(base_draft, plan)
+            if recovered is None:
+                return {
+                    "candidate_recovered": False,
+                    "candidate_recovery_attempted": True,
+                    "candidate_recovery_issues": list(issues),
+                }
+            return {
+                "working_draft": recovered,
+                "handoff_result": None,
+                "gate_feedback": "模型候选违反明确约束；已恢复为衣橱内可验证的局部替换",
+                "candidate_recovered": True,
+                "candidate_recovery_attempted": True,
+                "candidate_recovery_issues": [],
+            }
+
+        selected_facts = []
+        for item in selected:
+            matched = sorted(desired_features & item_feature_evidence(item))
+            matched_text = f"，匹配 {','.join(matched)}" if matched else ""
+            selected_facts.append(
+                f"{item.name}（{infer_slot(item.item_type)}，{item.color or '颜色未知'}{matched_text}）"
+            )
         plan = ModifyPlan(
             ops=[ModifyOp(action="add", item_id=item.item_id) for item in selected],
-            reasoning=f"基于当前衣橱按用户请求“{state.get('request', '')}”组合完整搭配",
+            reasoning=(
+                f"基于当前衣橱按用户请求“{state.get('request', '')}”选择："
+                + "；".join(selected_facts)
+            ),
         )
         recovered, issues = environment.modify_outfit(base_draft, plan)
         if recovered is None:
@@ -392,7 +594,9 @@ def _build_main_graph(
     def route_after_environment(state: StyleForgeState) -> str:
         if state.get("environment_valid"):
             return "critic"
-        if state.get("task_type") == "outfit_recommend" and state.get("intent_constraint_failed"):
+        if state.get("task_type") in {"outfit_recommend", "outfit_modify"} and state.get(
+            "intent_constraint_failed"
+        ):
             if not state.get("candidate_recovery_attempted"):
                 return "recover_candidate"
             return "end_node"
@@ -400,6 +604,13 @@ def _build_main_graph(
 
     def route_after_critic(state: StyleForgeState) -> str:
         if state["critic_result"].approved:
+            return "stage_candidate"
+        if state.get("candidate_recovered"):
+            # Recovery is the final deterministic fallback. Sending it back to
+            # the Stylist would let a later model tool call mutate the recovered
+            # item set while retaining candidate_recovered/recovery reasoning,
+            # producing an internally inconsistent result. Keep the grounded
+            # snapshot immutable and record the critic rejection as degraded.
             return "stage_candidate"
         scores = state["critic_result"].dimension_scores
         severe_intent_mismatch = scores is not None and (
@@ -412,9 +623,19 @@ def _build_main_graph(
         ):
             return "recover_candidate"
         if state.get("candidate_retries", 0) >= MAX_CRITIC_RETRIES:
-            # Replan budget exhausted (frozen #7 bounded diversity): accept the
-            # physically-valid candidate so a finite wardrobe can still fill the
-            # target count. The degraded flag is already in gate_feedback.
+            # A physically valid outfit can still be a severe semantic mismatch
+            # (for example sports leggings in an office look). Before force-
+            # accepting the last model draft, make one deterministic pass over
+            # authoritative wardrobe metadata. This keeps the bounded runtime
+            # while preventing a rejected final retry from becoming the result.
+            if (
+                state.get("task_type") in {"outfit_recommend", "outfit_modify"}
+                and not state.get("candidate_recovered")
+                and not state.get("candidate_recovery_attempted")
+            ):
+                return "recover_candidate"
+            # Recovery candidates remain honestly marked DEGRADED_ACCEPTED when
+            # the critic still rejects them after the bounded fallback.
             return "stage_candidate"
         return "stylist"
 

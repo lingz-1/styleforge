@@ -32,6 +32,7 @@ from styleforge.agentic.context.grounding import (
     GroundingResolver,
     pending_field_for_question,
     thread_grounding_to_prompt,
+    unknown_latin_travel_target,
     update_thread_grounding,
 )
 from styleforge.agentic.context.prompt_assembler import PromptAssembler, _format_grounding
@@ -92,6 +93,23 @@ def test_local_commute_is_not_treated_as_missing_event_grounding() -> None:
     assert ctx.decision == GroundingDecision.READY
     assert ctx.missing == []
     assert ctx.reason == "no_event_context"
+
+
+def test_unknown_latin_travel_target_searches_before_guessing() -> None:
+    searchable = _resolver(default_location="上海").resolve(
+        "下半年去 piacon 怎么穿搭？",
+        capabilities=frozenset({CAP_WEB_SEARCH}),
+    )
+    offline = _resolver(default_location="上海").resolve(
+        "下半年去 piacon 怎么穿搭？",
+        capabilities=frozenset(),
+    )
+
+    assert searchable.decision == GroundingDecision.SEARCH_FIRST
+    assert "event_location" in searchable.missing
+    assert offline.decision == GroundingDecision.NEED_USER
+    assert unknown_latin_travel_target("下半年去 piacon 怎么穿搭") == "piacon"
+    assert unknown_latin_travel_target("下周去北京看音乐剧") is None
 
 
 def test_generic_seasonal_wedding_is_an_outfit_constraint_not_live_event() -> None:

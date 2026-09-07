@@ -307,6 +307,11 @@ def test_item_advice_closing_uses_grounded_fallback_after_false_infeasible(
         anchor_id in outfit["item_ids"]
         for outfit in payload["result"]["sample_outfits"]
     )
+    assert "黑色夹克怎么搭配" in payload["result"]["summary"]
+    assert all(
+        "未知颜色或材质不作推断" in outfit["reasoning"]
+        for outfit in payload["result"]["sample_outfits"]
+    )
 
 
 def test_wardrobe_compatibility_primary_end_to_end(db_dsn: str) -> None:
@@ -387,8 +392,30 @@ def test_wardrobe_gap_primary_end_to_end(db_dsn: str) -> None:
     assert result["analysis_mode"] in ("targeted", "general")
     assert result["wardrobe_item_count"] == agent1.facts["wardrobe_item_count"]
     assert result["slot_counts"] == agent1.facts["slot_counts"]
+    if result["gap_count"]:
+        assert "结构性缺口" in result["summary"]
+    else:
+        assert "未发现结构性缺口" in result["summary"]
     assert payload["llm_call_count"] == 1
     assert payload["agentic_outcome"]["extension_result"]["status"] == "completed"
+
+
+def test_formal_dinner_gap_has_deterministic_missing_elements(db_dsn: str) -> None:
+    database_path = _seed(db_dsn)
+    task_input = TaskExecutionInput(
+        user_id="u",
+        request="如果下个月参加正式晚宴，这个衣柜还缺什么？",
+        requested_task_type=TaskType.WARDROBE_GAP,
+    )
+
+    _, agent1 = _analyzed(database_path, task_input)
+
+    assert agent1.resolved_target["analysis_mode"] == "targeted"
+    assert agent1.facts["missing_elements"]
+    assert any(
+        element["id"] == "occasion:formal_main"
+        for element in agent1.facts["missing_elements"]
+    )
 
 
 # ── clarification + no-LLM paths ───────────────────────────────────────────

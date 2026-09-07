@@ -266,6 +266,18 @@ def test_search_wardrobe_empty_is_a_fact(seeded_conn: Any) -> None:
     assert result.results == []
 
 
+def test_snapshot_outfit_uses_exact_ids_and_rejects_unknown(seeded_conn: Any) -> None:
+    env, _ = _draft_from_active(seeded_conn)
+
+    snapshot = env.snapshot_outfit("latest", ["shirt_a", "pants_b", "sneakers_d"])
+
+    assert snapshot.outfit_id == "latest"
+    assert snapshot.item_ids == ["shirt_a", "pants_b", "sneakers_d"]
+    assert [item.item_id for item in snapshot.items] == snapshot.item_ids
+    with pytest.raises(ValueError, match="outside the active wardrobe"):
+        env.snapshot_outfit("broken", ["shirt_a", "not-owned"])
+
+
 def test_modify_outfit_add_conflict_is_rejected_and_draft_untouched(seeded_conn: Any) -> None:
     env, draft = _draft_from_active(seeded_conn)
     before_ids = list(draft.outfit.item_ids)
@@ -531,3 +543,21 @@ def test_environment_gate_passes_a_valid_draft_and_rejects_conflicts(seeded_conn
     result = gate({"working_draft": conflicted})
     assert result["environment_valid"] is False
     assert "冲突" in result["gate_feedback"]
+
+
+def test_environment_gate_rejects_a_noop_modify(seeded_conn: Any) -> None:
+    env, draft = _draft_from_active(seeded_conn)
+    gate = make_environment_gate(env)
+
+    result = gate(
+        {
+            "task_type": "outfit_modify",
+            "request": "换一双鞋",
+            "base_draft": draft,
+            "working_draft": draft,
+        }
+    )
+
+    assert result["environment_valid"] is False
+    assert result["intent_constraint_failed"] is True
+    assert "至少需要改变一件" in result["gate_feedback"]

@@ -346,6 +346,60 @@ def test_simple_recommend_uses_authoritative_route_and_skips_coordinator(
     assert payload["agentic_outcome"]["task_type"] == "outfit_recommend"
 
 
+def _seed_sparse_accessories(database_path: str) -> list[str]:
+    items = [
+        make_item("sparse-bag", "bag", "Black tote", "black"),
+        make_item("sparse-ring", "rings", "Silver ring", "silver"),
+    ]
+    with database_session(database_path) as connection:
+        upsert_items(connection, items, "test")
+        add_items(connection, "u", [item.item_id for item in items])
+    return [item.item_id for item in items]
+
+
+def test_sparse_wardrobe_recommend_is_infeasible_without_agent_calls(
+    db_dsn: str,
+) -> None:
+    initialize_database(db_dsn)
+    _seed_sparse_accessories(db_dsn)
+    workflow = _workflow(db_dsn, FakeLlm([]))
+
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="只用衣柜推荐一套完整正式通勤搭配",
+            requested_task_type=TaskType.OUTFIT_RECOMMEND,
+            max_results=1,
+        )
+    )
+
+    assert payload["status"] == "infeasible"
+    assert payload["result"]["recommendations"] == []
+    assert payload["llm_call_count"] == 0
+
+
+def test_sparse_wardrobe_modify_is_infeasible_without_agent_calls(
+    db_dsn: str,
+) -> None:
+    initialize_database(db_dsn)
+    item_ids = _seed_sparse_accessories(db_dsn)
+    workflow = _workflow(db_dsn, FakeLlm([]))
+
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="把当前包和戒指改成完整正式通勤搭配，只用已有衣物",
+            requested_task_type=TaskType.OUTFIT_MODIFY,
+            current_item_ids=item_ids,
+            max_results=1,
+        )
+    )
+
+    assert payload["status"] == "infeasible"
+    assert payload["result"]["alternatives"] == []
+    assert payload["llm_call_count"] == 0
+
+
 def test_coordinator_cannot_misroute_recommend_to_extension(db_dsn: str) -> None:
     initialize_database(db_dsn)
     _seed(db_dsn)
@@ -598,6 +652,27 @@ def test_indoor_basketball_with_time_skips_unneeded_research(db_dsn: str) -> Non
     assert payload["result"]["environment_context"] == {}
     assert payload["agentic_outcome"].get("research_evidence") is None
     assert payload["llm_call_count"] == 3
+
+
+def test_unknown_latin_travel_target_clarifies_without_agent_calls(db_dsn: str) -> None:
+    initialize_database(db_dsn)
+    _seed(db_dsn)
+    llm = FakeLlm([])
+    workflow = _workflow(db_dsn, llm)
+
+    payload = workflow.execute(
+        TaskExecutionInput(
+            user_id="u",
+            request="下半年去 piacon 怎么穿搭？",
+            requested_task_type=TaskType.OUTFIT_RECOMMEND,
+            max_results=1,
+        )
+    )
+
+    assert payload["status"] == "needs_clarification"
+    assert payload["llm_call_count"] == 0
+    assert llm.call_count == 0
+    assert "piacon" in payload["result"]["clarification_question"]
 
 
 def test_recommend_agentic_primary_returns_three_diverse_outfits(

@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+from collections import Counter
+from pathlib import Path
+
 from evals.quality_benchmark import load_quality_cases
-from evals.runners.evaluate_wardrobe_quality import evaluate_benchmark, evaluate_case
+from evals.runners.evaluate_wardrobe_quality import (
+    _item_fact_text,
+    evaluate_benchmark,
+    evaluate_case,
+)
 from evals.wardrobe_fixtures import fixture_item_id, load_fixture
+from styleforge.orchestration.task_router import TaskRouter
+
+
+SYSTEM_CASES = Path(__file__).resolve().parent.parent / "evals/cases/system_quality_v2.json"
 
 
 DIMENSIONS = {
@@ -12,6 +23,16 @@ DIMENSIONS = {
     "wearability": 9,
     "freshness": 9,
 }
+
+
+def test_item_fact_text_includes_conservative_inferred_features() -> None:
+    fixture = load_fixture("real_formal_separates")
+    loafers = next(item for item in fixture.items if "Loafers" in item.name)
+
+    fact = _item_fact_text(loafers)
+
+    assert "comfortable" in fact
+    assert "formal" in fact
 
 
 def _wedding_payload(*, complete: bool = True) -> dict:
@@ -172,3 +193,162 @@ def test_evaluate_benchmark_filters_lightweight_mode_and_groups_metrics() -> Non
     assert len(seen) == 42
     assert set(report["metrics_by_route"]) == {"outfit_recommend"}
     assert report["metrics_by_route"]["outfit_recommend"]["case_count"] == 42
+
+
+def test_system_quality_v2_freezes_forty_two_layered_real_cases() -> None:
+    cases = load_quality_cases(SYSTEM_CASES)
+
+    assert len(cases) == 42
+    assert sum(case.split == "validation" for case in cases) == 26
+    assert sum(case.split == "holdout" for case in cases) == 16
+    assert Counter(case.evaluation_group for case in cases) == {
+        "core": 24,
+        "robustness": 8,
+        "rag": 6,
+        "api_e2e": 4,
+    }
+    assert Counter(case.execution_adapter for case in cases) == {
+        "workflow": 32,
+        "retrieval": 6,
+        "api": 4,
+    }
+    assert all(case.execution_modes == ("configured",) for case in cases)
+    assert all(not case.requested_task_type for case in cases)
+    assert {case.expected_route for case in cases} == {
+        "outfit_recommend",
+        "outfit_modify",
+        "item_advice",
+        "style_advice",
+        "wardrobe_compatibility",
+        "wardrobe_gap",
+        "wardrobe_retrieval",
+        "api_isolation",
+    }
+    router = TaskRouter()
+    for case in cases:
+        if case.execution_adapter != "workflow":
+            continue
+        route = router.route(
+            case.request,
+            current_outfit_id=case.current_outfit_id,
+            has_candidate_item=case.candidate_item is not None,
+        )
+        assert route.task_type.value == case.expected_route, case.case_id
+        for turn in case.pre_turns:
+            turn_route = router.route(turn.request)
+            assert turn_route.task_type.value == turn.expected_route, (
+                case.case_id,
+                turn.request,
+            )
+
+
+def test_v2_retrieval_case_checks_hit_mode_and_allowlist() -> None:
+    case = next(
+        case
+        for case in load_quality_cases(SYSTEM_CASES)
+        if case.case_id == "RAG-V01"
+    )
+    fixture = load_fixture(case.fixture)
+    payload = {
+        "task_type": "wardrobe_retrieval",
+        "status": "completed",
+        "result": {
+            "retrieved_item_ids": [fixture_item_id("polyvore_raw_101427198")],
+            "mode": "keyword",
+            "semantic_available": False,
+        },
+    }
+
+    result = evaluate_case(case, payload, fixture)
+
+    assert result["passed"] is True
+    payload["result"]["retrieved_item_ids"] = ["foreign-item"]
+    failed = evaluate_case(case, payload, fixture)
+    assert "retrieval_allowlist_violation" in failed["issue_categories"]
+    assert "required_retrieval_missing" in failed["issue_categories"]
+
+
+def test_v2_api_case_requires_all_endpoint_checks() -> None:
+    case = next(
+        case
+        for case in load_quality_cases(SYSTEM_CASES)
+        if case.case_id == "API-H01"
+    )
+    fixture = load_fixture(case.fixture)
+    payload = {
+        "task_type": "api_isolation",
+        "status": "completed",
+        "result": {},
+        "_api_checks": {
+            "session_created": True,
+            "foreign_user_denied": True,
+            "owner_can_read": True,
+        },
+        "_wardrobe_before": list(fixture.item_ids),
+        "_wardrobe_after": list(fixture.item_ids),
+    }
+
+    assert evaluate_case(case, payload, fixture)["passed"] is True
+    payload["_api_checks"]["foreign_user_denied"] = False
+    failed = evaluate_case(case, payload, fixture)
+    assert "api_contract_failed" in failed["issue_categories"]
+
+
+def test_v2_security_case_checks_runtime_signal_and_zero_wardrobe_mutation() -> None:
+    case = next(case for case in load_quality_cases(SYSTEM_CASES) if case.case_id == "H-C02")
+    fixture = load_fixture(case.fixture)
+    payload = {
+        "task_type": "wardrobe_compatibility",
+        "status": "completed",
+        "result": {
+            "candidate_item": case.candidate_item,
+            "compatibility_score": 50,
+            "recommendation": "consider",
+            "evidence": [],
+        },
+        "_duration_ms": 100,
+        "_wardrobe_before": list(fixture.item_ids),
+        "_wardrobe_after": list(fixture.item_ids),
+        "_security_signal_detected": True,
+        "_security_categories": [
+            "hierarchy_override",
+            "secret_exfiltration",
+            "tool_coercion",
+        ],
+        "_independent_judge": {"profile": "task", "overall": 80},
+    }
+
+    result = evaluate_case(case, payload, fixture)
+
+    assert result["passed"] is True
+    assert result["security_signal_detected"] is True
+    assert result["wardrobe_unchanged"] is True
+
+
+def test_v2_multiturn_case_preserves_latest_non_target_items() -> None:
+    case = next(case for case in load_quality_cases(SYSTEM_CASES) if case.case_id == "H-M01")
+    fixture = load_fixture(case.fixture)
+    keys = {
+        "top": "polyvore_raw_207224296",
+        "bottom": "polyvore_raw_208592546",
+        "footwear": "polyvore_raw_193817407",
+        "old_outerwear": "polyvore_raw_200002806",
+        "new_outerwear": "polyvore_raw_147932697",
+    }
+    latest_ids = [fixture_item_id(keys[name]) for name in ("top", "bottom", "footwear", "old_outerwear")]
+    current_ids = [fixture_item_id(keys[name]) for name in ("top", "bottom", "footwear", "new_outerwear")]
+    payload = {
+        "task_type": "outfit_modify",
+        "status": "completed",
+        "result": {"alternatives": [{"item_ids": current_ids}]},
+        "_pre_turn_results": [
+            {"task_type": "outfit_recommend", "status": "completed", "result": {"recommendations": [{"item_ids": latest_ids}]}},
+            {"task_type": "outfit_modify", "status": "completed", "result": {"alternatives": [{"item_ids": latest_ids}]}},
+        ],
+        "_duration_ms": 100,
+        "_independent_judge": {"profile": "outfit", "overall": 80},
+    }
+
+    result = evaluate_case(case, payload, fixture)
+
+    assert result["passed"] is True

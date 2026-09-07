@@ -40,7 +40,7 @@ _SIGNATURES: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(?:reveal|show|print|repeat|leak|send)[^\n]{0,40}"
             r"(?:system prompt|hidden instructions?|developer message|api[_ -]?key|credentials?)"
             r"|(?:显示|泄露|输出|发送|复述)[^\n]{0,32}"
-            r"(?:系统提示|隐藏指令|开发者消息|密钥|凭据|完整上下文)",
+            r"(?:系统提示|隐藏提示|隐藏指令|开发者消息|数据库密码|密码|密钥|凭据|完整上下文)",
             re.IGNORECASE,
         ),
     ),

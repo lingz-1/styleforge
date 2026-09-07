@@ -368,6 +368,308 @@ def test_main_happy_path_stages_three_candidates() -> None:
     assert all(candidate["run_id"] == "run-happy" for candidate in out["candidates"])
 
 
+def test_main_open_ended_modify_recovers_one_grounded_delta() -> None:
+    items = [
+        make_item("formal-top", "top", "Tailored office shirt", features=("formal",)),
+        make_item(
+            "casual-top",
+            "top",
+            "Lightweight casual top",
+            features=("comfortable",),
+        ),
+        make_item("pants", "pants", "Everyday pants"),
+        make_item("shoes", "shoes", "Everyday shoes"),
+    ]
+    environment = Environment(
+        connection=None,
+        wardrobe_items=items,
+        facts=EnvironmentFacts(),
+    )
+    llm = FakeLlm(
+        [
+            {"decision_summary": "沿用原搭配", "control": "CANDIDATE_READY"},
+            _OK,
+        ]
+    )
+    registry = CapabilityRegistry()
+    register_local_tools(registry, environment)
+    runtime = AgentRuntime(
+        llm=llm,
+        registry=registry,
+        instructions_root=_INSTRUCTIONS,
+        runtime_capabilities=frozenset(),
+    )
+    base = Draft(
+        outfit=environment.snapshot_outfit(
+            "active",
+            ["formal-top", "pants", "shoes"],
+        )
+    )
+
+    graph = build_h1b_main_graph(runtime, environment=environment, target_candidates=1)
+    out = graph.invoke(
+        {
+            "run_id": "open-modify",
+            "request": "整体调整得更休闲一点，至少调整一件",
+            "goal": "更休闲",
+            "task_type": "outfit_modify",
+            "base_draft": base,
+        }
+    )
+
+    assert out["status"] == "done"
+    assert out["candidate_recovered"] is True
+    assert out["candidate_recovery_issues"] == []
+    assert set(out["candidates"][0]["item_ids"]) == {"casual-top", "pants", "shoes"}
+
+
+def test_main_business_recommend_recovery_prefers_formal_separates() -> None:
+    items = [
+        make_item("dress", "dress", "Brown day dress"),
+        make_item("shirt", "top", "White office shirt"),
+        make_item("pants", "pants", "Tailored office trousers"),
+        make_item("flats", "shoes", "Black padded loafers"),
+        make_item(
+            "zz-casual-pants",
+            "pants",
+            "Weekend boyfriend jeans",
+            features=("casual", "practical"),
+        ),
+        make_item(
+            "zz-trainers",
+            "shoes",
+            "Weekend trainers",
+            features=("casual", "practical"),
+        ),
+    ]
+    environment = Environment(
+        connection=None,
+        wardrobe_items=items,
+        facts=EnvironmentFacts(),
+    )
+    llm = FakeLlm([{"control": "CONTINUE"}] * 12 + [_OK])
+    registry = CapabilityRegistry()
+    register_local_tools(registry, environment)
+    runtime = AgentRuntime(
+        llm=llm,
+        registry=registry,
+        instructions_root=_INSTRUCTIONS,
+        runtime_capabilities=frozenset(),
+    )
+
+    graph = build_h1b_main_graph(runtime, environment=environment, target_candidates=1)
+    out = graph.invoke(
+        {
+            "run_id": "business-recovery",
+            "request": "只用衣柜推荐一套办公室汇报穿搭",
+            "goal": "办公室汇报",
+            "task_type": "outfit_recommend",
+            "base_draft": _base_draft(),
+        }
+    )
+
+    assert out["status"] == "done"
+    assert out["candidate_recovered"] is True
+    assert set(out["candidates"][0]["item_ids"]) == {"shirt", "pants", "flats"}
+
+
+def test_main_relaxed_outdoor_recovery_avoids_formal_silk_dress() -> None:
+    items = [
+        make_item("silk-dress", "dress", "Equipment silk slip dress"),
+        make_item("maxi-dress", "dress", "JDC London Hoxton maxi dress"),
+        make_item("sandals", "shoes", "Simple sandals"),
+    ]
+    environment = Environment(
+        connection=None,
+        wardrobe_items=items,
+        facts=EnvironmentFacts(),
+    )
+    llm = FakeLlm([{"control": "CONTINUE"}] * 12 + [_OK])
+    registry = CapabilityRegistry()
+    register_local_tools(registry, environment)
+    runtime = AgentRuntime(
+        llm=llm,
+        registry=registry,
+        instructions_root=_INSTRUCTIONS,
+        runtime_capabilities=frozenset(),
+    )
+
+    graph = build_h1b_main_graph(runtime, environment=environment, target_candidates=1)
+    out = graph.invoke(
+        {
+            "run_id": "outdoor-recovery",
+            "request": "周末参加户外烧烤，给我一套轻松的连衣裙和鞋搭配",
+            "goal": "户外烧烤穿搭",
+            "task_type": "outfit_recommend",
+            "base_draft": _base_draft(),
+        }
+    )
+
+    assert out["status"] == "done"
+    assert out["candidate_recovered"] is True
+    assert set(out["candidates"][0]["item_ids"]) == {"maxi-dress", "sandals"}
+
+
+def test_main_rejected_business_candidate_uses_grounded_recovery_before_degraded_accept() -> None:
+    items = [
+        make_item("office-shirt", "top", "White office shirt"),
+        make_item("office-pants", "pants", "Tailored office trousers"),
+        make_item("office-loafers", "shoes", "Black padded loafers"),
+        make_item("mesh-top", "top", "Sheer mesh top"),
+        make_item("sport-leggings", "pants", "Sport training leggings"),
+        make_item("open-boots", "shoes", "Open toe boots"),
+    ]
+    environment = Environment(
+        connection=None,
+        wardrobe_items=items,
+        facts=EnvironmentFacts(),
+    )
+    bad_plan = {
+        "name": "modify_outfit",
+        "arguments": {
+            "plan": {
+                "ops": [
+                    {"action": "add", "item_id": "mesh-top"},
+                    {"action": "add", "item_id": "sport-leggings"},
+                    {"action": "add", "item_id": "open-boots"},
+                ]
+            }
+        },
+    }
+    rejected = {
+        "approved": False,
+        "issues": ["不适合办公室"],
+        "feedback": "改用正式单品",
+        "dimension_scores": {
+            "request_relevance": 5,
+            "request_specificity": 5,
+            "outfit_coordination": 4,
+            "wearability": 5,
+            "freshness": 5,
+        },
+    }
+    llm = FakeLlm(
+        [
+            ({"decision_summary": "生成候选", "control": "CONTINUE"}, [bad_plan]),
+            {"decision_summary": "提交候选", "control": "CANDIDATE_READY"},
+            rejected,
+            ({"decision_summary": "再次生成", "control": "CONTINUE"}, [bad_plan]),
+            {"decision_summary": "再次提交", "control": "CANDIDATE_READY"},
+            rejected,
+            _OK,
+        ]
+    )
+    registry = CapabilityRegistry()
+    register_local_tools(registry, environment)
+    runtime = AgentRuntime(
+        llm=llm,
+        registry=registry,
+        instructions_root=_INSTRUCTIONS,
+        runtime_capabilities=frozenset(),
+    )
+
+    graph = build_h1b_main_graph(runtime, environment=environment, target_candidates=1)
+    out = graph.invoke(
+        {
+            "run_id": "critic-recovery",
+            "request": "只用衣柜推荐一套办公室穿搭",
+            "goal": "办公室穿搭",
+            "task_type": "outfit_recommend",
+            "base_draft": _base_draft(),
+        }
+    )
+
+    assert out["status"] == "done"
+    assert out["candidate_recovered"] is True
+    assert out["candidates"][0]["status"] == "DEGRADED_ACCEPTED"
+    assert set(out["candidates"][0]["item_ids"]) == {
+        "office-shirt",
+        "office-pants",
+        "office-loafers",
+    }
+
+
+def test_main_recovered_candidate_cannot_be_mutated_by_later_stylist_retry() -> None:
+    items = [
+        make_item("office-shirt", "top", "White office shirt"),
+        make_item("office-pants", "pants", "Tailored office trousers"),
+        make_item("office-loafers", "shoes", "Black padded loafers"),
+        make_item("mesh-top", "top", "Sheer mesh top"),
+        make_item("sport-leggings", "pants", "Sport training leggings"),
+        make_item("open-boots", "shoes", "Open toe boots"),
+    ]
+    environment = Environment(
+        connection=None,
+        wardrobe_items=items,
+        facts=EnvironmentFacts(),
+    )
+    bad_plan = {
+        "name": "modify_outfit",
+        "arguments": {
+            "plan": {
+                "ops": [
+                    {"action": "add", "item_id": "mesh-top"},
+                    {"action": "add", "item_id": "sport-leggings"},
+                    {"action": "add", "item_id": "open-boots"},
+                ]
+            }
+        },
+    }
+    severe_rejection = {
+        "approved": False,
+        "issues": ["不适合办公室"],
+        "feedback": "改用正式单品",
+        "dimension_scores": {
+            "request_relevance": 1,
+            "request_specificity": 1,
+            "outfit_coordination": 1,
+            "wearability": 1,
+            "freshness": 1,
+        },
+    }
+    llm = FakeLlm(
+        [
+            ({"decision_summary": "生成错误候选", "control": "CONTINUE"}, [bad_plan]),
+            {"decision_summary": "提交错误候选", "control": "CANDIDATE_READY"},
+            severe_rejection,
+            severe_rejection,
+        ]
+    )
+    registry = CapabilityRegistry()
+    register_local_tools(registry, environment)
+    runtime = AgentRuntime(
+        llm=llm,
+        registry=registry,
+        instructions_root=_INSTRUCTIONS,
+        runtime_capabilities=frozenset(),
+    )
+
+    graph = build_h1b_main_graph(runtime, environment=environment, target_candidates=1)
+    out = graph.invoke(
+        {
+            "run_id": "immutable-recovery",
+            "request": "只用衣柜推荐一套办公室穿搭",
+            "goal": "办公室穿搭",
+            "task_type": "outfit_recommend",
+            "base_draft": _base_draft(),
+        }
+    )
+
+    candidate = out["candidates"][0]
+    assert out["candidate_recovered"] is True
+    assert candidate["status"] == "DEGRADED_ACCEPTED"
+    assert set(candidate["item_ids"]) == {
+        "office-shirt",
+        "office-pants",
+        "office-loafers",
+    }
+    assert {item.item_id for item in candidate["outfit"].items} == set(
+        candidate["item_ids"]
+    )
+    assert "office-loafers" in candidate["outfit"].item_ids
+    assert len(llm.calls) == 4
+
+
 def test_main_bootstrap_seeds_wardrobe_index_into_stylist_prompt() -> None:
     # Frozen #15: BootstrapContext seeds the Environment's pre-legacy facts into
     # the Execution State. Without them the Stylist prompt carries no wardrobe
