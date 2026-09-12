@@ -30,6 +30,11 @@ def test_execute_and_read_extended_task_over_http(
 ) -> None:
     database_path = db_dsn
     monkeypatch.setenv("STYLEFORGE_DATABASE_DSN", database_path)
+    # This test verifies the MCP-backed weather health contract, so it must not
+    # inherit service-disable flags from the surrounding CI environment.
+    monkeypatch.setenv("STYLEFORGE_WEATHER_ENABLED", "true")
+    monkeypatch.setenv("STYLEFORGE_MCP_ENABLED", "true")
+    monkeypatch.setenv("STYLEFORGE_MCP_WEATHER_ENABLED", "true")
     sys.modules.pop("styleforge.api", None)
     api = importlib.import_module("styleforge.api")
 
