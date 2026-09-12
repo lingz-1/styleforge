@@ -73,11 +73,12 @@ def make_critic_node(runtime: AgentRuntime):
             raise ContextLimitError(
                 f"context guard: {guard.status}: {'；'.join(guard.warnings)}"
             )
-        payload, _ = runtime.llm.chat_json(
-            system=guard.bundle.system_text,
-            user=guard.bundle.model_user_message,
-            json_schema=_CRITIC_SCHEMA,
-        )
+        with runtime.llm_scope(AGENT_CRITIC):
+            payload, _ = runtime.llm.chat_json(
+                system=guard.bundle.system_text,
+                user=guard.bundle.model_user_message,
+                json_schema=_CRITIC_SCHEMA,
+            )
         return {"critic_result": ReviewResult.model_validate(payload)}
 
     return critic_node

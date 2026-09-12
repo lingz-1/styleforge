@@ -64,6 +64,9 @@
               <div class="chat-bubble assistant" :class="{ failed: message.failed }">
                 <span v-if="message.failed" class="failed-tag">执行失败</span>{{ message.content }}
               </div>
+              <small v-if="message.durationMs !== null && message.durationMs !== undefined" class="turn-duration">
+                用时 {{ formatElapsedDuration(message.durationMs) }}
+              </small>
               <template v-if="message.payload && !message.failed">
                 <section
                   v-if="index === store.messages.length - 1 && hasTrace(message.payload)"
@@ -165,7 +168,7 @@ import { storeToRefs } from 'pinia'
 import WeatherCard from '../components/WeatherCard.vue'
 import TaskResultView from '../components/TaskResultView.vue'
 import { createChatSession, listChatSessions, deleteChatSession, getWardrobe, imageUrl } from '../services/api'
-import { requestedResultCount } from '../services/recommendation-request'
+import { formatElapsedDuration, requestedResultCount } from '../services/recommendation-request'
 import { useRecommendationStore } from '../stores/recommendation'
 import { getUserId, setUserId } from '../services/user'
 
@@ -552,6 +555,7 @@ h1 { margin: 0; max-width: 720px; font-family: Georgia, 'Noto Serif SC', serif; 
 .chat-bubble.assistant { align-self: flex-start; background: #f3f1ea; border: 1px solid #ddd7c8; color: #3f4a44; }
 .chat-bubble.assistant.failed { border-color: #d9a8a0; background: #faf0ee; color: #a53d36; }
 .failed-tag { display: inline-block; margin-right: 8px; padding: 1px 7px; border: 1px solid currentColor; border-radius: 999px; font-size: 11px; }
+.turn-duration { align-self: flex-start; margin-top: 5px; color: #89918c; font-size: 11px; }
 .chat-bubble.typing { color: #8a928d; font-style: italic; }
 .agent-rail { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid #d9ded9; }
 .agent-step { position: relative; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; min-height: 82px; padding: 14px 18px; border-right: 1px solid #d9ded9; background: #fbfcfa; }

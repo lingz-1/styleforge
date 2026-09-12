@@ -77,9 +77,12 @@ def test_execute_task_persists_user_and_assistant_messages(
 
     llm = FakeLlm(
         [
-            {"decision_summary": "识别为风格建议任务", "goal": "给出风格建议", "next_agent": "EXTENSION"},
-            {"decision_summary": "事实足够", "control": "READY"},
             {
+                "user_intent": {
+                    "message": "American Vintage 风格应该怎么穿？",
+                    "goal": "获得 American Vintage 风格建议",
+                    "requirements": [],
+                },
                 "status": "completed",
                 "summary": "用已有衬衫落实风格",
                 "result": {

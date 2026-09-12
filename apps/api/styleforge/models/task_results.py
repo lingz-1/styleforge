@@ -15,6 +15,20 @@ TaskStatus = Literal["completed", "infeasible", "needs_clarification"]
 class ExtensionResultModel(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_null_optional_fields(cls, value: Any) -> Any:
+        """Let declared defaults handle provider-emitted optional nulls.
+
+        JSON-mode models commonly include every property and use ``null`` for
+        optional strings/lists. Treating that as a hard schema failure causes
+        an unnecessary second LLM call even though omission has the exact
+        intended meaning.
+        """
+        if isinstance(value, dict):
+            return {key: item for key, item in value.items() if item is not None}
+        return value
+
 
 class OutfitReference(ExtensionResultModel):
     outfit_id: str

@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from styleforge.agentic.observations import (
     MAX_OBSERVATION_CHARS,
@@ -40,7 +40,7 @@ from styleforge.agentic.runtime.tool_runtime import (
     ToolCallResult,
     ToolContext,
 )
-from styleforge.models.agentic_contract import ModifyPlan, PlanState
+from styleforge.models.agentic_contract import ModifyPlan, PlanState, UserIntent
 
 # Agent names the local tools are catalogued under.
 AGENT_COORDINATOR = "coordinator"
@@ -105,6 +105,15 @@ class LoadSkillInput(BaseModel):
 
 
 class ModifyOutfitInput(BaseModel):
+    # The provider-facing schema requires semantic intent. The Python default
+    # keeps legacy/non-fast direct callers compatible; the fast workflow also
+    # enforces presence at execution time below.
+    model_config = ConfigDict(json_schema_extra={"required": ["intent", "plan"]})
+
+    intent: UserIntent | None = Field(
+        default=None,
+        description="对本轮用户需求的语义理解；普通修改任务必须与修改计划一并给出",
+    )
     plan: ModifyPlan = Field(description="修改计划（add/remove/replace）")
 
 
@@ -210,15 +219,32 @@ def _make_handlers(env: Any, knowledge_retriever: Any | None) -> _Wrappers:
                 observation="当前没有正在编辑的搭配（working_draft 为空），无法执行 modify_outfit",
                 status=STATUS_PRECONDITION_FAILED,
             )
+        fast_modify = bool(ctx.get("auto_submit_after_modify"))
+        if fast_modify and inp.intent is None:
+            return ToolCallResult(
+                observation=(
+                    "普通修改任务必须在 modify_outfit.intent 中同时给出对用户消息的"
+                    "语义理解（message/goal/requirements），然后再执行修改。"
+                )
+            )
+        if fast_modify and not inp.plan.ops:
+            return ToolCallResult(observation="修改计划不能为空，至少需要一个 add/remove/replace 操作。")
         next_draft, issues = env.modify_outfit(draft, inp.plan)
         if issues:
             return ToolCallResult(observation="修改未通过物理校验：" + "；".join(issues))
+        state_updates: dict[str, Any] = {"working_draft": next_draft}
+        if inp.intent is not None:
+            # The raw message is authoritative application input. The model
+            # owns goal/requirements but cannot rewrite what the user said.
+            state_updates["user_intent"] = inp.intent.model_copy(
+                update={"message": str(ctx.get("request") or inp.intent.message)}
+            )
         return ToolCallResult(
             observation=(
                 f"已应用修改，新搭配：{outfit_text(next_draft.outfit)}。"
                 "若此修改已满足用户目标，请直接提交，不要在已改好的单品上继续更换。"
             ),
-            state_updates={"working_draft": next_draft},
+            state_updates=state_updates,
         )
 
     def update_plan(inp: UpdatePlanInput, ctx: ToolContext) -> ToolCallResult:
@@ -314,7 +340,10 @@ def register_local_tools(
         ),
         ToolCapability(
             name="modify_outfit",
-            description="修改当前正在编辑的搭配（add/remove/replace，可一次多操作）",
+            description=(
+                "修改当前正在编辑的搭配（add/remove/replace，可一次多操作）；"
+                "普通修改任务需同时提交 intent，表达对用户目标和约束的语义理解"
+            ),
             input_model=ModifyOutfitInput,
             handler=h.modify_outfit,
             agents=frozenset({AGENT_STYLIST}),

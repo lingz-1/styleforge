@@ -57,6 +57,9 @@ _CANDIDATE_STATUS_DEGRADED = "DEGRADED_ACCEPTED"
 # candidate can drift into an unbounded "similar → rejected → retry" loop.
 # After this many consecutive rejections the gate accepts the physically-valid
 # candidate (flagged in gate_feedback) instead of looping forever.
+# Initial rejection permits one revision; the second rejection terminates the
+# loop via grounded recovery/degraded acceptance. This is "one revision", not
+# "one total critic rejection".
 MAX_CRITIC_RETRIES = 2
 
 
@@ -523,6 +526,15 @@ def _build_main_graph(
             return {}  # an earlier terminal node already set the status
         return {"status": "done" if state.get("enough_candidates") else "ended"}
 
+    def preflight_infeasible(state: StyleForgeState) -> dict[str, Any]:
+        """Terminate on physical insufficiency only after semantic interpretation."""
+        return {
+            "status": "infeasible",
+            "infeasible_reason": state.get("preflight_infeasible_reason")
+            or "physical_preflight_failed",
+            "candidates": [],
+        }
+
     # routing -------------------------------------------------------------
 
     def route_after_stylist(state: StyleForgeState) -> str:
@@ -552,6 +564,8 @@ def _build_main_graph(
             return "clarification"
         if handoff.status == "PROTOCOL_ERROR":
             return "end_node"
+        if state.get("preflight_infeasible_reason"):
+            return "preflight_infeasible"
         # COMPLETED — the Coordinator's product is the TaskState (frozen #5).
         task_state = state.get("task_state")
         next_agent = task_state.next_agent if task_state is not None else None
@@ -650,6 +664,8 @@ def _build_main_graph(
         if can_direct_close_extension(dict(state)):
             return "extension"
         task_type = str(state.get("task_type") or "")
+        if state.get("preflight_infeasible_reason"):
+            return "coordinator"
         if task_type == "outfit_modify":
             return "stylist"
         if task_type == "outfit_recommend":
@@ -675,6 +691,7 @@ def _build_main_graph(
     builder.add_node("recover_candidate", recover_grounded_candidate)
     builder.add_node("clarification", clarification_node)
     builder.add_node("end_node", end_node)
+    builder.add_node("preflight_infeasible", preflight_infeasible)
 
     if with_coordinator:
         builder.add_node("coordinator", build_coordinator_subgraph(runtime))
@@ -702,6 +719,7 @@ def _build_main_graph(
                 "extension": "extension",
                 "clarification": "clarification",
                 "end_node": "end_node",
+                "preflight_infeasible": "preflight_infeasible",
             },
         )
         builder.add_conditional_edges(

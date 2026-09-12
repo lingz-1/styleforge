@@ -6,16 +6,16 @@ to the harness, how a subgraph reports to its parent, and how the Coordinator
 maintains the task state. The shared Harness Protocol stays small; business
 Decision schemas are deliberately per-Agent (frozen #7).
 
-Nothing here is imported by the legacy request path yet.
+These contracts are used directly by the current Harness request path.
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from styleforge.models.agentic_contract import InteractionContext, PlanState
+from styleforge.models.agentic_contract import InteractionContext, PlanState, UserIntent
 
 
 class _LenientNulls(BaseModel):
@@ -73,8 +73,13 @@ class CoordinatorDecision(BaseModel):
       otherwise             → next_agent required, 0 tools, handoff
     """
 
+    model_config = ConfigDict(
+        json_schema_extra={"required": ["decision_summary", "goal", "intent"]}
+    )
+
     decision_summary: str  # observable summary; Trace records it, never hidden reasoning
     goal: str
+    intent: UserIntent | None = None
     next_agent: Literal["RESEARCH", "STYLIST", "EXTENSION"] | None = None
     need_plan_update: bool = False
     need_user: bool = False
@@ -87,8 +92,13 @@ class CoordinatorDecision(BaseModel):
 class ResearchDecision(BaseModel):
     """Research decides when it has investigated enough (frozen #6/#18)."""
 
+    model_config = ConfigDict(
+        json_schema_extra={"required": ["decision_summary", "control", "intent"]}
+    )
+
     decision_summary: str
     control: Literal["CONTINUE", "RESEARCH_COMPLETE", "NEED_USER"]
+    intent: UserIntent | None = None
     clarification: ClarificationRequest | None = None  # NEED_USER → required
     _empty_clarification = field_validator("clarification", mode="before")(
         staticmethod(_clarification_before)
@@ -98,8 +108,13 @@ class ResearchDecision(BaseModel):
 class StylistDecision(BaseModel):
     """Stylist decides when a candidate is ready (frozen #8)."""
 
+    model_config = ConfigDict(
+        json_schema_extra={"required": ["decision_summary", "control", "intent"]}
+    )
+
     decision_summary: str
     control: Literal["CONTINUE", "CANDIDATE_READY", "NEED_USER"]
+    intent: UserIntent | None = None
     clarification: ClarificationRequest | None = None  # NEED_USER → required
     _empty_clarification = field_validator("clarification", mode="before")(
         staticmethod(_clarification_before)
@@ -114,8 +129,13 @@ class ExtensionDecision(BaseModel):
     user (NEED_USER) — e.g. ITEM_ADVICE with an ambiguous anchor item.
     """
 
+    model_config = ConfigDict(
+        json_schema_extra={"required": ["decision_summary", "control", "intent"]}
+    )
+
     decision_summary: str
     control: Literal["CONTINUE", "READY", "NEED_USER"]
+    intent: UserIntent | None = None
     clarification: ClarificationRequest | None = None  # NEED_USER → required
     _empty_clarification = field_validator("clarification", mode="before")(
         staticmethod(_clarification_before)
@@ -292,6 +312,10 @@ class StyleForgeState(TypedDict, total=False):
     status: str
 
     environment_facts: Any  # EnvironmentFacts (runtime-shaped, kept for assembler)
+    user_intent: UserIntent | None  # Stylist-owned semantic interpretation
+    require_user_intent: bool  # workflow requests require one non-empty LLM interpretation
+    preflight_infeasible_reason: str  # physical preflight, evaluated after LLM semantics
+    auto_submit_after_modify: bool  # fast modify path: tool success enters the gates
     thread_context: dict[str, Any] | None
     recalled_memories: list[Any]
     loaded_skills: list[str]

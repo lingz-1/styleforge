@@ -65,6 +65,14 @@ def _workflow(database_path: str, llm: Any) -> MultiTaskWorkflow:
     )
 
 
+def _intent(task_input: TaskExecutionInput, goal: str) -> dict[str, Any]:
+    return {
+        "message": task_input.request,
+        "goal": goal,
+        "requirements": [],
+    }
+
+
 def _analyzed(database_path: str, task_input: TaskExecutionInput):
     """Deterministic facts the execute side will pre-compute for this input.
 
@@ -212,7 +220,16 @@ def test_style_advice_primary_end_to_end(db_dsn: str) -> None:
     assert route.task_type is TaskType.STYLE_ADVICE
     llm = FakeLlm(
         [
-            {"status": "completed", "summary": "风格建议", "result": _style_result(agent1)},
+            {
+                "user_intent": {
+                    "message": task_input.request,
+                    "goal": "获得简约耐看的日常风格建议",
+                    "requirements": ["简约", "耐看", "适合日常"],
+                },
+                "status": "completed",
+                "summary": "风格建议",
+                "result": _style_result(agent1),
+            },
             {"evidence": []},  # memory extraction (outside the harness proxy)
         ]
     )
@@ -230,10 +247,23 @@ def test_style_advice_primary_end_to_end(db_dsn: str) -> None:
     assert payload["agents"] == {"harness": "styleforge_harness"}
     assert payload["llm_call_count"] == 1  # complete facts route straight to closing
     assert payload["agentic_outcome"]["extension_result"]["status"] == "completed"
+    assert payload["agentic_outcome"]["user_intent"].requirements == [
+        "简约", "耐看", "适合日常",
+    ]
+    assert payload["semantic_intent"] == {
+        "message": task_input.request,
+        "goal": "获得简约耐看的日常风格建议",
+        "requirements": ["简约", "耐看", "适合日常"],
+    }
     assert "结果综合模式" in llm.calls[0]["system"]
     assert "禁止输出 control" in llm.calls[0]["system"]
-    assert "【本轮目标 JSON Schema】" in llm.calls[0]["user"]
-    assert '"principles"' in llm.calls[0]["user"]
+    assert "【输出 JSON Schema】" in llm.calls[0]["system"]
+    assert '"principles"' in llm.calls[0]["system"]
+    assert "<STYLEFORGE_RUNTIME_DATA" in llm.calls[0]["user"]
+    assert "<STYLEFORGE_USER_REQUEST" in llm.calls[0]["user"]
+    # Closing does not need the general ReAct/tool protocol or full wardrobe
+    # context. Keep this bound explicit so future prompt growth is visible.
+    assert len(llm.calls[0]["system"]) < 8_000
 
 
 def test_item_advice_primary_end_to_end(db_dsn: str) -> None:
@@ -248,7 +278,12 @@ def test_item_advice_primary_end_to_end(db_dsn: str) -> None:
     assert agent1.facts.get("anchor_item")  # deterministic anchor resolved from wardrobe
     llm = FakeLlm(
         [
-            {"status": "completed", "summary": "单品搭配建议", "result": _item_result(agent1)},
+            {
+                "user_intent": _intent(task_input, "获得黑色夹克的搭配建议"),
+                "status": "completed",
+                "summary": "单品搭配建议",
+                "result": _item_result(agent1),
+            },
             {"evidence": []},
         ]
     )
@@ -282,6 +317,7 @@ def test_item_advice_closing_uses_grounded_fallback_after_false_infeasible(
     assert agent1.facts.get("anchor_item")
     assert any((agent1.facts.get("compatible_items_by_slot") or {}).values())
     false_infeasible = {
+        "user_intent": _intent(task_input, "获得黑色夹克的搭配建议"),
         "status": "infeasible",
         "summary": "无法搭配",
         "result": {
@@ -314,6 +350,40 @@ def test_item_advice_closing_uses_grounded_fallback_after_false_infeasible(
     )
 
 
+def test_item_advice_repairs_missing_llm_intent_before_grounded_result(
+    db_dsn: str,
+) -> None:
+    database_path = _seed(db_dsn)
+    task_input = TaskExecutionInput(
+        user_id="u",
+        request="黑色夹克怎么搭配",
+        requested_task_type=TaskType.ITEM_ADVICE,
+    )
+    _, agent1 = _analyzed(database_path, task_input)
+    result = _item_result(agent1)
+    llm = FakeLlm(
+        [
+            {"status": "completed", "summary": "缺少意图", "result": result},
+            {
+                "user_intent": _intent(task_input, "获得黑色夹克的搭配建议"),
+                "status": "completed",
+                "summary": "单品搭配建议",
+                "result": result,
+            },
+            {"evidence": []},
+        ]
+    )
+
+    payload = _workflow(database_path, llm).execute(task_input)
+
+    assert payload["status"] == "completed"
+    assert payload["llm_call_count"] == 2
+    assert payload["semantic_intent"]["goal"] == "获得黑色夹克的搭配建议"
+    assert payload["agentic_outcome"]["extension_validation_failures"] == [
+        "missing_user_intent"
+    ]
+
+
 def test_wardrobe_compatibility_primary_end_to_end(db_dsn: str) -> None:
     database_path = _seed(db_dsn)
     task_input = TaskExecutionInput(
@@ -331,13 +401,19 @@ def test_wardrobe_compatibility_primary_end_to_end(db_dsn: str) -> None:
     route, agent1 = _analyzed(database_path, task_input)
     assert route.task_type is TaskType.WARDROBE_COMPATIBILITY
     draft = _compatibility_result(agent1)
+    draft["clarification_question"] = None
     draft["candidate_slot"] = "wrong-slot"
     draft["compatible_items_by_slot"] = {
         "one_piece": [{"item_id": "candidate-preview", "name": "transient"}]
     }
     llm = FakeLlm(
         [
-            {"status": "completed", "summary": "兼容性评估", "result": draft},
+            {
+                "user_intent": _intent(task_input, "评估棕色皮夹克与衣橱的兼容性"),
+                "status": "completed",
+                "summary": "兼容性评估",
+                "result": draft,
+            },
             {"evidence": []},
         ]
     )
@@ -376,7 +452,12 @@ def test_wardrobe_gap_primary_end_to_end(db_dsn: str) -> None:
     draft["slot_counts"] = {"hallucinated": 999}
     llm = FakeLlm(
         [
-            {"status": "completed", "summary": "衣橱缺口分析", "result": draft},
+            {
+                "user_intent": _intent(task_input, "分析衣橱缺失的风格单品"),
+                "status": "completed",
+                "summary": "衣橱缺口分析",
+                "result": draft,
+            },
             {"evidence": []},
         ]
     )
@@ -423,8 +504,8 @@ def test_formal_dinner_gap_has_deterministic_missing_elements(db_dsn: str) -> No
 
 def test_item_advice_unresolved_anchor_ships_clarification(db_dsn: str) -> None:
     # The deterministic facts flag needs_clarification (no resolvable anchor);
-    # the closing node ships the contract-shaped clarification deterministically
-    # — no extra LLM call for it.
+    # the closing node still performs the unified LLM semantic pass before its
+    # contract-shaped clarification fallback.
     database_path = _seed(db_dsn)
     task_input = TaskExecutionInput(
         user_id="u",
@@ -436,8 +517,23 @@ def test_item_advice_unresolved_anchor_ships_clarification(db_dsn: str) -> None:
     assert agent1.needs_clarification is True
     llm = FakeLlm(
         [
-            {"decision_summary": "识别为单品建议任务", "goal": "给出单品搭配建议", "next_agent": "EXTENSION"},
-            {"decision_summary": "需要澄清", "control": "READY"},
+            {
+                "decision_summary": "识别为单品建议任务",
+                "goal": "给出单品搭配建议",
+                "intent": _intent(task_input, "给出单品搭配建议"),
+                "next_agent": "EXTENSION",
+            },
+            {
+                "decision_summary": "需要澄清",
+                "control": "READY",
+                "intent": _intent(task_input, "给出单品搭配建议"),
+            },
+            {
+                "user_intent": _intent(task_input, "给出单品搭配建议"),
+                "status": "needs_clarification",
+                "summary": "需要确认单品",
+                "result": {},
+            },
             {"evidence": []},
         ]
     )
@@ -449,9 +545,8 @@ def test_item_advice_unresolved_anchor_ships_clarification(db_dsn: str) -> None:
     assert payload["result"]["status"] == "needs_clarification"
     assert payload["result"]["clarification_question"]
     assert payload["agentic_outcome"]["extension_result"]["status"] == "needs_clarification"
-    # coordinator + extension(READY) only — the clarification draft is
-    # deterministic, no closing chat_json call.
-    assert payload["llm_call_count"] == 2
+    # coordinator + extension(READY) + semantic closing pass.
+    assert payload["llm_call_count"] == 3
 
 
 def test_extension_without_llm_raises(db_dsn: str) -> None:

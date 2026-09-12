@@ -45,9 +45,12 @@ def test_execute_and_read_extended_task_over_http(
 
     llm = FakeLlm(
         [
-            {"decision_summary": "识别为风格建议任务", "goal": "给出风格建议", "next_agent": "EXTENSION"},
-            {"decision_summary": "事实足够", "control": "READY"},
             {
+                "user_intent": {
+                    "message": "American Vintage 风格应该怎么穿？",
+                    "goal": "获得 American Vintage 风格建议",
+                    "requirements": [],
+                },
                 "status": "completed",
                 "summary": "用已有衬衫和牛仔裤落实风格",
                 "result": {
@@ -124,8 +127,9 @@ def test_execute_and_read_extended_task_over_http(
         assert payload["status"] == "completed"
         assert payload["selected_subgraph"] == "agentic_harness"
         assert payload["result"]["evidence"]
-        # coordinator + extension(READY) + closing = 3 (memory extraction excluded).
-        assert payload["llm_call_count"] == 3
+        # Complete deterministic facts route directly to one semantic closing call.
+        assert payload["llm_call_count"] == 1
+        assert payload["semantic_intent"]["goal"] == "获得 American Vintage 风格建议"
 
         stored = client.get(f"/tasks/api-user/{payload['run_id']}")
         assert stored.status_code == 200

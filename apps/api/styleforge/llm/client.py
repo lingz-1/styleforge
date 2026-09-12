@@ -35,6 +35,7 @@ class LlmCallDiagnostics:
     prompt_tokens: int
     completion_tokens: int
     retries: int
+    provider_attempts: int = 1
     degraded_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -45,6 +46,7 @@ class LlmCallDiagnostics:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "retries": self.retries,
+            "provider_attempts": self.provider_attempts,
             "degraded_reason": self.degraded_reason,
         }
 
@@ -187,8 +189,10 @@ class DeepSeekClient:
         raw = ""
         parse_failed = ""
         schema_failed = ""
+        provider_attempts = 0
         while attempts <= self.max_retries:
             attempts += 1
+            provider_attempts += 1
             user_payload = user
             if parse_failed:
                 user_payload = (
@@ -201,7 +205,10 @@ class DeepSeekClient:
                     f"校验错误：{schema_failed}"
                 )
             try:
-                raw = self._request_chat(system, user_payload, temperature)
+                raw, fallback_attempts, degraded_reason = self._request_chat(
+                    system, user_payload, temperature
+                )
+                provider_attempts += fallback_attempts
                 try:
                     parsed = json.loads(raw)
                 except (json.JSONDecodeError, TypeError) as error:
@@ -221,6 +228,8 @@ class DeepSeekClient:
                     prompt_tokens=0,
                     completion_tokens=0,
                     retries=attempts - 1,
+                    provider_attempts=provider_attempts,
+                    degraded_reason=degraded_reason,
                 )
             except LlmInvalidJson:
                 raise
@@ -260,15 +269,18 @@ class DeepSeekClient:
         attempts = 0
         parse_failed = ""
         degraded_reason = ""
+        provider_attempts = 0
         while attempts <= self.max_retries:
             attempts += 1
+            provider_attempts += 1
             user_payload = user
             if parse_failed:
                 user_payload = f"{user}\n\n上次输出未通过解析，请修正。{parse_failed}"
             try:
-                content, tool_calls, degraded_reason = self._request_tools(
+                content, tool_calls, degraded_reason, fallback_attempts = self._request_tools(
                     system, user_payload, tools, tool_choice, temperature
                 )
+                provider_attempts += fallback_attempts
             except LlmInvalidJson:
                 raise
             except LlmSchemaViolation:
@@ -323,6 +335,7 @@ class DeepSeekClient:
                 prompt_tokens=0,
                 completion_tokens=0,
                 retries=attempts - 1,
+                provider_attempts=provider_attempts,
                 degraded_reason=degraded_reason,
             )
         raise LlmUnavailable("provider tool-call request failed before returning a result")
@@ -334,7 +347,7 @@ class DeepSeekClient:
         tools: list[ToolDefinition],
         tool_choice: str,
         temperature: float,
-    ) -> tuple[str | None, list[Any] | None, str]:
+    ) -> tuple[str | None, list[Any] | None, str, int]:
         """One provider round-trip with native ``tools``, degrading gracefully.
 
         Providers without tool-calling support are retried as a plain
@@ -349,6 +362,7 @@ class DeepSeekClient:
         ]
         openai_tools = [tool.to_openai_dict() for tool in tools]
         degraded = ""
+        fallback_attempts = 0
         try:
             response = client.chat.completions.create(
                 model=self.model,
@@ -367,20 +381,25 @@ class DeepSeekClient:
                 messages=messages,
                 temperature=temperature,
             )
+            fallback_attempts = 1
             degraded = f"tools unsupported: {type(error).__name__}"
         message = response.choices[0].message
         content = _attr(message, "content")
         tool_calls = _attr(message, "tool_calls")
         if content is None and not tool_calls:
             raise LlmUnavailable("provider returned empty completion content")
-        return content, tool_calls, degraded
+        return content, tool_calls, degraded, fallback_attempts
 
-    def _request_chat(self, system: str, user: str, temperature: float) -> str:
+    def _request_chat(
+        self, system: str, user: str, temperature: float
+    ) -> tuple[str, int, str]:
         client = self._get_client()
         messages: list[dict[str, str]] = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
+        fallback_attempts = 0
+        degraded_reason = ""
         try:
             response = client.chat.completions.create(
                 model=self.model,
@@ -398,12 +417,14 @@ class DeepSeekClient:
                     messages=messages,
                     temperature=temperature,
                 )
+                fallback_attempts = 1
+                degraded_reason = f"json mode unsupported: {type(error).__name__}"
                 content = response.choices[0].message.content
             else:
                 raise
         if content is None:
             raise LlmUnavailable("provider returned empty completion content")
-        return content
+        return content, fallback_attempts, degraded_reason
 
 
 def client_factory_from_settings(settings: Settings) -> DeepSeekClient | None:

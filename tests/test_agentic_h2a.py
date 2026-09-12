@@ -254,7 +254,16 @@ def test_h2a_plan_update_then_handoff_then_stylist() -> None:
     llm = FakeLlm(
         [
             (
-                {"decision_summary": "先计划", "goal": "看剧穿搭", "need_plan_update": True},
+                {
+                    "decision_summary": "先计划",
+                    "goal": "看剧穿搭",
+                    "intent": {
+                        "message": "下周看剧穿什么",
+                        "goal": "为下周看剧准备合适穿搭",
+                        "requirements": ["结合演出场景和时间"],
+                    },
+                    "need_plan_update": True,
+                },
                 [_UPDATE_PLAN],
             ),
             {"decision_summary": "交接", "goal": "看剧穿搭", "next_agent": "STYLIST"},
@@ -268,11 +277,14 @@ def test_h2a_plan_update_then_handoff_then_stylist() -> None:
 
     assert out["status"] == "done"
     assert out["plan"].objective == "下周看剧穿搭"
+    assert out["user_intent"].goal == "为下周看剧准备合适穿搭"
     assert len(out["candidates"]) == 1
     # The plan survives the subgraph boundary and is re-assembled into the
     # Dynamic plan data is visible to the Stylist but never elevated to system.
     assert "下周看剧穿搭" not in llm.calls[2]["system"]
     assert "下周看剧穿搭" in llm.calls[2]["user"]
+    assert "【统一语义理解】" in llm.calls[2]["user"]
+    assert "结合演出场景和时间" in llm.calls[2]["user"]
 
 
 def test_h2a_harness_invoke_assembles_and_runs() -> None:

@@ -27,9 +27,16 @@
 {
   "decision_summary": "本回合做了什么（一句话）",
   "control": "CONTINUE | READY | NEED_USER",
+  "intent": {
+    "message": "用户原话",
+    "goal": "本扩展任务真正要解决的问题",
+    "requirements": ["对象、范围、偏好和输出约束"]
+  },
   "clarification": {"question": "...", "reason": "..."}
 }
 ```
+
+`intent` 每次必须给出。四类扩展任务都先由本次 LLM 调用理解用户语义，再把确定性分析事实当作证据使用；事实层不能替代语义判断。结果综合节点会继续携带该意图。
 
 控制信号：
 

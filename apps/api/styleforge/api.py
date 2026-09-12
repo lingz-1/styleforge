@@ -637,6 +637,7 @@ def get_multi_task_workflow() -> MultiTaskWorkflow:
         # H3a-3 grounding: the global default city (used when neither device nor
         # profile pins the user's location) mirrors the legacy weather gate.
         default_location=settings.weather_default_location,
+        defer_memory_extraction=True,
     )
 
 

@@ -1,4 +1,4 @@
-"""StyleForgeHarness: the assembled Multi-Agent Harness (H2a scope).
+"""StyleForgeHarness: the assembled Multi-Agent Harness.
 
 One object owns the harness wiring:
     CapabilityRegistry(+ 8 local tools) → AgentRuntime (Visibility/Assembler/
@@ -6,9 +6,8 @@ One object owns the harness wiring:
     chain + Clarification).
 
 Runtime Dependencies (llm, environment, providers) are captured here — never in
-the serializable Execution State (frozen #2). ``invoke(state)`` is the single
-entry point; H2c wires it from the request path. AgentLoop stays as a legacy
-adapter until the request path fully switches.
+the serializable Execution State. ``invoke(state)`` is the single Agent runtime
+entry point used by the current ``MultiTaskWorkflow`` request path.
 """
 
 from __future__ import annotations
@@ -47,8 +46,8 @@ class StyleForgeHarness:
         agent_instruction_versions: dict[str, str] | None = None,
         knowledge_retriever: Any | None = None,
         target_candidates: int = 3,
-        # H3a-4: layered PreferenceRetriever; default None keeps the legacy
-        # ``recalled_memories`` fallback for non-workflow callers (shadow).
+        # Layered PreferenceRetriever; default None keeps the compact
+        # ``recalled_memories`` fallback for direct test/integration callers.
         memory_retriever: Any | None = None,
     ) -> None:
         self.registry = CapabilityRegistry()
@@ -76,6 +75,11 @@ class StyleForgeHarness:
     def model_calls(self) -> int:
         """Total LLM calls this harness has spent across all invokes."""
         return self.runtime.model_calls
+
+    @property
+    def llm_usage(self) -> dict[str, Any]:
+        """Detailed foreground LLM usage for this harness invocation."""
+        return self.runtime.llm_usage
 
     def invoke(self, state: StyleForgeState) -> dict[str, Any]:
         """Run the compiled Main Graph over one execution state."""

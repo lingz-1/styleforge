@@ -29,6 +29,24 @@ export const useRecommendationStore = defineStore('recommendation', () => {
     return typeof text === 'string' ? text : JSON.stringify(text)
   }
 
+  function elapsedMsSince(startedAt) {
+    const durationMs = Math.max(0, Date.now() - startedAt)
+    elapsedSeconds.value = Math.ceil(durationMs / 1000)
+    return durationMs
+  }
+
+  function persistedDurationMs(source, assistantIndex) {
+    const completedAt = Date.parse(source[assistantIndex]?.created_at || '')
+    if (!Number.isFinite(completedAt)) return null
+    for (let index = assistantIndex - 1; index >= 0; index -= 1) {
+      if (source[index]?.role !== 'user') continue
+      const startedAt = Date.parse(source[index]?.created_at || '')
+      const durationMs = completedAt - startedAt
+      return Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : null
+    }
+    return null
+  }
+
   async function run(userId, request, maxResults = 3, locationContext = null, sid = '', opts = {}) {
     if (loading.value) return // already generating
     loading.value = true
@@ -70,6 +88,7 @@ export const useRecommendationStore = defineStore('recommendation', () => {
           content: assistantSummary(res.data),
           payload: res.data,
           messageId: res.data.message_id || '',
+          durationMs: elapsedMsSince(startedAt),
         })
       }
     } catch (e) {
@@ -96,6 +115,7 @@ export const useRecommendationStore = defineStore('recommendation', () => {
             payload: failed ? null : result,
             failed,
             messageId: recovered.message_id || '',
+            durationMs: elapsedMsSince(startedAt),
           })
         } else if (requestKey === key) {
           error.value = e.response?.data?.detail || e.message
@@ -103,12 +123,14 @@ export const useRecommendationStore = defineStore('recommendation', () => {
             role: 'assistant',
             content: error.value,
             failed: true,
+            durationMs: elapsedMsSince(startedAt),
           })
         }
       }
     } finally {
       clearInterval(elapsedTimer)
       if (requestKey === key) {
+        elapsedSeconds.value = Math.ceil((Date.now() - startedAt) / 1000)
         loading.value = false
         progressStage.value = ''
       }
@@ -122,7 +144,8 @@ export const useRecommendationStore = defineStore('recommendation', () => {
     payload.value = null
     error.value = ''
     const res = await getChatSession(userId, session.session_id)
-    messages.value = (res.data.messages || []).map((message) => {
+    const source = res.data.messages || []
+    messages.value = source.map((message, index) => {
       if (message.role === 'user') {
         return { role: 'user', content: message.content, messageId: message.message_id }
       }
@@ -133,6 +156,7 @@ export const useRecommendationStore = defineStore('recommendation', () => {
           content: result.error || message.content,
           failed: true,
           messageId: message.message_id,
+          durationMs: persistedDurationMs(source, index),
         }
       }
       return {
@@ -140,6 +164,7 @@ export const useRecommendationStore = defineStore('recommendation', () => {
         content: message.content,
         payload: message.result,
         messageId: message.message_id,
+        durationMs: persistedDurationMs(source, index),
       }
     })
   }

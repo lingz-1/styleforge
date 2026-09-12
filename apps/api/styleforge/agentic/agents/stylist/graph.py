@@ -22,6 +22,7 @@ from langgraph.graph import END, START, StateGraph
 
 from styleforge.agentic.agentic_contract import AgentHandoffResult, StylistDecision
 from styleforge.agentic.runtime.agent_runtime import AgentRuntime, ContextLimitError
+from styleforge.core.categories import infer_slot
 
 # Step hard cap (safety, mirrors the legacy LoopConfig.max_steps). On exceed the
 # subgraph returns PROTOCOL_ERROR as the harness-internal "did not produce" stop;
@@ -62,10 +63,13 @@ class StylistState(TypedDict, total=False):
 
     # context sources (input from the Main Graph, read-only inside the subgraph)
     request: str
+    task_type: str
     goal: str
     plan: Any
     task_state: Any
     environment_facts: Any
+    user_intent: Any
+    auto_submit_after_modify: bool
     research_evidence: Any
     candidates: list[Any]
     thread_context: dict | None
@@ -119,6 +123,14 @@ def build_stylist_subgraph(runtime: AgentRuntime):
         if outfit is None:
             return False
         return bool(getattr(outfit, "item_ids", None))
+
+    def _draft_is_complete_outfit(draft: Any) -> bool:
+        outfit = getattr(draft, "outfit", None)
+        items = getattr(outfit, "items", None) or []
+        slots = {infer_slot(str(getattr(item, "item_type", ""))) for item in items}
+        return "footwear" in slots and (
+            "one_piece" in slots or {"top", "bottom"} <= slots
+        )
 
     def stylist_agent(state: StylistState) -> dict[str, Any]:
         # Step-cap force-submit (real-model "piacon" failure): a fresh candidate
@@ -214,6 +226,16 @@ def build_stylist_subgraph(runtime: AgentRuntime):
             }
 
         trace = state.get("trace", []) + [result.trace]
+        decision: StylistDecision = result.decision
+        intent_update = (
+            {
+                "user_intent": decision.intent.model_copy(
+                    update={"message": str(state.get("request") or decision.intent.message)}
+                )
+            }
+            if decision.intent is not None
+            else {}
+        )
         # A valid turn resets the protocol-error budget (frozen #21: re-entry
         # after a protocol error ≤ 1 — i.e. no MORE THAN ONE in a row, not "one
         # per candidate run"). A real model may lapse into prose once mid-run
@@ -223,6 +245,7 @@ def build_stylist_subgraph(runtime: AgentRuntime):
             # CONTINUE with one or more parallel tool calls — all executed in
             # order (e.g. search_wardrobe + inspect_outfit in one model turn).
             return {
+                **intent_update,
                 "pending_tools": [
                     {"name": item.name, "arguments": item.arguments} for item in result.tool_uses
                 ],
@@ -230,9 +253,9 @@ def build_stylist_subgraph(runtime: AgentRuntime):
                 "trajectory_protocol_errors": 0,
             }
 
-        decision: StylistDecision = result.decision
         if decision.control == "NEED_USER":
             return {
+                **intent_update,
                 "handoff_result": AgentHandoffResult(
                     status="NEEDS_CLARIFICATION",
                     clarification=decision.clarification,
@@ -245,6 +268,7 @@ def build_stylist_subgraph(runtime: AgentRuntime):
         # CANDIDATE_READY — the working draft IS the candidate; the parent
         # validates and persists it. We never call a tool on this turn.
         return {
+            **intent_update,
             "handoff_result": AgentHandoffResult(
                 status="COMPLETED",
                 trace_summary=_trace_summary(trace),
@@ -291,6 +315,22 @@ def build_stylist_subgraph(runtime: AgentRuntime):
             new_outfit = getattr(new_draft, "outfit", None) if new_draft is not None else None
             if new_outfit is not None and getattr(new_outfit, "item_ids", None):
                 updates["stylist_has_built"] = True
+                # A normal modification is complete as soon as the Stylist's
+                # semantic intent and mutation have both been accepted by the
+                # tool. Enter the Environment Gate and Critic immediately;
+                # their rejection still starts the existing bounded replan
+                # loop, so this removes only the redundant "ready" model turn.
+                can_auto_submit = (
+                    state.get("task_type") != "outfit_recommend"
+                    or _draft_is_complete_outfit(new_draft)
+                )
+                if (
+                    state.get("auto_submit_after_modify")
+                    and not remaining
+                    and can_auto_submit
+                ):
+                    trace = state.get("trace", [])
+                    updates.update(_envelope("COMPLETED", trace))
         return updates
 
     def _route(state: StylistState) -> str:
@@ -311,7 +351,11 @@ def build_stylist_subgraph(runtime: AgentRuntime):
         _route,
         {"tool_step": "tool_step", "stylist_agent": "stylist_agent", END: END},
     )
-    builder.add_edge("tool_step", "stylist_agent")
+    builder.add_conditional_edges(
+        "tool_step",
+        _route,
+        {"tool_step": "tool_step", "stylist_agent": "stylist_agent", END: END},
+    )
     return builder.compile()
 
 

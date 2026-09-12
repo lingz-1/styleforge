@@ -82,7 +82,14 @@ def _add_plan(*item_ids: str) -> dict[str, Any]:
                 "placement": {"region": region, "layer": layer},
             }
         )
-    return {"plan": {"ops": ops, "reasoning": "组合完整搭配"}}
+    return {
+        "intent": {
+            "message": "推荐穿搭",
+            "goal": "从现有衣橱组合完整穿搭",
+            "requirements": ["只使用衣橱中的真实单品"],
+        },
+        "plan": {"ops": ops, "reasoning": "组合完整搭配"},
+    }
 
 
 def _replace_plan(item_id: str, replacement_item_id: str) -> dict[str, Any]:
@@ -123,21 +130,24 @@ def _recommend_block(
     item_ids: list[str],
     feedback: str = "方案合理",
 ) -> list[Any]:
-    """One recommend round: Coordinator -> STYLIST + three candidate cycles.
+    """One recommend round: three fast Stylist + Critic candidate cycles.
 
     The Main-Graph goal gate demands three candidates (``target_candidates=3``
     in ``_run_agentic_recommend``); all three are scripted to the same item set
     so a later "modify all three" can share one tool call per target.
     """
-    block: list[Any] = [
-        {"decision_summary": "识别为搭配推荐", "goal": goal, "next_agent": "STYLIST"},
-    ]
-    tool = {"name": "modify_outfit", "arguments": _add_plan(*item_ids)}
+    block: list[Any] = []
+    arguments = _add_plan(*item_ids)
+    arguments["intent"] = {
+        "message": goal,
+        "goal": goal,
+        "requirements": ["只使用衣橱中的真实单品"],
+    }
+    tool = {"name": "modify_outfit", "arguments": arguments}
     for _ in range(3):
         block.extend(
             [
                 ({"decision_summary": "组合候选", "control": "CONTINUE"}, [tool]),
-                {"decision_summary": "完成", "control": "CANDIDATE_READY"},
                 {**_APPROVE, "feedback": feedback},
             ]
         )
@@ -149,14 +159,20 @@ def _modify_block(
     tool_args: dict[str, Any],
     feedback: str = "已按你的要求调整搭配",
 ) -> list[Any]:
-    """One Harness run for ONE modify target: coordinator + stylist + critic."""
+    """One fast Harness run for one target: Stylist semantic/action + Critic."""
+    arguments = {
+        **tool_args,
+        "intent": {
+            "message": goal,
+            "goal": goal,
+            "requirements": ["保留未明确要求修改的单品", goal],
+        },
+    }
     return [
-        {"decision_summary": "调整搭配", "goal": goal, "next_agent": "STYLIST"},
         (
             {"decision_summary": "执行调整", "control": "CONTINUE"},
-            [{"name": "modify_outfit", "arguments": tool_args}],
+            [{"name": "modify_outfit", "arguments": arguments}],
         ),
-        {"decision_summary": "完成", "control": "CANDIDATE_READY"},
         {**_APPROVE, "feedback": feedback},
     ]
 
@@ -216,7 +232,7 @@ def test_session_multiturn_reuses_outfit_context(db_dsn: str) -> None:
     )
     assert payload1["task_type"] == "outfit_recommend"
     assert payload1["status"] == "completed"
-    assert payload1["llm_call_count"] == 10  # coordinator + 3×(stylist×2 + critic)
+    assert payload1["llm_call_count"] == 6  # 3 × (stylist semantic/action + critic)
     with database_session(database_path) as connection:
         memories = list_preferences(connection, "u")
     assert [(m["dimension"], m["attribute"], m["value"]) for m in memories] == [
@@ -234,7 +250,7 @@ def test_session_multiturn_reuses_outfit_context(db_dsn: str) -> None:
     )
     assert payload2["task_type"] == "outfit_modify"
     assert payload2["status"] == "completed"
-    assert payload2["llm_call_count"] == 12  # 3 targets × (coordinator + stylist×2 + critic)
+    assert payload2["llm_call_count"] == 6  # 3 targets × (stylist semantic/action + critic)
     assert payload2["result"]["target_slot"] == "outerwear"
     assert len(payload2["result"]["alternatives"]) == 3  # modify all three
     alternative = payload2["result"]["alternatives"][0]

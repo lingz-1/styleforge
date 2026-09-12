@@ -338,7 +338,8 @@ stage_candidate → goal_gate ─ enough? ─┬─ 是 → end_node(done)
 
 ## 10. 测试与验证
 
-- `tests/` 全量回归 **785 用例全绿**；`tests/llm/fake_llm.py` 脚本化 Fake 支撑无网络测试（dict /
+- `tests/` 提供全量回归门禁，具体用例数以当前 `pytest --collect-only` 和 CI 结果为准；2026-09-12
+  本地 PostgreSQL 隔离运行 **842/842 passed**。`tests/llm/fake_llm.py` 脚本化 Fake 支撑无网络测试（dict /
   tuple(decision, tool_specs) / exception 顺序消费同一脚本）。
 - 无 legacy 模式开关，全部测试默认跑 Harness 主链。
 - 专项：`test_agentic_modify_primary.py`（主修改链端到端）、`test_agentic_recommend_primary.py`、

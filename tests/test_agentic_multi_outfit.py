@@ -198,6 +198,11 @@ def test_modify_context_keeps_alternatives() -> None:
 _MODIFY_TO_SNEAKERS = {
     "name": "modify_outfit",
     "arguments": {
+        "intent": {
+            "message": "太正式了,休闲一点",
+            "goal": "让当前搭配更休闲",
+            "requirements": ["保留未被替换的单品", "降低正式感"],
+        },
         "plan": {
             "ops": [
                 {
@@ -214,6 +219,11 @@ _MODIFY_TO_SNEAKERS = {
 _MODIFY_TO_SHOES = {
     "name": "modify_outfit",
     "arguments": {
+        "intent": {
+            "message": "太正式了,休闲一点",
+            "goal": "按用户要求调整当前搭配",
+            "requirements": ["保留未被替换的单品"],
+        },
         "plan": {
             "ops": [
                 {
@@ -235,14 +245,10 @@ def test_execute_multi_targets_runs_one_harness_per_candidate(db_dsn: str) -> No
     llm = FakeLlm(
         [
             # target outfit-a: shoes-1 → sneakers-1
-            {"decision_summary": "换鞋", "goal": "改休闲", "next_agent": "STYLIST"},
             ({"decision_summary": "换运动鞋", "control": "CONTINUE"}, [_MODIFY_TO_SNEAKERS]),
-            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
             {"approved": True, "issues": [], "feedback": "已按要求修改"},  # critic a
             # target outfit-b: sneakers-1 → shoes-1
-            {"decision_summary": "换鞋", "goal": "改休闲", "next_agent": "STYLIST"},
             ({"decision_summary": "换皮鞋", "control": "CONTINUE"}, [_MODIFY_TO_SHOES]),
-            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
             {"approved": True, "issues": [], "feedback": "已按要求修改"},  # critic b
             {"evidence": []},  # memory extraction
         ]
@@ -272,8 +278,8 @@ def test_execute_multi_targets_runs_one_harness_per_candidate(db_dsn: str) -> No
     assert result["alternatives"][1]["item_ids"] == [
         "top-1", "bottom-1", "coat-1", "shoes-1",
     ]
-    # Two harnesses × (coordinator + stylist×2 + critic) = 8.
-    assert payload["llm_call_count"] == 8
+    # Two harnesses × (one Stylist semantic/action turn + one Critic) = 4.
+    assert payload["llm_call_count"] == 4
     # Multi-target batch rides agentic_outcome as a list — one outcome per target.
     assert isinstance(payload["agentic_outcome"], list)
     assert [o["status"] for o in payload["agentic_outcome"]] == ["done", "done"]
@@ -296,9 +302,7 @@ def test_execute_explicit_outfit_keeps_single_target(db_dsn: str, stored_only: b
     _seed(db_dsn)
     llm = FakeLlm(
         [
-            {"decision_summary": "换鞋", "goal": "改休闲", "next_agent": "STYLIST"},
             ({"decision_summary": "换运动鞋", "control": "CONTINUE"}, [_MODIFY_TO_SNEAKERS]),
-            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
             {"approved": True, "issues": [], "feedback": "已按要求修改"},
             {"evidence": []},
         ]
@@ -325,6 +329,6 @@ def test_execute_explicit_outfit_keeps_single_target(db_dsn: str, stored_only: b
     assert payload["status"] == "completed"
     assert len(payload["result"]["alternatives"]) == 1
     assert payload["result"]["alternatives"][0]["outfit_id"].startswith("outfit-1-mod-")
-    assert payload["llm_call_count"] == 4
+    assert payload["llm_call_count"] == 2
     assert payload["result"]["replaced_item_ids"] == ["shoes-1"]
     assert set(payload["result"]["locked_item_ids"]) == {"top-1", "bottom-1", "coat-1"}

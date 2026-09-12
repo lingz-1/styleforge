@@ -1,9 +1,8 @@
-"""Agentic loop (Stage 2 minimal): Semantic Agent + Deterministic Environment.
+"""Current Multi-Agent Harness package.
 
-The three-layer boundary in code:
-  - ``agent.py``      Semantic Agent — understands the user, decides, replans.
-  - ``environment.py`` Deterministic Environment — facts, execution, legality.
-  - ``reviewer.py``   Semantic Reviewer — intent fidelity + quality gate.
-  - ``structure.py``  the physical ontology (region × layer × occupancy).
-  - ``shadow.py``     ShadowRunner — runs alongside legacy, never commits.
+``harness.py`` is the assembly entry point. ``graph/`` owns the parent
+LangGraph, ``agents/`` contains the Coordinator/Research/Stylist/Critic and
+Extension subgraphs, ``runtime/`` enforces tool and prompt boundaries, and the
+deterministic ``environment.py``/``gates.py`` modules own physical legality.
+There is no shadow or legacy execution path in this package.
 """

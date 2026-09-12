@@ -19,7 +19,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Any, Callable, Type
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Callable, Iterator, Type
 
 from pydantic import BaseModel, ValidationError
 
@@ -47,6 +49,9 @@ class ContextLimitError(RuntimeError):
     """The ContextGuard refused the model call (CONTEXT_LIMIT) — never faked."""
 
 
+_ACTIVE_LLM_AGENT: ContextVar[str] = ContextVar("styleforge_active_llm_agent", default="unknown")
+
+
 class _CountingLlm:
     """Transparent LLM wrapper that counts every model call.
 
@@ -57,32 +62,41 @@ class _CountingLlm:
     through to the wrapped client, so fakes keep recording ``calls`` verbatim.
     """
 
-    def __init__(self, inner: Any, bump: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        inner: Any,
+        begin: Callable[[str, str], None],
+        finish: Callable[[str, str, float, Any | None, Exception | None], None],
+    ) -> None:
         self._inner = inner
-        self._bump = bump
+        self._begin = begin
+        self._finish = finish
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
     def chat_tools(self, *args: Any, **kwargs: Any) -> Any:
-        self._bump()
         return self._observed("chat_tools", self._inner.chat_tools, *args, **kwargs)
 
     def chat_json(self, *args: Any, **kwargs: Any) -> Any:
-        self._bump()
         return self._observed("chat_json", self._inner.chat_json, *args, **kwargs)
 
-    @staticmethod
-    def _observed(operation: str, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    def _observed(
+        self, operation: str, callback: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
+        agent = _ACTIVE_LLM_AGENT.get()
+        self._begin(operation, agent)
         started_at = perf_counter()
         try:
             outcome = callback(*args, **kwargs)
         except Exception as error:
+            duration_ms = (perf_counter() - started_at) * 1000.0
+            self._finish(operation, agent, duration_ms, None, error)
             retryable = isinstance(error, (LlmUnavailable, TimeoutError, ConnectionError))
             observability.record_operation(
                 "llm_call",
                 success=False,
-                duration_ms=(perf_counter() - started_at) * 1000.0,
+                duration_ms=duration_ms,
                 retryable=retryable,
                 error_code=ErrorCode.LLM_UNAVAILABLE.value,
                 component="llm",
@@ -91,10 +105,12 @@ class _CountingLlm:
             )
             raise
         diagnostics = outcome[-1] if isinstance(outcome, tuple) and outcome else None
+        duration_ms = (perf_counter() - started_at) * 1000.0
+        self._finish(operation, agent, duration_ms, diagnostics, None)
         observability.record_operation(
             "llm_call",
             success=True,
-            duration_ms=(perf_counter() - started_at) * 1000.0,
+            duration_ms=duration_ms,
             retries=int(getattr(diagnostics, "retries", 0) or 0),
             degraded=bool(getattr(diagnostics, "degraded_reason", "")),
             component="llm",
@@ -162,7 +178,12 @@ class AgentRuntime:
         # Every chat_tools / chat_json call (incl. Critic + Evidence Synthesizer,
         # which reach ``self.llm`` directly) bumps this counter.
         self.model_calls = 0
-        self.llm = _CountingLlm(llm, self._bump_model_calls)
+        self.provider_attempts = 0
+        self.provider_retries = 0
+        self.llm_latency_ms = 0.0
+        self.llm_calls_by_agent: dict[str, int] = {}
+        self.llm_calls_by_method: dict[str, int] = {}
+        self.llm = _CountingLlm(llm, self._begin_model_call, self._finish_model_call)
         self.registry = registry
         self.runtime_capabilities = runtime_capabilities
         self.hooks = hooks
@@ -175,8 +196,49 @@ class AgentRuntime:
         self.guard = guard or ContextGuard()
         self.tool_runtime = ToolRuntime(registry, hooks)
 
-    def _bump_model_calls(self) -> None:
+    def _begin_model_call(self, method: str, agent: str) -> None:
         self.model_calls += 1
+        self.llm_calls_by_agent[agent] = self.llm_calls_by_agent.get(agent, 0) + 1
+        self.llm_calls_by_method[method] = self.llm_calls_by_method.get(method, 0) + 1
+
+    def _finish_model_call(
+        self,
+        _method: str,
+        _agent: str,
+        duration_ms: float,
+        diagnostics: Any | None,
+        _error: Exception | None,
+    ) -> None:
+        self.llm_latency_ms += duration_ms
+        if diagnostics is None:
+            self.provider_attempts += 1
+            return
+        retries = int(getattr(diagnostics, "retries", 0) or 0)
+        self.provider_retries += retries
+        self.provider_attempts += int(
+            getattr(diagnostics, "provider_attempts", 1 + retries) or (1 + retries)
+        )
+
+    @contextmanager
+    def llm_scope(self, agent: str) -> Iterator[None]:
+        """Attribute direct structured-output calls to their owning agent."""
+        token = _ACTIVE_LLM_AGENT.set(agent)
+        try:
+            yield
+        finally:
+            _ACTIVE_LLM_AGENT.reset(token)
+
+    @property
+    def llm_usage(self) -> dict[str, Any]:
+        """Request-local foreground usage with logical/provider calls separated."""
+        return {
+            "logical_calls": self.model_calls,
+            "provider_attempts": self.provider_attempts,
+            "provider_retries": self.provider_retries,
+            "latency_ms": int(self.llm_latency_ms),
+            "by_agent": dict(sorted(self.llm_calls_by_agent.items())),
+            "by_method": dict(sorted(self.llm_calls_by_method.items())),
+        }
 
     # -- the one model call -------------------------------------------------
 
@@ -227,20 +289,28 @@ class AgentRuntime:
         bundle = guard.bundle
 
         try:
-            decision, tool_blocks, parse_error = self._request(agent, bundle, decision_model, state)
+            with self.llm_scope(agent):
+                decision, tool_blocks, parse_error = self._request(
+                    agent, bundle, decision_model, state
+                )
+            if parse_error is None:
+                parse_error = _required_intent_error(decision, tool_blocks, state)
             if parse_error is not None:
                 # One in-call parse retry (frozen #21: parse retry ≤ 1) with explicit
                 # structured-output feedback — providers frequently slip into a
                 # natural-language reply on the turn after a tool call. The hint
                 # names the agent's exact decision shape so the retry is a template,
                 # not an abstraction.
-                decision, tool_blocks, parse_error = self._request(
-                    agent,
-                    bundle,
-                    decision_model,
-                    state,
-                    retry_hint=_retry_hint_for(agent, parse_error),
-                )
+                with self.llm_scope(agent):
+                    decision, tool_blocks, parse_error = self._request(
+                        agent,
+                        bundle,
+                        decision_model,
+                        state,
+                        retry_hint=_retry_hint_for(agent, parse_error),
+                    )
+                if parse_error is None:
+                    parse_error = _required_intent_error(decision, tool_blocks, state)
         except LlmUnavailable as error:
             # A transient provider failure (network blip, overload) is not a
             # logic error in the Agent: report it as a recoverable protocol
@@ -539,6 +609,35 @@ def _parse_decision(
     except (ValidationError, ValueError) as error:
         return None, str(error)[:500]
     return decision, None
+
+
+def _required_intent_error(
+    decision: BaseModel | None,
+    tool_blocks: list[ToolUseBlock],
+    state: dict[str, Any],
+) -> str | None:
+    """Require one LLM-owned semantic interpretation on workflow requests."""
+    if not state.get("require_user_intent"):
+        return None
+    intent = getattr(decision, "intent", None) if decision is not None else None
+    if intent is None:
+        intent = state.get("user_intent")
+    if intent is None:
+        intent = next(
+            (
+                block.arguments.get("intent")
+                for block in tool_blocks
+                if isinstance(block.arguments.get("intent"), dict)
+            ),
+            None,
+        )
+    if intent is None:
+        return "缺少必需的 intent：必须先用自然语言概括用户目标和要求。"
+    goal_value = intent.get("goal") if isinstance(intent, dict) else getattr(intent, "goal", "")
+    goal = str(goal_value or "").strip()
+    if not goal:
+        return "intent.goal 不能为空：必须概括用户希望得到的最终结果。"
+    return None
 
 
 def _extract_json_object(text: str) -> str | None:

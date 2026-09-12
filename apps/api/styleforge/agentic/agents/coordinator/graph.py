@@ -39,6 +39,7 @@ class CoordinatorState(TypedDict, total=False):
     # context sources (input from the Main Graph) + shared products written back
     request: str
     goal: str
+    user_intent: Any
     plan: Any
     task_state: TaskState | None
     research_evidence: Any
@@ -102,11 +103,22 @@ def build_coordinator_subgraph(runtime: AgentRuntime):
             }
 
         trace = state.get("trace", []) + [result.trace]
+        decision: CoordinatorDecision = result.decision
+        intent_update = (
+            {
+                "user_intent": decision.intent.model_copy(
+                    update={"message": str(state.get("request") or decision.intent.message)}
+                )
+            }
+            if decision.intent is not None
+            else {}
+        )
         # A valid turn resets the protocol-error budget (frozen #21 bounds
         # CONSECUTIVE re-entries, not the lifetime total).
         if result.tool_uses:
             # need_plan_update mode: update_plan call(s), back to us.
             return {
+                **intent_update,
                 "pending_tools": [
                     {"name": item.name, "arguments": item.arguments}
                     for item in result.tool_uses
@@ -115,9 +127,9 @@ def build_coordinator_subgraph(runtime: AgentRuntime):
                 "trajectory_protocol_errors": 0,
             }
 
-        decision: CoordinatorDecision = result.decision
         if decision.need_user:
             return {
+                **intent_update,
                 "handoff_result": AgentHandoffResult(
                     status="NEEDS_CLARIFICATION",
                     clarification=decision.clarification,
@@ -129,6 +141,7 @@ def build_coordinator_subgraph(runtime: AgentRuntime):
             }
         # Handoff mode: the TaskState IS the product — the parent routes on it.
         return {
+            **intent_update,
             "handoff_result": AgentHandoffResult(
                 status="COMPLETED",
                 trace_summary=_trace_summary(trace),

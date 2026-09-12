@@ -52,6 +52,7 @@ class ResearchState(TypedDict, total=False):
     # context sources (input from the Main Graph, read-only inside the subgraph)
     request: str
     goal: str
+    user_intent: Any
     plan: Any
     thread_context: dict | None
     recalled_memories: list[Any]
@@ -131,6 +132,16 @@ def build_research_subgraph(runtime: AgentRuntime):
             }
 
         trace = state.get("trace", []) + [result.trace]
+        decision: ResearchDecision = result.decision
+        intent_update = (
+            {
+                "user_intent": decision.intent.model_copy(
+                    update={"message": str(state.get("request") or decision.intent.message)}
+                )
+            }
+            if decision.intent is not None
+            else {}
+        )
         # A valid turn resets the protocol-error budget (same reasoning as the
         # Stylist: frozen #21 bounds CONSECUTIVE re-entries, not the lifetime
         # total — a real model can lapse once and still produce a productive run).
@@ -138,6 +149,7 @@ def build_research_subgraph(runtime: AgentRuntime):
             # CONTINUE with one or more parallel tool calls — all executed in
             # order, every observation into the private buffer.
             return {
+                **intent_update,
                 "pending_tools": [
                     {"name": item.name, "arguments": item.arguments} for item in result.tool_uses
                 ],
@@ -145,9 +157,9 @@ def build_research_subgraph(runtime: AgentRuntime):
                 "trajectory_protocol_errors": 0,
             }
 
-        decision: ResearchDecision = result.decision
         if decision.control == "NEED_USER":
             return {
+                **intent_update,
                 "handoff_result": AgentHandoffResult(
                     status="NEEDS_CLARIFICATION",
                     clarification=decision.clarification,
@@ -160,6 +172,7 @@ def build_research_subgraph(runtime: AgentRuntime):
         # RESEARCH_COMPLETE — stop researching; the closing node reorganizes
         # whatever the buffer holds into a structured ResearchEvidence.
         return {
+            **intent_update,
             "trace": trace,
             "trajectory_synthesize": True,
             "trajectory_protocol_errors": 0,

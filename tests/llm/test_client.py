@@ -103,6 +103,7 @@ def test_chat_json_retries_on_invalid_json_then_succeeds() -> None:
 
     assert parsed == {"decision": "accept"}
     assert diagnostics.retries == 1
+    assert diagnostics.provider_attempts == 2
     assert len(completions.requests) == 2
 
 
@@ -119,9 +120,11 @@ def test_chat_json_falls_back_when_response_format_unsupported() -> None:
     completions = _FakeCompletions([json.dumps({"decision": "accept"})], fail_response_format=True)
     client = _make_client(completions)
 
-    parsed, _ = client.chat_json(system="JSON", user="hi", json_schema={})
+    parsed, diagnostics = client.chat_json(system="JSON", user="hi", json_schema={})
 
     assert parsed == {"decision": "accept"}
+    assert diagnostics.provider_attempts == 2
+    assert diagnostics.degraded_reason
     assert completions.requests[-1].get("response_format") is None
 
 
@@ -273,5 +276,6 @@ def test_chat_tools_degrades_when_tools_unsupported() -> None:
     assert json.loads(text) == decision
     assert blocks == []
     assert diagnostics.degraded_reason
+    assert diagnostics.provider_attempts == 2
     # The fallback call dropped the tools parameter.
     assert completions.requests[-1].get("tools") is None

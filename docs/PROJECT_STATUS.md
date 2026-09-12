@@ -1,5 +1,14 @@
 # StyleForge 项目状态
 
+> 2026-09-11 **工程与文档收口进行中**：GitHub API 确认远端最新 CI 仍是 2026-09-01
+> 提交 `4a282f0` 的 Ruff 失败；当前本地 HEAD `162cba4` 更新，工作区同范围 Ruff 已通过。
+> CI 已加入 Vue 前端单元测试并将官方 Actions 升级到 Node.js 24 运行时版本；README、架构、
+> 本地部署和评审报告已统一为 PostgreSQL + Vue 3 + `MultiTaskWorkflow + StyleForgeHarness`
+> 当前主路径。启动本地 PostgreSQL 17.10 后，修复 3 项与新语义合同/直达 Closing 优化不一致的
+> 旧测试，最终全量回归 **842/842 passed（197.17s）**；确定性衣橱质量基准 **42/42 passed**，
+> 路由/状态准确率均为 100%，P95 603.87ms；临时 FastAPI 冒烟确认 `/health`、`/metrics` 和
+> `/mcp/status` 正常，数据库 connected，MCP Server 暴露 5 个工具。
+
 > 更新时间：2026-09-01
 > 2026-09-01 **官方 Polyvore 离线基线已落地并真实运行**：新增只读 Compatibility/FITB adapter、Random、train-only Category Co-occurrence、FashionCLIP、来源 hash、全量映射审计、确定性采样、可续跑向量缓存和统一报告。全量非视觉覆盖 disjoint 30,290/15,145、nondisjoint 20,000/10,000、Maryland 6,081/3,076 条 Compatibility/FITB；两个主 split 的 token、metadata、semantic category 和 image 缺失均为 0。双 split 各 256 条真实视觉抽样中，FashionCLIP test AUC/FITB Top-1 为 disjoint 0.7514/0.4922、nondisjoint 0.7344/0.5156，共编码/复用 13,055 张图片。Maryland 包缺 item/category/image 映射，Category/FashionCLIP 如实标记 unavailable。新增合同测试 12 项，最终全量 Pytest **797 passed**，Ruff/compileall 通过。详见 [Polyvore 官方离线基线](POLYVORE_BASELINES.md) 与 [评估计划 v2](EVALUATION_PLAN_V2.md)。
 > 2026-08-31 **Prompt 注入纵深防护完成**：PromptAssembler 将 system 稳定指令与用户、Web/MCP、RAG、衣物文本、会话、记忆、工具观察和跨 Agent 证据彻底分离，动态内容仅进入带边界转义的 user-role 数据区；新增中英文注入信号扫描、低基数观测、当前 Agent 工具目录复核及 search_web/get_weather 出站拦截，被拒参数不会进入 PreToolUse Hook；命中注入的请求跳过可选长期偏好提炼，避免持久记忆污染。全量 Pytest **785 passed**、安全专项 6/6、Ruff/compileall 和 Vite 生产构建通过。真实 DeepSeek 对抗请求 19.5 秒完成 1 套推荐（9 次模型调用），8 次检测到注入信号、工具失败 0、错误码 0，持久化结果无 system/Harness 指令泄露。详见 [Prompt 注入防护](PROMPT_SECURITY.md)。
@@ -61,10 +70,10 @@ StyleForge 已经具备“用户衣柜 → 自然语言需求 → 多 Agent 协�
 | Mytheresa 导入/合并嵌入 | 已实现，未执行 | 尚未导入主数据库，也未构建 189,385 件合并向量和索引 |
 | 订单衣柜导入 v3 | 已验证 | 收货/退款/售后硬门槛 + Schema v5 回归通过；完整订单表一次性数据库验收通过（374 准入，0 未知），15 个非服饰误分类已修复 |
 | 个人商品自动嵌入 | 已验证 | 支持无图文字向量和实拍图重嵌入；11 张公开 Polyvore 图片 CUDA 验收 11/11，PostgreSQL 512 维归一化向量与 4 条检索均通过；输入指纹、换图失效和共享模型运行时已回归 |
-| FastAPI/Streamlit | 基线可启动，最新 UI 待回归 | API 曾成功启动；最新订单预览和图片展示需人工验收 |
-| 语义驱动三 Agent (v3.2.1) | 已验证 | DeepSeek 三 Agent + 四决策分支 + 跨请求记忆；当时里程碑134测试通过；2026-08-06真实API 8请求全部accept、100%衣柜归属，7类无回退、1类Critic瞬时降级 |
+| FastAPI / Vue 3 Web | 当前主路径 | API、Vue 智能造型、衣柜、导入、记忆和健康页构成当前验收入口；Streamlit 仅为旧版维护界面，不再列入当前功能缺口 |
+| Multi-Agent Harness | 已实现并持续验证 | 六任务统一由 `MultiTaskWorkflow + StyleForgeHarness` 执行；Coordinator、Research、Stylist、Critic、Extension 和确定性门控替代 v3.2.1 三 Agent 旧主链 |
 | 五维统一评估框架（评估方案 v1.1） | 已验证 | 统一 Rubric 贯穿三 Agent；`outfit_coordination` 改名 + `explicit_style` 字段；用户可配置五维权重（API/UI），真实链路验证首选分=用户权重加权 |
-| 架构 v3.3-plan.1 | 已规划 | 参考目录 + 扩展版方案收口，规划文档 `docs/architecture/ARCHITECTURE_PLAN.md`，含职责边界与分阶段路线 |
+| 架构 v3.3-plan.1 | 历史规划，已落地演进 | 当前真实架构以 `docs/ARCHITECTURE.md` 为准；规划文档仅用于追溯，不作为现行实现说明 |
 | v3.3 Task Router + 六任务执行 | 已验证 | `/tasks/route` 只分类；`/tasks/execute` 统一执行六个隔离子图；Context Pack、trace 和 `task_runs` 可审计持久化 |
 | v3.3 P2.5 路由与质量评估 | 已验证 | 路由固定集 60 条（六类各 10 条）准确率 100%；7 类 Wardrobe Fixtures、60 条分层质量案例、42 条轻量门禁和 7 条 Polyvore 六任务真实基线均已建立，真实 DeepSeek 7/7 |
 | 五类扩展业务 | 已验证 | 局部修改硬锁非目标单品；风格/单品建议使用本地证据；新品兼容不落库；衣橱缺口检查槽位、场景与重复度 |
@@ -320,7 +329,7 @@ P0 回归与订单表预览已于 2026-08-04 通过：`compileall` 退出码 0�
 4. 无 key 时同一命令返回确定性链路，行为与改造前一致（CLI `--no-llm` 冒烟通过）。
 5. 备选方案评分已补确定性 `score_outfit`（此前为 0）。
 6. 证据：`artifacts/llm_acceptance.json`（8 请求原始 JSON）、`artifacts/llm_acceptance_summary.txt`（可读摘要）。
-7. 剩余：Streamlit UI 展示语义输出字段（未做）。
+7. 该阶段的 Streamlit 展示项不再继续；当前界面与验收均以 Vue Web 为准。
 
 详细命令见[后续工作](NEXT_STEPS.md)与[Mytheresa 数据接入说明](MYTHERESA_INTEGRATION.md)。
 

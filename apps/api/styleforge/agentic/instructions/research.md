@@ -29,9 +29,16 @@
 {
   "decision_summary": "本回合做了什么（一句话）",
   "control": "CONTINUE | RESEARCH_COMPLETE | NEED_USER",
+  "intent": {
+    "message": "用户原话",
+    "goal": "需要外部事实支持的真实目标",
+    "requirements": ["场景、时间、地点及穿着约束"]
+  },
   "clarification": {"question": "...", "reason": "..."}
 }
 ```
+
+`intent` 每次必须给出：第一次调用时形成语义理解；若上游已提供【统一语义理解】，应继承并只根据新证据修正，不得丢失用户约束。
 
 控制信号：
 

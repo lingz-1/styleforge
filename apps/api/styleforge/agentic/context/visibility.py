@@ -51,6 +51,7 @@ class AgentContextView:
     task_state: bool = False
     plan: bool = False
     environment_facts: bool = False
+    user_intent: bool = False
     wardrobe: bool = False
     research_evidence: bool = False
     raw_evidence: bool = False  # the Research subgraph's private RawEvidenceBuffer
@@ -70,6 +71,7 @@ class AgentContextView:
 _VIEWS: dict[str, AgentContextView] = {
     AGENT_COORDINATOR: AgentContextView(
         user_request=True,
+        user_intent=True,
         task_type=True,
         task_state=True,
         plan=True,
@@ -81,6 +83,7 @@ _VIEWS: dict[str, AgentContextView] = {
     ),
     AGENT_RESEARCH: AgentContextView(
         user_request=True,
+        user_intent=True,
         plan=True,
         research_evidence=True,
         thread_context=True,
@@ -93,6 +96,7 @@ _VIEWS: dict[str, AgentContextView] = {
         task_state=True,
         plan=True,
         environment_facts=True,
+        user_intent=True,
         wardrobe=True,
         research_evidence=True,
         candidates=True,
@@ -105,6 +109,7 @@ _VIEWS: dict[str, AgentContextView] = {
     ),
     AGENT_CRITIC: AgentContextView(
         user_request=True,
+        user_intent=True,
         research_evidence=True,
         candidates=True,
         drafts=True,
@@ -124,6 +129,7 @@ _VIEWS: dict[str, AgentContextView] = {
     # product, no verification chain.
     AGENT_EXTENSION: AgentContextView(
         user_request=True,
+        user_intent=True,
         task_state=True,
         plan=True,
         environment_facts=True,

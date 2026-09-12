@@ -39,6 +39,10 @@ from styleforge.integrations.mcp.telemetry import capture_mcp_traces
 from styleforge.models.context import ContextPack
 from styleforge.models.task import TaskExecutionInput
 from styleforge.repositories.catalog_repository import fetch_items_by_ids
+from styleforge.services.wardrobe_retrieval import (
+    balanced_keyword_candidate_ids,
+    keyword_retrieve_wardrobe,
+)
 
 from styleforge.agentic.structure import (
     PlacedItem,
@@ -398,39 +402,50 @@ class Environment:
                 fallback_error = type(error).__name__
         else:
             fallback_error = ""
-        tokens = [token for token in query.lower().split() if token]
-        scored: list[tuple[int, Any]] = []
-        for item in self.wardrobe_items:
-            hay = " ".join(
-                [
-                    item.name or "",
-                    item.item_type or "",
-                    item.main_category or "",
-                    item.color or "",
-                    item.description or "",
-                ]
-            ).lower()
-            score = sum(1 for token in tokens if token in hay)
-            if score > 0:
-                scored.append((score, item))
-        scored.sort(key=lambda pair: (-pair[0], pair[1].item_id))
-        results = [_item_snapshot_from_catalog(item) for _, item in scored[:cap]]
+        fallback = keyword_retrieve_wardrobe(query, self.wardrobe_items, limit=cap)
+        results = [
+            _item_snapshot_from_catalog(self._wardrobe_by_id[item_id])
+            for item_id in fallback.item_ids
+            if item_id in self._wardrobe_by_id
+        ]
         result = WardrobeSearchResult(
             results=results,
-            matched=len(scored),
+            matched=fallback.matched,
             query=query,
-            diagnostics=(
-                {
-                    **({"fallback_error": fallback_error} if fallback_error else {}),
-                    "cache_hit": False,
-                }
-            ),
+            diagnostics={
+                **fallback.diagnostics,
+                **({"fallback_error": fallback_error} if fallback_error else {}),
+                "cache_hit": False,
+            },
         )
         self._wardrobe_search_cache[cache_key] = result.model_copy(deep=True)
         return self._record_wardrobe_search(
             result,
             started_at,
         )
+
+    def prefetch_request_candidates(
+        self,
+        query: str,
+        *,
+        exclude_ids: set[str] | None = None,
+        limit: int = 16,
+    ) -> list[ItemSnapshot]:
+        """Return one semantic top-k supplemented by a slot-balanced slate."""
+        excluded = exclude_ids or set()
+        semantic = self.search_wardrobe(query, limit=min(self.search_limit, 8))
+        balanced_ids = balanced_keyword_candidate_ids(
+            query,
+            self.wardrobe_items,
+            per_slot=2,
+            limit=limit,
+        )
+        ordered_ids = [item.item_id for item in semantic.results] + balanced_ids
+        return [
+            _item_snapshot_from_catalog(self._wardrobe_by_id[item_id])
+            for item_id in dict.fromkeys(ordered_ids)
+            if item_id in self._wardrobe_by_id and item_id not in excluded
+        ][: max(1, limit)]
 
     def search_web(self, query: str) -> WebSearchResult:
         """Web search for outfit / occasion / activity knowledge beyond the

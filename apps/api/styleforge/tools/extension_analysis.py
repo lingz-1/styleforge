@@ -851,6 +851,44 @@ def _structural_gap_elements(request: str) -> list[dict[str, Any]]:
     return []
 
 
+def _general_gap_elements() -> list[dict[str, Any]]:
+    """Return a minimal mix-and-match baseline for a general wardrobe audit."""
+    return [
+        {
+            "id": "core:top_variety",
+            "label": "可轮换基础上装",
+            "item_types": ["top"],
+            "minimum_count": 2,
+            "priority": "high",
+            "suggestion": "补充一件能与现有下装轮换的基础上装",
+        },
+        {
+            "id": "core:bottom_variety",
+            "label": "可轮换基础下装",
+            "item_types": ["pants", "skirt", "shorts"],
+            "minimum_count": 2,
+            "priority": "high",
+            "suggestion": "补充一件版型或正式度不同的基础下装",
+        },
+        {
+            "id": "core:footwear_variety",
+            "label": "可轮换日常鞋履",
+            "item_types": ["shoes"],
+            "minimum_count": 2,
+            "priority": "medium",
+            "suggestion": "补充一双与现有鞋履用途不同的日常鞋",
+        },
+        {
+            "id": "core:outerwear",
+            "label": "基础外搭层",
+            "item_types": ["outwear", "outerwear", "coat", "jacket"],
+            "minimum_count": 1,
+            "priority": "medium",
+            "suggestion": "补充一件适合叠穿和应对温差的基础外套",
+        },
+    ]
+
+
 def _analyze_gap(
     task_input: TaskExecutionInput,
     route: TaskRoute,
@@ -867,6 +905,8 @@ def _analyze_gap(
     if entries:
         target_elements = _target_elements(entries[0])
     structural_elements = _structural_gap_elements(task_input.request)
+    if not entries and not structural_elements:
+        target_elements = _general_gap_elements()
     existing_element_ids = {str(element.get("id") or "") for element in target_elements}
     target_elements.extend(
         element
@@ -889,8 +929,14 @@ def _analyze_gap(
                 )
                 if type_match and subtype_match and color_match:
                     matches.append(item.item_id)
-            payload = {**element, "matching_item_ids": matches[:8]}
-            if matches:
+            minimum_count = max(1, int(element.get("minimum_count") or 1))
+            payload = {
+                **element,
+                "matching_item_ids": matches[:8],
+                "current_count": len(matches),
+                "minimum_count": minimum_count,
+            }
+            if len(matches) >= minimum_count:
                 covered_elements.append(payload)
             else:
                 missing_elements.append(payload)

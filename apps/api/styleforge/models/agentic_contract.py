@@ -1,9 +1,7 @@
-"""Agentic contract (Stage 0): the frozen boundary of the new Agent world.
+"""Shared semantic-agent and deterministic-environment contracts.
 
-This module defines the *contract only*. Nothing in the live request path
-imports it yet — the legacy pipeline keeps running unchanged until the
-agentic flow is proven in shadow mode (Stages 2-4). See
-docs/AGENTIC_CONTRACT.md for the boundary rationale and the stage plan.
+The current Multi-Agent Harness imports these models directly. See
+``docs/AGENTIC_CONTRACT.md`` for the boundary rationale and its evolution.
 
 The contract fixes four facts:
 
@@ -27,7 +25,7 @@ Three-way boundary (the core of this revision):
 The program never judges *what the user wants* ("不要红色", "上衣别动" are
 semantic, read by the Agent and the Reviewer). The Agent never decides whether
 the database and the physical structure are legal (that is check_environment's
-job). Nothing here changes runtime behaviour.
+job).
 """
 
 from __future__ import annotations
@@ -95,6 +93,10 @@ class EnvironmentFacts(BaseModel):
     active_outfit: OutfitSnapshot | None = None
     selected_item: ItemSnapshot | None = None
     wardrobe_summary: dict[str, Any] = Field(default_factory=dict)
+    # A bounded, request-scoped shortlist prepared by the deterministic
+    # retrieval layer. It contains facts, not an interpretation of the user's
+    # intent; the Stylist still decides whether and how to use each item.
+    request_candidates: list[ItemSnapshot] = Field(default_factory=list)
     weather: dict[str, Any] | None = None
     memory_profile: dict[str, Any] = Field(default_factory=dict)
 
@@ -351,14 +353,3 @@ class ReviewResult(BaseModel):
 class SaveOutfitCommand(BaseModel):
     """Persist an outfit into the saved-outfit collection."""
     outfit_id: str
-
-
-# ── Bounded loop ───────────────────────────────────────────────────
-
-class AgentLoopConfig(BaseModel):
-    max_steps: int = 8
-    check_gate: Literal["always", "after_modify"] = "always"
-    ask_user_cap: int = 2
-    require_review: bool = True  # every final candidate passes review_outfit
-    # commit_gate = check_environment PASS AND review_outfit PASS; a draft that
-    # fails either is discarded (never committed) before the Agent replans.

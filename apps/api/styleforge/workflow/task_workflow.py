@@ -11,14 +11,15 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
+from threading import Lock
 from time import perf_counter
 from typing import Any
 
 from styleforge.agentic.context.grounding import (
     GroundingResolver,
-    unknown_latin_travel_target,
 )
 from styleforge.agentic.context.memory_context import PreferenceRetriever
 from styleforge.agentic.context.prompt_security import scan_prompt_injection
@@ -29,7 +30,6 @@ from styleforge.agentic.environment import (
     resolve_active_outfit,
 )
 from styleforge.agentic.harness import StyleForgeHarness
-from styleforge.agentic.intent_constraints import unavailable_feature_requirements
 from styleforge.agentic.tools.local_tools import (
     CAP_KNOWLEDGE,
     CAP_SKILLS,
@@ -70,6 +70,11 @@ from styleforge.tools.extension_analysis import analyze_extension_task
 
 
 logger = logging.getLogger(__name__)
+
+_MEMORY_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="styleforge-memory",
+)
 
 # H3a-2 Memory scope gate: turn-scoped requests never feed long-term memory.
 # EvidenceScope only distinguishes global/contextual (no turn type), so the gate
@@ -188,6 +193,43 @@ _REGION_TO_SLOT = {
 }
 
 
+def _semantic_intent_payload(outcome: Any) -> dict[str, Any] | None:
+    """Return the first Agent-owned semantic intent in a JSON-safe shape."""
+    entries = outcome if isinstance(outcome, list) else [outcome]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        intent = entry.get("user_intent")
+        if intent is None:
+            continue
+        if hasattr(intent, "model_dump"):
+            return intent.model_dump(mode="json")
+        if isinstance(intent, dict):
+            return dict(intent)
+    return None
+
+
+def _merge_llm_usage(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Combine independent harness usage without hiding provider retries."""
+    merged: dict[str, Any] = {
+        "logical_calls": 0,
+        "provider_attempts": 0,
+        "provider_retries": 0,
+        "latency_ms": 0,
+        "by_agent": {},
+        "by_method": {},
+    }
+    for entry in entries:
+        for key in ("logical_calls", "provider_attempts", "provider_retries", "latency_ms"):
+            merged[key] += int(entry.get(key, 0) or 0)
+        for group in ("by_agent", "by_method"):
+            for name, count in (entry.get(group) or {}).items():
+                merged[group][name] = merged[group].get(name, 0) + int(count or 0)
+    merged["by_agent"] = dict(sorted(merged["by_agent"].items()))
+    merged["by_method"] = dict(sorted(merged["by_method"].items()))
+    return merged
+
+
 class MultiTaskWorkflow:
     """Router + the Multi-Agent Harness primary chains for all six task types."""
 
@@ -211,6 +253,7 @@ class MultiTaskWorkflow:
         # + injectable clock for deterministic tests.
         default_location: str = "",
         today_provider: Any | None = None,
+        defer_memory_extraction: bool = False,
     ) -> None:
         self.database_path = database_path
         self.knowledge_root = knowledge_root.resolve()
@@ -219,6 +262,9 @@ class MultiTaskWorkflow:
         self.web_search_provider = web_search_provider
         self.weather_provider = weather_provider
         self.skills_root = skills_root
+        self.defer_memory_extraction = defer_memory_extraction
+        self._memory_futures: set[Future[Any]] = set()
+        self._memory_futures_lock = Lock()
         self.router = TaskRouter()
         self.context_builder = ContextPackBuilder(self.database_path)
         # Shared retriever; vector retrieval is additive and degrades to
@@ -300,6 +346,47 @@ class MultiTaskWorkflow:
                 task_input.user_id,
                 type(error).__name__,
             )
+
+    def _process_memories(self, task_input: TaskExecutionInput) -> bool:
+        """Run memory extraction inline for tests or schedule it for serving."""
+        if _scope_gate(task_input.request) or self.llm_client is None:
+            return False
+        if not self.defer_memory_extraction:
+            self._extract_memories(task_input)
+            return False
+        future = _MEMORY_EXECUTOR.submit(self._extract_memories, task_input)
+        with self._memory_futures_lock:
+            self._memory_futures.add(future)
+
+        def discard(completed: Future[Any]) -> None:
+            with self._memory_futures_lock:
+                self._memory_futures.discard(completed)
+
+        future.add_done_callback(discard)
+        return True
+
+    def wait_for_background_tasks(self, timeout: float = 10.0) -> bool:
+        """Test/maintenance hook: wait for this workflow's queued memory work."""
+        with self._memory_futures_lock:
+            pending = set(self._memory_futures)
+        if not pending:
+            return True
+        _done, not_done = wait(pending, timeout=timeout)
+        return not not_done
+
+    @staticmethod
+    def _usage_payload(
+        foreground: dict[str, Any], *, memory_scheduled: bool
+    ) -> dict[str, Any]:
+        return {
+            "foreground": foreground,
+            "background": {
+                "memory_extraction_scheduled": memory_scheduled,
+                "logical_calls_expected": 1 if memory_scheduled else 0,
+            },
+            "known_logical_calls": int(foreground.get("logical_calls", 0))
+            + (1 if memory_scheduled else 0),
+        }
 
     def _record_task_failure(
         self,
@@ -585,7 +672,15 @@ class MultiTaskWorkflow:
             for call in outcome.get("mcp_calls") or []
             if isinstance(call, dict)
         ]
+        llm_usage = _merge_llm_usage(
+            [
+                outcome.get("_llm_usage") or {}
+                for outcome in outcome_list
+                if isinstance(outcome.get("_llm_usage"), dict)
+            ]
+        )
         return {
+            "llm": llm_usage,
             "wardrobe_retrieval": {
                 "calls": len(calls),
                 "modes": modes,
@@ -720,106 +815,84 @@ class MultiTaskWorkflow:
                 raise LlmUnavailable("OUTFIT_MODIFY requires an LLM client")
             targets = self._agentic_targets(task_input, session_context)
             outcomes: list[dict[str, Any]] = []
+            usage_entries: list[dict[str, Any]] = []
+            memory_scheduled = False
             item_type_by_id: dict[str, str] = {}
             with database_session(self.database_path) as connection:
                 wardrobe_items = list_items(connection, task_input.user_id)
                 item_type_by_id = {item.item_id: item.item_type for item in wardrobe_items}
-                unavailable = unavailable_feature_requirements(
-                    task_input.request,
-                    wardrobe_items,
-                )
-                if not _wardrobe_can_form_complete_outfit(item_type_by_id) or unavailable:
-                    outcomes = [
-                        {
-                            "status": "infeasible",
-                            "candidates": [],
-                            "wardrobe_retrievals": [],
-                            "mcp_calls": [],
-                            "_llm_call_count": 0,
-                            "infeasible_reason": (
-                                "intent_requirements_unavailable"
-                                if unavailable
-                                else "wardrobe_missing_complete_outfit_slots"
-                            ),
-                            "intent_constraint_issues": [
-                                requirement.reason for requirement in unavailable
-                            ],
-                        }
-                        for _target in targets
-                    ]
-                else:
-                    for target in targets:
-                        target_item_ids = list(target.get("item_ids") or [])
-                        if not target_item_ids and target.get("outfit_id"):
-                            lookup_input = task_input.model_copy(
-                                update={
-                                    "current_outfit_id": target["outfit_id"],
-                                    "current_item_ids": [],
-                                }
-                            )
-                            stored = resolve_active_outfit(connection, lookup_input, None)
-                            if stored is not None:
-                                target_item_ids = list(stored.item_ids)
-                        target["item_ids"] = target_item_ids
-                        if not target_item_ids:
-                            outcomes.append(
-                                {
-                                    "status": "needs_clarification",
-                                    "clarification_question": "请先选择要修改的当前搭配。",
-                                    "candidates": [],
-                                    "wardrobe_retrievals": [],
-                                    "mcp_calls": [],
-                                    "_llm_call_count": 0,
-                                }
-                            )
-                            continue
-                        sub_input = task_input.model_copy(
+                wardrobe_incomplete = not _wardrobe_can_form_complete_outfit(item_type_by_id)
+                for target in targets:
+                    target_item_ids = list(target.get("item_ids") or [])
+                    if not target_item_ids and target.get("outfit_id"):
+                        lookup_input = task_input.model_copy(
                             update={
                                 "current_outfit_id": target["outfit_id"],
-                                "current_item_ids": target_item_ids,
+                                "current_item_ids": [],
                             }
                         )
-                        facts = build_facts(
-                            connection, sub_input, initial_context, wardrobe_items
-                        )
-                        environment = Environment(
-                            connection,
-                            wardrobe_items,
-                            facts,
-                            search_limit=12,
-                            wardrobe_retriever=self.wardrobe_retriever,
-                            web_search_provider=self.web_search_provider,
-                        )
-                        harness = self._harness(environment, target_candidates=1)
-                        base_snapshot = environment.snapshot_outfit(
-                            target["outfit_id"],
-                            target_item_ids,
-                        )
-                        thread_context = self._thread_context(session_context)
-                        outcome = harness.invoke(
-                            {
-                                "run_id": run_id,
-                                "request": task_input.request,
-                                "task_type": TaskType.OUTFIT_MODIFY.value,
-                                "base_draft": Draft(outfit=base_snapshot, layers={}),
-                                "thread_context": thread_context,
-                                "grounding_context": self._grounding_context(
-                                    task_input,
-                                    initial_context,
-                                    connection,
-                                    thread_context,
-                                ),
-                                "raw_preferences": self._raw_preferences(initial_context),
-                                "grounding_attempted_kinds": [],
-                                "grounding_resolved_kinds": [],
-                            }
-                        )
-                        outcome["wardrobe_retrievals"] = list(
-                            environment.wardrobe_search_diagnostics
-                        )
-                        outcome["mcp_calls"] = list(environment.mcp_call_traces)
-                        outcome["_llm_call_count"] = harness.model_calls
-                        outcomes.append(outcome)
+                        stored = resolve_active_outfit(connection, lookup_input, None)
+                        if stored is not None:
+                            target_item_ids = list(stored.item_ids)
+                    target["item_ids"] = target_item_ids
+                    sub_input = task_input.model_copy(
+                        update={
+                            "current_outfit_id": target.get("outfit_id") or "",
+                            "current_item_ids": target_item_ids,
+                        }
+                    )
+                    facts = build_facts(connection, sub_input, initial_context, wardrobe_items)
+                    environment = Environment(
+                        connection,
+                        wardrobe_items,
+                        facts,
+                        search_limit=12,
+                        wardrobe_retriever=self.wardrobe_retriever,
+                        web_search_provider=self.web_search_provider,
+                    )
+                    facts.request_candidates = environment.prefetch_request_candidates(
+                        task_input.request,
+                        exclude_ids=set(target_item_ids),
+                    )
+                    harness = self._harness(environment, target_candidates=1)
+                    base_snapshot = environment.snapshot_outfit(
+                        target.get("outfit_id") or "base",
+                        target_item_ids,
+                    )
+                    thread_context = self._thread_context(session_context)
+                    outcome = harness.invoke(
+                        {
+                            "run_id": run_id,
+                            "request": task_input.request,
+                            "task_type": TaskType.OUTFIT_MODIFY.value,
+                            "require_user_intent": True,
+                            "preflight_infeasible_reason": (
+                                "wardrobe_missing_complete_outfit_slots"
+                                if wardrobe_incomplete
+                                else ""
+                            ),
+                            "auto_submit_after_modify": True,
+                            "base_draft": Draft(outfit=base_snapshot, layers={}),
+                            "thread_context": thread_context,
+                            "grounding_context": self._grounding_context(
+                                task_input,
+                                initial_context,
+                                connection,
+                                thread_context,
+                            ),
+                            "raw_preferences": self._raw_preferences(initial_context),
+                            "grounding_attempted_kinds": [],
+                            "grounding_resolved_kinds": [],
+                        }
+                    )
+                    outcome["wardrobe_retrievals"] = list(
+                        environment.wardrobe_search_diagnostics
+                    )
+                    outcome["mcp_calls"] = list(environment.mcp_call_traces)
+                    outcome["_llm_call_count"] = harness.model_calls
+                    outcome["_llm_usage"] = harness.llm_usage
+                    usage_entries.append(harness.llm_usage)
+                    outcomes.append(outcome)
             diagnostics = self._task_diagnostics(outcomes)
             result = self._agentic_modify_to_result(
                 task_input,
@@ -840,7 +913,7 @@ class MultiTaskWorkflow:
                 )
             if status == "completed":
                 self._persist_agentic_candidate(task_input, result)
-            self._extract_memories(task_input)
+            memory_scheduled = self._process_memories(task_input)
         except Exception as error:
             self._record_task_failure(
                 run_id=run_id,
@@ -848,6 +921,7 @@ class MultiTaskWorkflow:
                 context_pack=context_json,
             )
             raise
+        foreground_usage = _merge_llm_usage(usage_entries)
         return {
             "run_id": run_id,
             "user_id": task_input.user_id,
@@ -863,8 +937,12 @@ class MultiTaskWorkflow:
             "image_endpoint_template": "/items/{item_id}/image",
             "agents": {"harness": "styleforge_harness"},
             "agentic_outcome": outcomes[0] if len(outcomes) == 1 else outcomes,
+            "semantic_intent": _semantic_intent_payload(outcomes),
             "llm_enabled": True,
             "llm_call_count": sum(int(outcome.get("_llm_call_count", 0)) for outcome in outcomes),
+            "llm_usage": self._usage_payload(
+                foreground_usage, memory_scheduled=memory_scheduled
+            ),
         }
 
     def _agentic_modify_to_result(
@@ -1219,99 +1297,77 @@ class MultiTaskWorkflow:
         ``get_weather`` fact the Research Agent actually saw (if any) rides
         ``environment_context``.
 
-        Requires an LLM; execute gates on ``llm_client`` so a no-key request
-        degrades to the legacy graph instead of raising.
+        Requires an LLM; ``execute`` routes a no-key standard recommendation
+        to the deterministic recommendation implementation before reaching
+        this method.
         """
         if self.llm_client is None:
             raise LlmUnavailable("OUTFIT_RECOMMEND requires an LLM client")
         context_json = initial_context.model_dump(mode="json")
         harness: StyleForgeHarness | None = None
+        memory_scheduled = False
         try:
             thread_context = self._thread_context(session_context)
             with database_session(self.database_path) as connection:
                 wardrobe_items = list_items(connection, task_input.user_id)
                 item_type_by_id = {item.item_id: item.item_type for item in wardrobe_items}
-                unavailable = unavailable_feature_requirements(
-                    task_input.request,
-                    wardrobe_items,
-                )
+                wardrobe_incomplete = not _wardrobe_can_form_complete_outfit(item_type_by_id)
                 facts = build_facts(connection, task_input, initial_context, wardrobe_items)
                 grounding_context = self._grounding_context(
                     task_input, initial_context, connection, thread_context
                 )
-            model_calls = 0
-            ambiguous_target = unknown_latin_travel_target(task_input.request)
-            if ambiguous_target:
-                question = (
-                    f"“{ambiguous_target}”具体指哪个城市、地点或活动？"
-                    "请补充名称或纠正拼写，我再根据场景给你搭配。"
-                )
-                outcome = {
-                    "status": "needs_clarification",
-                    "clarification_question": question,
-                    "candidates": [],
-                    "wardrobe_retrievals": [],
-                    "mcp_calls": [],
-                    "infeasible_reason": "ambiguous_travel_target",
-                }
-                weather_facts = None
-            elif not _wardrobe_can_form_complete_outfit(item_type_by_id) or unavailable:
-                outcome = {
-                    "status": "infeasible",
-                    "candidates": [],
-                    "wardrobe_retrievals": [],
-                    "mcp_calls": [],
-                    "infeasible_reason": (
-                        "intent_requirements_unavailable"
-                        if unavailable
-                        else "wardrobe_missing_complete_outfit_slots"
+            # No transaction is held while waiting on LLM/MCP calls. Personal
+            # vector lookup opens a short-lived session only when the tool runs.
+            environment = Environment(
+                None,
+                wardrobe_items,
+                facts,
+                search_limit=12,
+                wardrobe_retriever=self.wardrobe_retriever,
+                web_search_provider=self.web_search_provider,
+                weather_provider=self.weather_provider,
+                skills_root=self.skills_root,
+                connection_factory=lambda: database_session(self.database_path),
+            )
+            facts.request_candidates = environment.prefetch_request_candidates(
+                task_input.request
+            )
+            harness = self._harness(
+                environment, target_candidates=task_input.max_results
+            )
+            outcome = harness.invoke(
+                {
+                    "run_id": run_id,
+                    "request": task_input.request,
+                    "task_type": TaskType.OUTFIT_RECOMMEND.value,
+                    "require_user_intent": True,
+                    "preflight_infeasible_reason": (
+                        "wardrobe_missing_complete_outfit_slots"
+                        if wardrobe_incomplete
+                        else ""
                     ),
-                    "intent_constraint_issues": [
-                        requirement.reason for requirement in unavailable
-                    ],
-                }
-                weather_facts = None
-            else:
-                # No transaction is held while waiting on LLM/MCP calls. Personal
-                # vector lookup opens a short-lived session only when the tool runs.
-                environment = Environment(
-                    None,
-                    wardrobe_items,
-                    facts,
-                    search_limit=12,
-                    wardrobe_retriever=self.wardrobe_retriever,
-                    web_search_provider=self.web_search_provider,
-                    weather_provider=self.weather_provider,
-                    skills_root=self.skills_root,
-                    connection_factory=lambda: database_session(self.database_path),
-                )
-                harness = self._harness(
-                    environment, target_candidates=task_input.max_results
-                )
-                outcome = harness.invoke(
-                    {
-                        "run_id": run_id,
-                        "request": task_input.request,
-                        "task_type": TaskType.OUTFIT_RECOMMEND.value,
-                        "base_draft": Draft(
-                            outfit=OutfitSnapshot(
-                                outfit_id="base", item_ids=[], items=[]
-                            ),
-                            layers={},
+                    "auto_submit_after_modify": True,
+                    "base_draft": Draft(
+                        outfit=OutfitSnapshot(
+                            outfit_id="base", item_ids=[], items=[]
                         ),
-                        "thread_context": thread_context,
-                        "grounding_context": grounding_context,
-                        "raw_preferences": self._raw_preferences(initial_context),
-                        "grounding_attempted_kinds": [],
-                        "grounding_resolved_kinds": [],
-                    }
-                )
-                outcome["wardrobe_retrievals"] = list(
-                    environment.wardrobe_search_diagnostics
-                )
-                outcome["mcp_calls"] = list(environment.mcp_call_traces)
-                weather_facts = environment.last_weather_facts
-                model_calls = harness.model_calls
+                        layers={},
+                    ),
+                    "thread_context": thread_context,
+                    "grounding_context": grounding_context,
+                    "raw_preferences": self._raw_preferences(initial_context),
+                    "grounding_attempted_kinds": [],
+                    "grounding_resolved_kinds": [],
+                }
+            )
+            outcome["wardrobe_retrievals"] = list(
+                environment.wardrobe_search_diagnostics
+            )
+            outcome["mcp_calls"] = list(environment.mcp_call_traces)
+            weather_facts = environment.last_weather_facts
+            model_calls = harness.model_calls
+            foreground_usage = harness.llm_usage
+            outcome["_llm_usage"] = foreground_usage
             # H3a: expose the layered preference view the Stylist actually
             # saw so the front end renders the new agentic context (环境定位
             # + 分层偏好 + 对话上下文) instead of the full legacy dump.
@@ -1343,7 +1399,7 @@ class MultiTaskWorkflow:
             if status == "completed":
                 self._persist_agentic_recommend(task_input, result)
             if status == "completed":
-                self._extract_memories(task_input)
+                memory_scheduled = self._process_memories(task_input)
         except Exception as error:
             self._record_task_failure(
                 run_id=run_id,
@@ -1366,8 +1422,12 @@ class MultiTaskWorkflow:
             "image_endpoint_template": "/items/{item_id}/image",
             "agents": {"harness": "styleforge_harness"},
             "agentic_outcome": outcome,
+            "semantic_intent": _semantic_intent_payload(outcome),
             "llm_enabled": True,
             "llm_call_count": model_calls,
+            "llm_usage": self._usage_payload(
+                foreground_usage, memory_scheduled=memory_scheduled
+            ),
         }
 
     # --- Stage 4c: agentic primary extension chain ------------------------
@@ -1388,14 +1448,15 @@ class MultiTaskWorkflow:
         a tool; it is handed to the Extension subgraph as ``extension_facts``.
         The Extension agent enriches the facts via the search tools, the closing
         node hard-validates the task contract, and ``extension_result`` rides
-        ``agentic_outcome`` so the front end keeps rendering the exact legacy
-        ``payload.result`` shape.
+        ``agentic_outcome`` while preserving the public ``payload.result`` API
+        contract consumed by the front end.
 
-        Requires an LLM: no model → ``LlmUnavailable`` (503), matching the
-        legacy ``run_extension`` which had no fallback either.
+        Requires an LLM: no model → ``LlmUnavailable`` (503); extension tasks
+        do not claim a deterministic semantic fallback.
         """
         context_json = initial_context.model_dump(mode="json")
         harness: StyleForgeHarness | None = None
+        memory_scheduled = False
         try:
             if self.llm_client is None:
                 raise LlmUnavailable("OUTFIT extension tasks require an LLM client")
@@ -1427,6 +1488,7 @@ class MultiTaskWorkflow:
                         "run_id": run_id,
                         "request": task_input.request,
                         "task_type": route.task_type.value,
+                        "require_user_intent": True,
                         "base_draft": Draft(
                             outfit=OutfitSnapshot(outfit_id="base", item_ids=[], items=[]),
                             layers={},
@@ -1444,6 +1506,7 @@ class MultiTaskWorkflow:
                 outcome["wardrobe_retrievals"] = list(environment.wardrobe_search_diagnostics)
                 outcome["mcp_calls"] = list(environment.mcp_call_traces)
             assert harness is not None
+            outcome["_llm_usage"] = harness.llm_usage
             diagnostics = self._task_diagnostics(outcome)
             result = self._agentic_extension_to_result(task_input, outcome)
             status = str(result.get("status", "infeasible"))
@@ -1456,7 +1519,7 @@ class MultiTaskWorkflow:
                     result=result,
                     diagnostics=diagnostics,
                 )
-            self._extract_memories(task_input)
+            memory_scheduled = self._process_memories(task_input)
         except Exception as error:
             self._record_task_failure(
                 run_id=run_id,
@@ -1479,8 +1542,12 @@ class MultiTaskWorkflow:
             "image_endpoint_template": "/items/{item_id}/image",
             "agents": {"harness": "styleforge_harness"},
             "agentic_outcome": outcome,
+            "semantic_intent": _semantic_intent_payload(outcome),
             "llm_enabled": True,
             "llm_call_count": harness.model_calls,
+            "llm_usage": self._usage_payload(
+                harness.llm_usage, memory_scheduled=memory_scheduled
+            ),
         }
 
     def _agentic_extension_to_result(
@@ -1488,9 +1555,9 @@ class MultiTaskWorkflow:
         task_input: TaskExecutionInput,
         outcome: dict[str, Any],
     ) -> dict[str, Any]:
-        """Wrap one Harness outcome into the legacy extension task result contract.
+        """Wrap one Harness outcome into the public extension result contract.
 
-        Three paths, mirroring the legacy chain's own statuses:
+        Three paths share the same external status model:
           * ``extension_result.status == needs_clarification`` — the closing node
             shipped a contract-shaped clarification (question inside the result);
           * Main-Graph NEEDS_CLARIFICATION — a subgraph (agent/coordinator)

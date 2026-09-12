@@ -19,6 +19,7 @@ from styleforge.agentic.agentic_contract import (
     AgentHandoffResult,
     ClarificationRequest,
     CoordinatorDecision,
+    ExtensionDecision,
     ResearchDecision,
     ResearchEvidence,
     StylistDecision,
@@ -433,6 +434,18 @@ def test_same_bundle_feeds_chat_tools_and_chat_json() -> None:
     )
     assert json_llm.calls[0]["system"] == critic_bundle.system_text
     assert payload["approved"] is True
+
+
+def test_all_agent_decision_schemas_require_unified_intent() -> None:
+    for model in (
+        CoordinatorDecision,
+        ResearchDecision,
+        StylistDecision,
+        ExtensionDecision,
+    ):
+        schema = model.model_json_schema()
+        assert "intent" in schema["properties"]
+        assert "intent" in schema["required"]
 
 
 # ── H1a-16: decision state machines + handoff envelope ──────────────────────

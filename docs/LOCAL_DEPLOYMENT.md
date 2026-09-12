@@ -34,10 +34,10 @@ Pytest会通过`pyproject.toml`自动加入该路径，但普通Python、Uvicorn
 $env:GARMENTS2LOOK_IMAGE_ROOT="E:\image.tar\image\images"
 ```
 
-Streamlit 窗口设置 API 地址：
+Vue 开发服务器默认把 `/api/*` 代理到 `http://127.0.0.1:8000`。API 使用其他端口时，在启动 Vue 的窗口设置：
 
 ```powershell
-$env:STYLEFORGE_API_URL="http://127.0.0.1:8000"
+$env:STYLEFORGE_API_PROXY_TARGET="http://127.0.0.1:18000"
 ```
 
 天气上下文默认启用 Open-Meteo。建议配置用户默认城市；请求显式地点优先：
@@ -116,7 +116,7 @@ D:\anaconda\envs\style\python.exe -m styleforge.knowledge.indexer
 
 - 作用：知识检索在关键词命中之外叠加向量路径（FashionCLIP 512 维文本嵌入，cosine 相似度）。Chroma 未初始化或异常时自动降级纯关键词，不影响功能。
 
-## 5. 演示衣柜（最新实现尚待回归）
+## 5. 演示衣柜
 
 重建约 204 件的混合风格演示衣柜：
 
@@ -154,8 +154,8 @@ D:\anaconda\envs\style\python.exe -m uvicorn styleforge.api:app `
 
 HTTP 200 之外，还应检查：
 
-- `catalog_items == 126928`
-- `embedding_ready_items == 126928`
+- `catalog_items > 0`，且与本次选择的数据集/演示快照一致
+- `embedding_ready_items > 0`，且与本次需要启用视觉检索的商品范围一致
 - `embedding_manifest_available == true`
 - `index_manifest_available == true`
 - `image_root_configured == true`
@@ -168,7 +168,7 @@ HTTP 200 之外，还应检查：
 
 - `/health.observability` 是当前 API 进程启动后的聚合快照，包含 HTTP、任务、Agent、LLM、工具、数据库的调用/失败/可重试失败/重试/降级计数，以及累计、平均和最大耗时。
 - `/metrics` 输出 Prometheus text exposition 0.0.4，可直接配置为抓取目标；外部 Prometheus 负责跨进程重启持久化和告警。本项目不强制内置 Prometheus 服务。
-- Web 启动后访问 `http://127.0.0.1:5173/health` 查看“系统脉搏”面板，默认每 15 秒刷新。
+- Web 启动后访问 `http://127.0.0.1:5173/health` 查看“系统脉搏”面板，默认每 15 秒刷新；统一启动器指定其他端口时使用其输出地址。
 - 公共健康数据只含低基数分类，不包含用户输入、工具参数、异常正文、`request_id` 或 `run_id`。
 
 ### Prometheus + Grafana 本地监控
@@ -200,27 +200,31 @@ Docker Desktop 运行后，从仓库根目录执行：
 
 需要变更 Web 端口时可用 `-PrometheusPort`、`-GrafanaPort`；默认分别为 9090、3300。启动器同时兼容独立 `docker-compose.exe` 和 Docker Compose 插件，并为 file-SD 生成 UTF-8 无 BOM 的动态 API 目标文件。
 
-## 7. 启动 Streamlit
+## 7. 启动 Vue Web
 
 窗口 2：
 
 ```powershell
 cd C:\Users\32369\Desktop\agent-p\style
-$env:PYTHONPATH=(Resolve-Path ".\apps\api")
-$env:STYLEFORGE_API_URL="http://127.0.0.1:8000"
-$env:GARMENTS2LOOK_IMAGE_ROOT="E:\image.tar\image\images"
-D:\anaconda\envs\style\python.exe -m streamlit run apps\api\styleforge\ui.py
+Set-Location .\apps\web
+npm.cmd install
+npm.cmd run dev -- --host 127.0.0.1 --port 5173
 ```
 
-首次启动如出现 `Email:`，直接留空并按 Enter。随后访问 `http://localhost:8501`。
+访问 `http://127.0.0.1:5173`。前端通过 Vite 代理访问 FastAPI；API 不在 8000 端口时，先设置上一节的 `STYLEFORGE_API_PROXY_TARGET`。
 
-## 8. CLI 验证
+`apps/api/styleforge/ui.py` 和启动器的 `-Ui Streamlit` 仅用于维护旧界面，不属于当前功能验收、E2E 或文档主路径。
+
+## 8. API 验证
 
 ```powershell
-$env:PYTHONPATH=(Resolve-Path ".\apps\api")
-D:\anaconda\envs\style\python.exe -m styleforge.workflow.graph `
-  --user-id demo-user `
-  --request "明天参加互联网公司面试，衬衫配半身裙和乐福鞋，不要红色，不要高跟鞋。"
+$body = @{
+  user_id = "demo-user"
+  request = "明天参加互联网公司面试，衬衫配半身裙和乐福鞋，不要红色，不要高跟鞋。"
+  max_results = 3
+} | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/tasks/execute" `
+  -ContentType "application/json" -Body $body
 ```
 
 ## 9. 常见问题
@@ -231,17 +235,17 @@ D:\anaconda\envs\style\python.exe -m styleforge.workflow.graph `
 
 ### localhost 拒绝连接
 
-- Streamlit 可能仍停留在首次邮箱询问。
-- 两个服务必须在不同窗口中保持运行。
-- 确认 URL 使用 `8501`，API 使用 `8000`。
+- API 和 Vue 两个服务必须在不同窗口中保持运行。
+- 确认 Vue 使用 `5173`（或启动器输出端口），API 使用 `8000`（或代理目标端口）。
+- API 使用非默认端口时，确认 `STYLEFORGE_API_PROXY_TARGET` 与其一致。
 
 ### API 根路径返回 404
 
 这是正常的。使用 `/health` 或 `/docs`。
 
-### 页面提示 `'str' object has no attribute 'get'`
+### 页面显示旧结果或接口结构未更新
 
-旧版 UI 把文字建议当成结构化结果。当前 API 通过 `structured_result` 提供稳定的商品 ID 和评分结构。修改代码后必须重启 API 和 Streamlit。
+先确认浏览器访问的是当前 Vue 端口而不是旧 Streamlit 端口；后端代码修改后重启 API，前端开发服务器通常会热更新。生产构建部署时需要重新执行 `npm.cmd run build`。
 
 ### 推荐没有图片
 

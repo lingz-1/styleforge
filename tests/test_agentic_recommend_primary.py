@@ -23,6 +23,7 @@ from urllib.request import Request
 
 
 from styleforge.models.task import TaskExecutionInput
+from styleforge.llm.client import LlmUnavailable
 from styleforge.agentic.graph.main import (
     _desired_features_for_request,
     _request_needs_outerwear,
@@ -149,6 +150,11 @@ _EVIDENCE: dict[str, Any] = {
 def _add_ops(*items: tuple[str, str]) -> dict[str, Any]:
     """One modify_outfit plan adding each (item_id, region) at the base layer."""
     return {
+        "intent": {
+            "message": "推荐穿搭",
+            "goal": "根据用户请求从现有衣橱组合完整穿搭",
+            "requirements": ["只使用当前衣橱真实单品", "生成完整可穿搭配"],
+        },
         "plan": {
             "ops": [
                 {
@@ -274,7 +280,16 @@ def _build_script() -> list[Any]:
     # One full harness run: coordinator → research (skill/web/weather once) →
     # evidence synthesizer → coordinator → stylist ×3 (candidate → critic each).
     script: list[Any] = [
-        {"decision_summary": "先研究场合", "goal": _GOAL, "next_agent": "RESEARCH"},
+        {
+            "decision_summary": "先研究场合",
+            "goal": _GOAL,
+            "intent": {
+                "message": "下周去北京看莫里哀音乐剧穿什么",
+                "goal": _GOAL,
+                "requirements": ["适合音乐剧场合", "结合北京天气"],
+            },
+            "next_agent": "RESEARCH",
+        },
         (
             {"decision_summary": "加载技能", "control": "CONTINUE"},
             [_RESEARCH_TOOLS[0]],
@@ -300,7 +315,6 @@ def _build_script() -> list[Any]:
                     {"decision_summary": "组合候选", "control": "CONTINUE"},
                     [{"name": "modify_outfit", "arguments": tool_args}],
                 ),
-                {"decision_summary": "完成", "control": "CANDIDATE_READY"},
                 {**_APPROVE, "dimension_scores": dimension_scores},
             ]
         )
@@ -319,7 +333,6 @@ def test_simple_recommend_uses_authoritative_route_and_skips_coordinator(
                 {"decision_summary": "组合一套日常搭配", "control": "CONTINUE"},
                 [{"name": "modify_outfit", "arguments": _CANDIDATE_TOOLS[0]}],
             ),
-            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
             {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
             {"evidence": []},
         ]
@@ -341,9 +354,12 @@ def test_simple_recommend_uses_authoritative_route_and_skips_coordinator(
     )
 
     assert payload["status"] == "completed"
-    assert payload["llm_call_count"] == 3
+    assert payload["llm_call_count"] == 2
+    assert payload["llm_usage"]["foreground"]["provider_attempts"] == 2
     assert len(payload["result"]["recommendations"]) == 1
     assert payload["agentic_outcome"]["task_type"] == "outfit_recommend"
+    assert payload["semantic_intent"]["message"] == "从衣柜里推荐一套日常穿搭"
+    assert payload["semantic_intent"]["goal"] == "根据用户请求从现有衣橱组合完整穿搭"
 
 
 def _seed_sparse_accessories(database_path: str) -> list[str]:
@@ -357,12 +373,26 @@ def _seed_sparse_accessories(database_path: str) -> list[str]:
     return [item.item_id for item in items]
 
 
-def test_sparse_wardrobe_recommend_is_infeasible_without_agent_calls(
+def test_sparse_wardrobe_recommend_parses_intent_then_returns_infeasible(
     db_dsn: str,
 ) -> None:
     initialize_database(db_dsn)
     _seed_sparse_accessories(db_dsn)
-    workflow = _workflow(db_dsn, FakeLlm([]))
+    llm = FakeLlm(
+        [
+            {
+                "decision_summary": "理解完整通勤搭配需求",
+                "goal": "只用现有衣物形成完整正式通勤搭配",
+                "intent": {
+                    "message": "只用衣柜推荐一套完整正式通勤搭配",
+                    "goal": "形成完整正式通勤搭配",
+                    "requirements": ["只使用现有衣物"],
+                },
+                "next_agent": "STYLIST",
+            }
+        ]
+    )
+    workflow = _workflow(db_dsn, llm)
 
     payload = workflow.execute(
         TaskExecutionInput(
@@ -375,15 +405,31 @@ def test_sparse_wardrobe_recommend_is_infeasible_without_agent_calls(
 
     assert payload["status"] == "infeasible"
     assert payload["result"]["recommendations"] == []
-    assert payload["llm_call_count"] == 0
+    assert payload["llm_call_count"] == 1
+    assert payload["semantic_intent"]["goal"] == "形成完整正式通勤搭配"
 
 
-def test_sparse_wardrobe_modify_is_infeasible_without_agent_calls(
+def test_sparse_wardrobe_modify_parses_intent_then_returns_infeasible(
     db_dsn: str,
 ) -> None:
     initialize_database(db_dsn)
     item_ids = _seed_sparse_accessories(db_dsn)
-    workflow = _workflow(db_dsn, FakeLlm([]))
+    llm = FakeLlm(
+        [
+            {
+                "decision_summary": "理解完整通勤修改需求",
+                "goal": "把当前配饰扩展为完整正式通勤搭配",
+                "intent": {
+                    "message": "把当前包和戒指改成完整正式通勤搭配，只用已有衣物",
+                    "goal": "扩展为完整正式通勤搭配",
+                    "requirements": ["只使用已有衣物"],
+                },
+                "next_agent": "STYLIST",
+            },
+            {"evidence": []},
+        ]
+    )
+    workflow = _workflow(db_dsn, llm)
 
     payload = workflow.execute(
         TaskExecutionInput(
@@ -397,7 +443,8 @@ def test_sparse_wardrobe_modify_is_infeasible_without_agent_calls(
 
     assert payload["status"] == "infeasible"
     assert payload["result"]["alternatives"] == []
-    assert payload["llm_call_count"] == 0
+    assert payload["llm_call_count"] == 1
+    assert payload["semantic_intent"]["goal"] == "扩展为完整正式通勤搭配"
 
 
 def test_coordinator_cannot_misroute_recommend_to_extension(db_dsn: str) -> None:
@@ -408,13 +455,17 @@ def test_coordinator_cannot_misroute_recommend_to_extension(db_dsn: str) -> None
             {
                 "decision_summary": "错误地准备交给扩展任务",
                 "goal": "生成婚礼穿搭",
+                "intent": {
+                    "message": "今天去北京参加婚礼，推荐一套穿搭",
+                    "goal": "生成婚礼穿搭",
+                    "requirements": ["适合婚礼"],
+                },
                 "next_agent": "EXTENSION",
             },
             (
                 {"decision_summary": "组合婚礼穿搭", "control": "CONTINUE"},
                 [{"name": "modify_outfit", "arguments": _CANDIDATE_TOOLS[0]}],
             ),
-            {"decision_summary": "提交", "control": "CANDIDATE_READY"},
             {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
             {"evidence": []},
         ]
@@ -436,12 +487,12 @@ def test_coordinator_cannot_misroute_recommend_to_extension(db_dsn: str) -> None
     )
 
     assert payload["status"] == "completed"
-    assert payload["llm_call_count"] == 4
+    assert payload["llm_call_count"] == 3
     assert payload["agentic_outcome"]["handoff_result"].trace_summary["agent"] == "stylist"
     assert not payload["agentic_outcome"].get("extension_validation_failures")
 
 
-def test_empty_stylist_protocol_failure_recovers_grounded_candidate(
+def test_partial_fast_candidate_recovers_grounded_candidate(
     db_dsn: str,
 ) -> None:
     initialize_database(db_dsn)
@@ -458,7 +509,7 @@ def test_empty_stylist_protocol_failure_recovers_grounded_candidate(
                     }
                 ],
             ),
-            *([{"control": "CONTINUE"}] * 12),
+            *([LlmUnavailable("temporary provider failure")] * 6),
             {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
             {"evidence": []},
         ]
@@ -475,7 +526,7 @@ def test_empty_stylist_protocol_failure_recovers_grounded_candidate(
     )
 
     assert payload["status"] == "completed"
-    assert payload["llm_call_count"] == 14
+    assert payload["llm_call_count"] == 8
     recommendation = payload["result"]["recommendations"][0]
     assert recommendation["acceptance_status"] == "DEGRADED_ACCEPTED"
     assert {"one_piece", "footwear", "accessory"} <= set(
@@ -507,7 +558,6 @@ def test_severe_critic_intent_mismatch_rebuilds_from_grounded_features(
                 {"decision_summary": "组合了错误场景", "control": "CONTINUE"},
                 [{"name": "modify_outfit", "arguments": _CANDIDATE_TOOLS[0]}],
             ),
-            {"decision_summary": "提交", "control": "CANDIDATE_READY"},
             severe_reject,
             {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
             {"evidence": []},
@@ -525,7 +575,7 @@ def test_severe_critic_intent_mismatch_rebuilds_from_grounded_features(
     )
 
     assert payload["status"] == "completed"
-    assert payload["llm_call_count"] == 4
+    assert payload["llm_call_count"] == 3
     recommendation = payload["result"]["recommendations"][0]
     assert {"dress-1", "wedding-shoes", "accessory-1"} <= set(
         recommendation["item_ids"]
@@ -571,7 +621,6 @@ def test_explicit_feature_gate_recovers_comfortable_client_outfit(
                 {"decision_summary": "先给普通方案", "control": "CONTINUE"},
                 [{"name": "modify_outfit", "arguments": _CANDIDATE_TOOLS[0]}],
             ),
-            {"decision_summary": "提交", "control": "CANDIDATE_READY"},
             {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
             {"evidence": []},
         ]
@@ -595,8 +644,8 @@ def test_explicit_feature_gate_recovers_comfortable_client_outfit(
     recommendation = payload["result"]["recommendations"][0]
     assert payload["status"] == "completed"
     assert "standing-shoes" in recommendation["item_ids"]
-    assert "features=comfortable,formal" not in llm.calls[2]["system"]
-    assert "features=comfortable,formal" in llm.calls[2]["user"]
+    assert "features=comfortable,formal" not in llm.calls[1]["system"]
+    assert "features=comfortable,formal" in llm.calls[1]["user"]
 
 
 def test_indoor_basketball_with_time_skips_unneeded_research(db_dsn: str) -> None:
@@ -627,7 +676,6 @@ def test_indoor_basketball_with_time_skips_unneeded_research(db_dsn: str) -> Non
                 {"decision_summary": "组合篮球穿搭", "control": "CONTINUE"},
                 [{"name": "modify_outfit", "arguments": sport_plan}],
             ),
-            {"decision_summary": "提交", "control": "CANDIDATE_READY"},
             {**_APPROVE, "dimension_scores": _CRITIC_SCORES[0]},
             {"evidence": []},
         ]
@@ -651,13 +699,28 @@ def test_indoor_basketball_with_time_skips_unneeded_research(db_dsn: str) -> Non
     assert payload["status"] == "completed"
     assert payload["result"]["environment_context"] == {}
     assert payload["agentic_outcome"].get("research_evidence") is None
-    assert payload["llm_call_count"] == 3
+    assert payload["llm_call_count"] == 2
 
 
-def test_unknown_latin_travel_target_clarifies_without_agent_calls(db_dsn: str) -> None:
+def test_unknown_latin_travel_target_clarifies_after_llm_semantics(db_dsn: str) -> None:
     initialize_database(db_dsn)
     _seed(db_dsn)
-    llm = FakeLlm([])
+    llm = FakeLlm(
+        [
+            {
+                "decision_summary": "目的地无法可靠识别",
+                "control": "NEED_USER",
+                "intent": {
+                    "message": "下半年去 piacon 怎么穿搭？",
+                    "goal": "获得旅行穿搭建议",
+                    "requirements": ["目的地为 piacon"],
+                },
+                "clarification": {
+                    "question": "piacon 具体指哪个城市、地点或活动？"
+                },
+            }
+        ]
+    )
     workflow = _workflow(db_dsn, llm)
 
     payload = workflow.execute(
@@ -670,8 +733,8 @@ def test_unknown_latin_travel_target_clarifies_without_agent_calls(db_dsn: str) 
     )
 
     assert payload["status"] == "needs_clarification"
-    assert payload["llm_call_count"] == 0
-    assert llm.call_count == 0
+    assert payload["llm_call_count"] == 1
+    assert llm.call_count == 1
     assert "piacon" in payload["result"]["clarification_question"]
 
 
@@ -694,8 +757,8 @@ def test_recommend_agentic_primary_returns_three_diverse_outfits(
     assert payload["task_type"] == TaskType.OUTFIT_RECOMMEND.value
     assert payload["selected_subgraph"] == "agentic_harness"
     assert payload["status"] == "completed"
-    # 2 coordinator + 4 research + 1 synthesizer + 6 stylist + 3 critic = 16.
-    assert payload["llm_call_count"] == 16
+    # 2 coordinator + 4 research + 1 synthesizer + 3 stylist + 3 critic = 13.
+    assert payload["llm_call_count"] == 13
     result = payload["result"]
     assert result["status"] == "completed"
     assert result["schema_version"] == "styleforge.outfit-recommend-result.v1"

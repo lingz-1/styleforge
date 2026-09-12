@@ -211,6 +211,14 @@ class PromptAssembler:
                 f"任务类型：{context.task_type}\n"
                 "该类型已由工作流确定，不得改派到其他任务类型。"
             )
+        if context.auto_submit_after_modify:
+            sections.append(
+                "【候选生成快速路径】\n"
+                "本轮必须在第一次 modify_outfit 调用中同时提交 intent 与 plan。"
+                "【本轮预取候选】已有合适真实 id 时，首轮直接修改，禁止先调用 "
+                "search_wardrobe 重复确认；只有候选确实不足时才搜索。工具成功后会自动"
+                "进入环境校验和 Critic，无需另发 CANDIDATE_READY。"
+            )
         if view.enabled("plan") and context.plan is not None:
             sections.append(_format_plan(context.plan))
         if view.enabled("task_state") and context.task_state is not None:
@@ -231,6 +239,8 @@ class PromptAssembler:
                 sections.append(draft_section)
         if view.enabled("environment_facts") and context.environment_facts is not None:
             sections.append(_format_facts(context.environment_facts))
+        if view.enabled("user_intent") and context.user_intent is not None:
+            sections.append(_format_user_intent(context.user_intent))
         # C-layer tail order (H3a): thread → memories → grounding, so the
         # grounding decision is the last thing the model reads before the turn.
         if view.enabled("thread_context") and context.thread_context:
@@ -557,6 +567,15 @@ def _format_facts(facts: Any) -> str:
         # A count-level capability index (~300-500 chars), never the 262 KB item
         # dump. Concrete ids come from the search_wardrobe tool (see stylist.md).
         lines.append(format_wardrobe_index(facts.wardrobe_summary))
+    if getattr(facts, "request_candidates", None):
+        lines.append("【本轮预取候选】")
+        for item in facts.request_candidates:
+            attributes = "/".join(
+                value for value in (item.item_type, item.color) if value
+            )
+            features = "、".join(list(item.features or [])[:6])
+            suffix = f"；特征：{features}" if features else ""
+            lines.append(f"- [{item.item_id}] {item.name}（{attributes or '未分类'}{suffix}）")
     if facts.weather:
         lines.append(f"天气快照：{json.dumps(facts.weather, ensure_ascii=False)}")
     if facts.selected_item is not None:
@@ -569,6 +588,15 @@ def _format_facts(facts: Any) -> str:
     # memory_profile is deliberately NOT dumped here: the full preference list
     # (~12 K chars) polluted the prompt. Layered Top-K recall replaces it via the
     # memories channel (PreferenceRetriever, H3a-4).
+    return "\n".join(lines)
+
+
+def _format_user_intent(intent: Any) -> str:
+    lines = ["【统一语义理解】"]
+    if intent.goal:
+        lines.append(f"目标：{intent.goal}")
+    if intent.requirements:
+        lines.append("要求：" + "；".join(intent.requirements))
     return "\n".join(lines)
 
 

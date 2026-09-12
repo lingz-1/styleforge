@@ -16,6 +16,7 @@ Verifies the frozen Turn/Thread ≠ User Profile contract:
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event, Lock
 
 from styleforge.agentic.context.grounding import (
     pending_field_for_question,
@@ -168,6 +169,37 @@ def test_extract_memories_still_runs_for_durable_request(monkeypatch) -> None:
     workflow.database_path = "sqlite:///:memory:"
     workflow._extract_memories(TaskExecutionInput(user_id="u", request="我平时不穿运动鞋"))
     assert len(calls) == 1
+
+
+def test_deferred_memory_extraction_does_not_block_response_path(monkeypatch) -> None:
+    started = Event()
+    release = Event()
+
+    def extract(*_args):
+        started.set()
+        release.wait(timeout=2.0)
+        return {"evidence": []}
+
+    monkeypatch.setattr(
+        "styleforge.workflow.task_workflow.extract_language_evidence",
+        extract,
+    )
+    workflow = MultiTaskWorkflow.__new__(MultiTaskWorkflow)
+    workflow.llm_client = object()
+    workflow.database_path = "sqlite:///:memory:"
+    workflow.defer_memory_extraction = True
+    workflow._memory_futures = set()
+    workflow._memory_futures_lock = Lock()
+
+    scheduled = workflow._process_memories(
+        TaskExecutionInput(user_id="u", request="我平时不穿运动鞋")
+    )
+
+    assert scheduled is True
+    assert started.wait(timeout=1.0) is True
+    assert workflow.wait_for_background_tasks(timeout=0.01) is False
+    release.set()
+    assert workflow.wait_for_background_tasks(timeout=2.0) is True
 
 
 # ── ThreadGroundingView + pending_field ─────────────────────────────────────

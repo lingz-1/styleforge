@@ -321,8 +321,10 @@ def test_research_instruction_carries_search_before_ask() -> None:
 
 def test_stylist_instruction_carries_capability_index_wardrobe() -> None:
     text = (_INSTRUCTIONS / "stylist.md").read_text(encoding="utf-8")
-    assert "衣橱只给能力索引" in text
-    assert "没有单品 id" in text
+    assert "衣橱能力索引与本轮候选" in text
+    assert "本轮预取候选" in text
+    assert "绝不臆造 id" in text
+    assert "推荐模式第一次检索" in text
     assert "衣橱信息已就绪" not in text
     assert "全部单品 id" not in text
 

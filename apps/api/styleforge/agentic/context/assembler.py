@@ -17,7 +17,7 @@ from typing import Any
 
 from styleforge.agentic.agentic_contract import ResearchEvidence, TaskState
 from styleforge.agentic.context.visibility import AgentContextView, ContextVisibilityPolicy
-from styleforge.models.agentic_contract import EnvironmentFacts, PlanState
+from styleforge.models.agentic_contract import EnvironmentFacts, PlanState, UserIntent
 
 
 @dataclass
@@ -35,6 +35,8 @@ class PromptContext:
     task_state: TaskState | None = None
     plan: PlanState | None = None
     environment_facts: EnvironmentFacts | None = None
+    user_intent: UserIntent | None = None
+    auto_submit_after_modify: bool = False
     research_evidence: ResearchEvidence | None = None
     # the Research subgraph's private RawEvidenceBuffer — only the Evidence
     # Synthesizer's view enables this (frozen #18/#22).
@@ -86,6 +88,10 @@ class ContextAssembler:
             context.plan = state.get("plan")
         if view.environment_facts:
             context.environment_facts = state.get("environment_facts")
+        if view.user_intent:
+            context.user_intent = state.get("user_intent")
+        if agent == "stylist":
+            context.auto_submit_after_modify = bool(state.get("auto_submit_after_modify"))
         if view.research_evidence:
             context.research_evidence = state.get("research_evidence")
         if view.raw_evidence:

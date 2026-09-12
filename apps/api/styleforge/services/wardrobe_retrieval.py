@@ -108,6 +108,19 @@ def _keyword_scores(query: str, items: Sequence[Any]) -> dict[str, float]:
         for term in re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]{2,}", query.lower())
         if term not in _GENERIC_TERMS
     }
+    # Chinese requests are often unsegmented full sentences. Preserve known
+    # garment/attribute phrases as independent terms so keyword-only fallback
+    # can still match "帮我换双运动鞋" against an item named "白色运动鞋".
+    terms.update(
+        alias
+        for alias, _expansion, _slot in _SLOT_ALIASES
+        if not alias.isascii() and alias in query
+    )
+    terms.update(
+        alias
+        for alias, _expansion in _ATTRIBUTE_ALIASES
+        if not alias.isascii() and alias in query
+    )
     if not terms:
         return {}
     scores: dict[str, float] = {}
@@ -129,6 +142,83 @@ def _keyword_scores(query: str, items: Sequence[Any]) -> dict[str, float]:
         if score > 0:
             scores[str(item.item_id)] = score
     return scores
+
+
+def keyword_retrieve_wardrobe(
+    query: str,
+    wardrobe_items: Sequence[Any],
+    *,
+    limit: int,
+) -> WardrobeRetrievalOutcome:
+    """Lightweight request-scoped retrieval without loading vector models."""
+    normalized = (query or "").strip()[:200]
+    cap = max(1, limit)
+    expanded, requested_slots = _expanded_query(normalized)
+    pool = list(wardrobe_items)
+    if requested_slots:
+        pool = [
+            item
+            for item in pool
+            if base_slot(infer_slot(str(item.item_type))) in requested_slots
+        ]
+    scores = _keyword_scores(expanded, pool)
+    if scores:
+        ranked = sorted(scores, key=lambda item_id: (-scores[item_id], item_id))
+    elif requested_slots:
+        # A named slot is still a grounded retrieval constraint. Returning its
+        # bounded contents lets the Agent make the semantic choice instead of
+        # forcing another model/tool round solely because metadata is sparse.
+        ranked = sorted(str(item.item_id) for item in pool)
+    else:
+        ranked = []
+    return WardrobeRetrievalOutcome(
+        item_ids=ranked[:cap],
+        matched=len(ranked),
+        mode="keyword",
+        semantic_available=False,
+        final_scores={item_id: scores.get(item_id, 0.0) for item_id in ranked},
+        diagnostics={
+            "pool_count": len(pool),
+            "keyword_scored": len(scores),
+            "semantic_scored": 0,
+            "requested_slots": sorted(requested_slots),
+            "errors": [],
+        },
+    )
+
+
+def balanced_keyword_candidate_ids(
+    query: str,
+    wardrobe_items: Sequence[Any],
+    *,
+    per_slot: int = 2,
+    limit: int = 16,
+) -> list[str]:
+    """Build a small slot-balanced candidate slate without vector inference."""
+    expanded, _ = _expanded_query((query or "").strip()[:200])
+    scores = _keyword_scores(expanded, wardrobe_items)
+    slot_order = (
+        "top",
+        "bottom",
+        "one_piece",
+        "footwear",
+        "outerwear",
+        "bag",
+        "accessory",
+    )
+    by_slot: dict[str, list[Any]] = {slot: [] for slot in slot_order}
+    for item in wardrobe_items:
+        slot = base_slot(infer_slot(str(getattr(item, "item_type", ""))))
+        if slot in by_slot:
+            by_slot[slot].append(item)
+    selected: list[str] = []
+    for slot in slot_order:
+        ranked = sorted(
+            by_slot[slot],
+            key=lambda item: (-scores.get(str(item.item_id), 0.0), str(item.item_id)),
+        )
+        selected.extend(str(item.item_id) for item in ranked[: max(1, per_slot)])
+    return list(dict.fromkeys(selected))[: max(1, limit)]
 
 
 class WardrobeHybridRetriever:

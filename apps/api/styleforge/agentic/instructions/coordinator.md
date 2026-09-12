@@ -17,12 +17,19 @@
 {
   "decision_summary": "本回合做了什么决策（一句话，会进入轨迹记录）",
   "goal": "最终目标（一句话）",
+  "intent": {
+    "message": "用户原话",
+    "goal": "语义目标",
+    "requirements": ["必须满足、保留、避免或允许替代的要求"]
+  },
   "next_agent": "RESEARCH | STYLIST | EXTENSION | null",
   "need_plan_update": false,
   "need_user": false,
   "clarification": {"question": "...", "reason": "..."}
 }
 ```
+
+`intent` 是统一语义合同，每次决策都必须给出。不要按关键词机械改写：结合原话、会话锚点和已知事实理解真正目标；`message` 保留用户原话，`requirements` 逐条记录约束。后续 Agent 会读取它，不再各自重新猜一套含义。
 
 ## 状态机（三态互斥，严格遵循）
 

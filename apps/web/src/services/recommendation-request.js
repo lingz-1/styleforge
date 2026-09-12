@@ -12,7 +12,18 @@ export function requestedResultCount(request) {
     if (pattern.test(text)) return count
   }
   if (/(?:几|多)\s*(?:套|身|组|个(?:方案|搭配))/.test(text)) return 3
-  return 1
+  return 3
+}
+
+export function formatElapsedDuration(durationMs) {
+  const milliseconds = Number(durationMs)
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return ''
+  if (milliseconds < 1000) return '< 1 秒'
+  const seconds = milliseconds / 1000
+  if (seconds < 60) return `${seconds.toFixed(1)} 秒`
+  const minutes = Math.floor(seconds / 60)
+  const remaining = Math.floor(seconds % 60)
+  return `${minutes} 分 ${remaining} 秒`
 }
 
 export function isRequestTimeout(error) {

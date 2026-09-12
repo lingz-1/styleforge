@@ -35,11 +35,12 @@ def make_evidence_synthesizer(runtime: AgentRuntime):
             raise ContextLimitError(
                 f"context guard: {guard.status}: {'；'.join(guard.warnings)}"
             )
-        payload, _ = runtime.llm.chat_json(
-            system=guard.bundle.system_text,
-            user=guard.bundle.model_user_message,
-            json_schema=_SYNTH_SCHEMA,
-        )
+        with runtime.llm_scope(AGENT_RESEARCH_SYNTHESIZER):
+            payload, _ = runtime.llm.chat_json(
+                system=guard.bundle.system_text,
+                user=guard.bundle.model_user_message,
+                json_schema=_SYNTH_SCHEMA,
+            )
         return {"research_evidence": ResearchEvidence.model_validate(payload)}
 
     return synthesize_node

@@ -59,6 +59,11 @@ def _modify_task() -> TaskExecutionInput:
 _REPLACE_SHOES = {
     "name": "modify_outfit",
     "arguments": {
+        "intent": {
+            "message": "这双鞋不喜欢，帮我换双舒适的运动鞋",
+            "goal": "把当前皮鞋换成更舒适的运动鞋",
+            "requirements": ["保留其他单品", "替换鞋履", "新鞋应舒适且为运动鞋"],
+        },
         "plan": {
             "ops": [
                 {
@@ -79,11 +84,8 @@ def test_execute_agentic_primary_end_to_end(db_dsn: str) -> None:
     _seed(db_dsn)
     llm = FakeLlm(
         [
-            # coordinator → STYLIST handoff
-            {"decision_summary": "换运动鞋", "goal": "把皮鞋换成舒适的运动鞋", "next_agent": "STYLIST"},
-            # stylist: one modify_outfit call, then the candidate is ready
+            # Stylist understands the request and acts in the same model turn.
             ({"decision_summary": "替换皮鞋", "control": "CONTINUE"}, [_REPLACE_SHOES]),
-            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
             # Main-Graph critic (chat_json)
             {"approved": True, "issues": [], "feedback": "已换成白色运动鞋"},
             # memory extraction (chat_json, outside the harness proxy)
@@ -105,8 +107,22 @@ def test_execute_agentic_primary_end_to_end(db_dsn: str) -> None:
     assert result["locked_item_ids"] == ["top-1", "bottom-1", "coat-1"]
     assert result["target_slot"] == "footwear"
     assert result["current_outfit_id"].startswith("outfit-1-mod-")
-    # coordinator + stylist(continue) + stylist(ready) + critic = 4.
-    assert payload["llm_call_count"] == 4
+    # One Stylist semantic/action turn + one Critic turn.
+    assert payload["llm_call_count"] == 2
+    intent = payload["agentic_outcome"]["user_intent"]
+    assert intent.message == _modify_task().request
+    assert intent.requirements == [
+        "保留其他单品", "替换鞋履", "新鞋应舒适且为运动鞋",
+    ]
+    assert "【本轮预取候选】" in llm.calls[0]["user"]
+    assert "[sneakers-1]" in llm.calls[0]["user"]
+    assert "【候选生成快速路径】" in llm.calls[0]["user"]
+    modify_schema = next(
+        tool.input_schema for tool in llm.calls[0]["tools"]
+        if tool.name == "modify_outfit"
+    )
+    assert set(modify_schema["required"]) == {"intent", "plan"}
+    assert payload["semantic_intent"] == intent.model_dump(mode="json")
     # Single outcome rides agentic_outcome as a dict; the StageCandidate entry
     # carries the final item set.
     assert payload["agentic_outcome"]["status"] == "done"
@@ -132,7 +148,6 @@ def test_execute_agentic_primary_ask_user_not_committed(db_dsn: str) -> None:
     _seed(db_dsn)
     llm = FakeLlm(
         [
-            {"decision_summary": "换双皮鞋", "goal": "换双皮鞋", "next_agent": "STYLIST"},
             {
                 "decision_summary": "缺合适的鞋",
                 "control": "NEED_USER",
@@ -155,7 +170,7 @@ def test_execute_agentic_primary_ask_user_not_committed(db_dsn: str) -> None:
     assert payload["agentic_outcome"]["clarification_question"] == (
         "衣橱里没有黑色皮鞋，换棕色短靴可以吗？"
     )
-    assert payload["llm_call_count"] == 2  # coordinator + stylist
+    assert payload["llm_call_count"] == 1
     with database_session(db_dsn) as connection:
         rows = connection.execute("SELECT COUNT(*) AS n FROM candidate_outfits").fetchone()
     assert rows["n"] == 0
@@ -169,9 +184,7 @@ def test_execute_agentic_primary_without_web_capability_still_completes(db_dsn: 
     _seed(db_dsn)
     llm = FakeLlm(
         [
-            {"decision_summary": "换运动鞋", "goal": "把皮鞋换成舒适的运动鞋", "next_agent": "STYLIST"},
             ({"decision_summary": "替换皮鞋", "control": "CONTINUE"}, [_REPLACE_SHOES]),
-            {"decision_summary": "完成", "control": "CANDIDATE_READY"},
             {"approved": True, "issues": [], "feedback": "已换成白色运动鞋"},
             {"evidence": []},
         ]
@@ -181,7 +194,7 @@ def test_execute_agentic_primary_without_web_capability_still_completes(db_dsn: 
     payload = workflow.execute(_modify_task())
 
     assert payload["status"] == "completed"
-    assert payload["llm_call_count"] == 4
+    assert payload["llm_call_count"] == 2
     assert payload["agentic_outcome"]["status"] == "done"
     assert payload["result"]["alternatives"][0]["item_ids"] == [
         "top-1", "bottom-1", "coat-1", "sneakers-1",
@@ -201,7 +214,6 @@ def test_execute_agentic_primary_tool_then_ask_user_not_committed(db_dsn: str) -
     _seed(db_dsn)
     llm = FakeLlm(
         [
-            {"decision_summary": "换双皮鞋", "goal": "换双皮鞋", "next_agent": "STYLIST"},
             (
                 {"decision_summary": "找鞋", "control": "CONTINUE"},
                 [{"name": "search_wardrobe", "arguments": {"query": "皮鞋"}}],
@@ -225,7 +237,7 @@ def test_execute_agentic_primary_tool_then_ask_user_not_committed(db_dsn: str) -
     assert payload["result"]["message"] == "衣橱里没有黑色皮鞋，换棕色短靴可以吗？"
     assert payload["result"]["alternatives"] == []
     assert payload["agentic_outcome"]["status"] == "needs_clarification"
-    assert payload["llm_call_count"] == 3  # coordinator + stylist search + stylist ask
+    assert payload["llm_call_count"] == 2  # stylist search + stylist ask
     with database_session(db_dsn) as connection:
         rows = connection.execute("SELECT COUNT(*) AS n FROM candidate_outfits").fetchone()
     assert rows["n"] == 0

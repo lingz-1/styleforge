@@ -735,6 +735,7 @@ def _workflow_executor(
             ),
             skills_root=settings.knowledge_root / "skills",
             default_location=settings.weather_default_location,
+            defer_memory_extraction=configured_llm,
         )
     except Exception:
         drop_schema()
@@ -1218,6 +1219,7 @@ def _workflow_executor(
         return payload
 
     def cleanup() -> None:
+        workflow.wait_for_background_tasks(timeout=30.0)
         drop_schema()
 
     return execute, cleanup

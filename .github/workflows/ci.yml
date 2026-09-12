@@ -8,6 +8,9 @@ concurrency:
   group: styleforge-ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
@@ -38,14 +41,14 @@ jobs:
       STYLEFORGE_WEB_SEARCH_ENABLED: "false"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.10"
           cache: pip
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: npm
@@ -92,13 +95,17 @@ jobs:
         working-directory: apps/web
         run: npm ci
 
+      - name: Test web
+        working-directory: apps/web
+        run: npm test
+
       - name: Build web
         working-directory: apps/web
         run: npm run build
 
       - name: Upload failure diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ci-diagnostics
           path: .ci-tmp/
