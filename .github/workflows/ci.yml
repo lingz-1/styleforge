@@ -65,9 +65,33 @@ jobs:
           python -m ruff check apps/api/styleforge tests evals scripts --output-format=github
 
       - name: Pytest
+        shell: bash
         run: |
           mkdir -p .ci-tmp
-          python -m pytest -q --basetemp .ci-tmp/pytest
+          set -o pipefail
+          python -m pytest -q --tb=short --basetemp .ci-tmp/pytest 2>&1 \
+            | tee .ci-tmp/pytest.log
+
+      - name: Report Pytest failure
+        if: failure()
+        shell: bash
+        run: |
+          if [[ -s .ci-tmp/pytest.log ]]; then
+            missing_modules="$(sed -nE \
+              "s/.*ModuleNotFoundError: No module named '([A-Za-z0-9_.-]+)'.*/\1/p" \
+              .ci-tmp/pytest.log | sort -u | paste -sd, -)"
+            collection_files="$(sed -nE \
+              's/^ERROR collecting ([A-Za-z0-9_./-]+).*/\1/p' \
+              .ci-tmp/pytest.log | sort -u | paste -sd, -)"
+            message="Pytest exited unsuccessfully."
+            if [[ -n "$missing_modules" ]]; then
+              message="$message Missing modules: $missing_modules."
+            fi
+            if [[ -n "$collection_files" ]]; then
+              message="$message Collection errors: $collection_files."
+            fi
+            echo "::error title=Pytest failure::$message"
+          fi
 
       - name: Lightweight wardrobe quality benchmark
         run: >-
