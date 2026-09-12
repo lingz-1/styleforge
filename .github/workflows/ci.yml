@@ -57,7 +57,7 @@ jobs:
       - name: Install Python dependencies
         run: >-
           python -m pip install -e
-          ".[api,agents,llm-openai,db,cache,rag,images,orders,dev]"
+          ".[api,agents,llm-openai,db,cache,rag,images,orders,mcp,dev]"
 
       - name: Ruff
         run: |

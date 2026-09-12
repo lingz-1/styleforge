@@ -6,7 +6,7 @@ __pycache__/
 .env
 
 artifacts/
-data/
+/data/
 *.db
 *.db-shm
 *.db-wal
