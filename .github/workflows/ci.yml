@@ -60,7 +60,9 @@ jobs:
           ".[api,agents,llm-openai,db,cache,rag,images,orders,dev]"
 
       - name: Ruff
-        run: python -m ruff check apps/api/styleforge tests evals scripts
+        run: |
+          python -m ruff --version
+          python -m ruff check apps/api/styleforge tests evals scripts --output-format=github
 
       - name: Pytest
         run: |
